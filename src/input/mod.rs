@@ -3,6 +3,7 @@ use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
 pub mod keymap;
 pub mod mouse;
 pub(crate) mod panes;
+pub(crate) mod sequence_navigation;
 
 fn text_history_modifier() -> KeyModifiers {
     if cfg!(target_os = "macos") {

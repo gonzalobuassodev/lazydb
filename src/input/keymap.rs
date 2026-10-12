@@ -94,6 +94,7 @@ pub struct Keymap {
     generation: u64,
     sequence_selected: usize,
     sequence_timeout: Duration,
+    sequence_width: u16,
     bindings: crate::config::KeyBindings,
 }
 
@@ -156,6 +157,7 @@ impl Keymap {
             generation: 0,
             sequence_selected: 0,
             sequence_timeout,
+            sequence_width: 0,
             bindings,
         }
     }
@@ -1378,6 +1380,7 @@ impl Keymap {
                         Some(&self.bindings),
                     )
                 };
+                let chooser_available = app.focus != Focus::Editor;
                 if pane_sequence
                     && let Some(Pending::PaneSequence { events, count }) =
                         self.pending.as_ref().map(|pending| &pending.pending)
@@ -1426,15 +1429,25 @@ impl Keymap {
                     }
                 }
                 match event.code {
-                    KeyCode::Up if !shortcuts.is_empty() => {
-                        self.sequence_selected = self
-                            .sequence_selected
-                            .checked_sub(1)
-                            .unwrap_or(shortcuts.len() - 1);
-                        return None;
-                    }
-                    KeyCode::Down if !shortcuts.is_empty() => {
-                        self.sequence_selected = (self.sequence_selected + 1) % shortcuts.len();
+                    KeyCode::Left | KeyCode::Right | KeyCode::Up | KeyCode::Down
+                        if chooser_available
+                            && event.modifiers.is_empty()
+                            && !shortcuts.is_empty() =>
+                    {
+                        let layout = crate::input::sequence_navigation::Layout::new(
+                            self.sequence_width,
+                            shortcuts.len(),
+                        );
+                        let direction = match event.code {
+                            KeyCode::Left => crate::input::sequence_navigation::Direction::Left,
+                            KeyCode::Right => crate::input::sequence_navigation::Direction::Right,
+                            KeyCode::Up => crate::input::sequence_navigation::Direction::Up,
+                            KeyCode::Down => crate::input::sequence_navigation::Direction::Down,
+                            _ => unreachable!(),
+                        };
+                        self.sequence_selected = layout
+                            .move_selection(self.sequence_selected, direction)
+                            .unwrap_or(self.sequence_selected);
                         return None;
                     }
                     KeyCode::Enter => {
@@ -2768,6 +2781,10 @@ impl Keymap {
     pub fn clear_pending(&mut self) {
         self.pending = None;
         self.sequence_selected = 0;
+    }
+
+    pub(crate) fn set_sequence_width(&mut self, width: u16) {
+        self.sequence_width = width;
     }
 
     fn observe_state(&mut self, app: &App) {
@@ -5755,6 +5772,72 @@ mod tests {
             Some(Action::ExecuteHelpShortcut(_))
         ));
         assert!(keymap.sequence_state(&app, Instant::now()).is_none());
+    }
+
+    #[test]
+    fn four_way_shortcut_navigation_tracks_the_visible_column_layout() {
+        let mut app = App::new(Vec::new());
+        app.focus = Focus::Results;
+        let mut keymap = Keymap::default();
+        keymap.set_sequence_width(120);
+        keymap.map(key(KeyCode::Char(' ')), &app);
+        let count = crate::help::prefix_shortcuts_with_bindings(
+            crate::help::shortcut_context(&app),
+            crate::help::shortcut_capabilities(&app),
+            crate::help::ShortcutPrefix::Leader,
+            Some(&app.key_bindings),
+        )
+        .len();
+        let layout = crate::input::sequence_navigation::Layout::new(120, count);
+        assert!(layout.columns() > 1);
+
+        assert_eq!(keymap.map(key(KeyCode::Right), &app), None);
+        assert_eq!(
+            keymap
+                .sequence_state(&app, Instant::now())
+                .unwrap()
+                .selected,
+            layout.rows()
+        );
+        assert_eq!(keymap.map(key(KeyCode::Down), &app), None);
+        let selected = keymap
+            .sequence_state(&app, Instant::now())
+            .unwrap()
+            .selected;
+        assert_eq!(selected, layout.rows() + 1);
+        assert_eq!(keymap.map(key(KeyCode::Left), &app), None);
+        assert_eq!(
+            keymap
+                .sequence_state(&app, Instant::now())
+                .unwrap()
+                .selected,
+            1
+        );
+        assert_eq!(app.focus, Focus::Results);
+
+        let mut narrow_keymap = Keymap::default();
+        narrow_keymap.map(key(KeyCode::Char(' ')), &app);
+        assert_eq!(narrow_keymap.map(key(KeyCode::Left), &app), None);
+        assert_eq!(
+            narrow_keymap
+                .sequence_state(&app, Instant::now())
+                .unwrap()
+                .selected,
+            0,
+            "left at a single-column boundary must not steal focus"
+        );
+
+        let expected = crate::help::prefix_shortcuts_with_bindings(
+            crate::help::shortcut_context(&app),
+            crate::help::shortcut_capabilities(&app),
+            crate::help::ShortcutPrefix::Leader,
+            Some(&app.key_bindings),
+        )[1]
+        .id;
+        assert_eq!(
+            keymap.map(key(KeyCode::Enter), &app),
+            Some(Action::ExecuteHelpShortcut(expected))
+        );
     }
 
     #[test]

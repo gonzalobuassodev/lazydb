@@ -6500,6 +6500,7 @@ pub async fn run_tui(cli: Cli) -> Result<RunOutcome> {
             .key_bindings()
             .context("failed to parse application keybindings")?,
     );
+    keymap.set_sequence_width(terminal.size()?.width);
     let mut ui_state = UiState::with_motion(settings.ui.motion);
     let mut rendered_sequence: Option<crate::input::keymap::KeySequenceState> = None;
     let mut ticker = interval(Duration::from_millis(33));
@@ -6773,6 +6774,7 @@ pub async fn run_tui(cli: Cli) -> Result<RunOutcome> {
             }
 
             if redraw && !app.should_quit {
+                keymap.set_sequence_width(terminal.size()?.width);
                 let sequence = keymap.sequence_state(&app, std::time::Instant::now());
                 rendered_sequence = sequence.clone();
                 sync_ddl_editor_viewport(&mut app, &mut runtime, terminal.size()?);

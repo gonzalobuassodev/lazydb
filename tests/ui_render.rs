@@ -3682,7 +3682,7 @@ fn pending_prefix_opens_floating_shortcut_window() {
     let output = (0..36)
         .flat_map(|y| (0..120).map(move |x| buffer[(x, y)].symbol()))
         .collect::<String>();
-    assert!(output.contains("Space  Up/Down select  Enter run  Esc/Ctrl-C cancel"));
+    assert!(output.contains("Space  Arrows select  Enter run  Esc/Ctrl-C cancel"));
     assert!(output.contains("focus Explorer"));
 }
 
@@ -3728,7 +3728,7 @@ fn counted_pending_prefix_keeps_count_in_footer_label() {
         .flat_map(|y| (0..120).map(move |x| buffer[(x, y)].symbol()))
         .collect::<String>();
     assert!(output.contains("10 Ctrl-w"));
-    assert!(output.contains("Up/Down select"));
+    assert!(output.contains("Arrows select"));
     assert!(output.contains("Enter run"));
 }
 

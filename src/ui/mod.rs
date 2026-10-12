@@ -1413,6 +1413,77 @@ mod theme_render_tests {
             "custom theme background was not rendered"
         );
     }
+
+    #[test]
+    fn sequence_navigation_highlight_matches_the_visual_grid_column() {
+        let mut app = App::new(Vec::new());
+        app.focus = crate::model::workspace::Focus::Results;
+        let shortcuts = crate::help::prefix_shortcuts_with_bindings(
+            crate::help::shortcut_context(&app),
+            crate::help::shortcut_capabilities(&app),
+            crate::help::ShortcutPrefix::Leader,
+            Some(&app.key_bindings),
+        );
+        let count = shortcuts.len();
+        assert!(count > 1);
+        for (width, height) in [(59, 36), (60, 36), (99, 36), (100, 36), (120, 36)] {
+            let shortcuts = crate::help::prefix_shortcuts_with_bindings(
+                crate::help::shortcut_context(&app),
+                crate::help::shortcut_capabilities(&app),
+                crate::help::ShortcutPrefix::Leader,
+                Some(&app.key_bindings),
+            );
+            let layout = crate::input::sequence_navigation::Layout::new(width, shortcuts.len());
+            let selected = layout.index((layout.columns() - 1).min(1), 0).unwrap();
+            let sequence = crate::input::keymap::KeySequenceState {
+                prefix: crate::help::ShortcutPrefix::Leader,
+                display: "Space".into(),
+                selected,
+                candidates: Vec::new(),
+            };
+            let mut terminal = Terminal::new(TestBackend::new(width, height)).unwrap();
+            let mut state = UiState::new();
+            terminal
+                .draw(|frame| {
+                    super::render_with_state_using_icons_and_sequence(
+                        frame,
+                        &app,
+                        &mut state,
+                        IconSet::default(),
+                        Some(&sequence),
+                    )
+                })
+                .unwrap();
+            let buffer: &Buffer = terminal.backend().buffer();
+            let theme = Theme::default();
+            let popup_height = (layout.rows() as u16 + 2).min(height.saturating_sub(4));
+            let popup_y = height.saturating_sub(2).saturating_sub(popup_height);
+            let inner_height = popup_height.saturating_sub(2) as usize;
+            let row = selected % layout.rows();
+            let scroll = if inner_height == 0 || row < inner_height {
+                0
+            } else {
+                row + 1 - inner_height
+            };
+            let visible_row = row.saturating_sub(scroll) as u16;
+            let y = popup_y + 1 + visible_row;
+            let column = selected / layout.rows();
+            let column_width = (width - 4) / layout.columns() as u16;
+            let x = 2 + column as u16 * column_width;
+            assert_eq!(
+                buffer[(x, y)].bg,
+                theme.selection,
+                "width={width}, height={height}"
+            );
+            if column > 0 {
+                assert_ne!(
+                    buffer[(2, y)].bg,
+                    theme.selection,
+                    "width={width}, height={height}"
+                );
+            }
+        }
+    }
 }
 
 fn render_key_sequence_popup(
@@ -1463,7 +1534,7 @@ fn render_key_sequence_popup(
                     .border_type(BorderType::Rounded)
                     .border_style(Style::new().fg(theme.accent))
                     .title(format!(
-                        " {}  Up/Down select  Enter run  Esc cancel ",
+                        " {}  Arrows select  Enter run  Esc cancel ",
                         sequence.display
                     )),
             ),
@@ -1481,14 +1552,9 @@ fn render_key_sequence_popup(
         return;
     }
 
-    let columns = if area.width >= 100 {
-        3
-    } else if area.width >= 60 {
-        2
-    } else {
-        1
-    };
-    let rows = shortcuts.len().div_ceil(columns);
+    let layout = crate::input::sequence_navigation::Layout::new(area.width, shortcuts.len());
+    let columns = layout.columns();
+    let rows = layout.rows();
     let height = (rows as u16)
         .saturating_add(2)
         .min(area.height.saturating_sub(2));
@@ -1507,7 +1573,9 @@ fn render_key_sequence_popup(
     for row in 0..rows {
         let mut spans = Vec::new();
         for column in 0..columns {
-            let index = column * rows + row;
+            let Some(index) = layout.index(column, row) else {
+                continue;
+            };
             let Some(shortcut) = shortcuts.get(index) else {
                 continue;
             };
@@ -1560,7 +1628,7 @@ fn render_key_sequence_popup(
                     .border_type(BorderType::Rounded)
                     .border_style(Style::new().fg(theme.accent))
                     .title(format!(
-                        " {}  Up/Down select  Enter run  Esc/Ctrl-C cancel ",
+                        " {}  Arrows select  Enter run  Esc/Ctrl-C cancel ",
                         sequence.display
                     )),
             ),
