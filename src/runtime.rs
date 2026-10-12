@@ -6658,6 +6658,7 @@ pub async fn run_tui(cli: Cli) -> Result<RunOutcome> {
                             let is_move = matches!(mouse.kind, MouseEventKind::Moved);
                             if !is_move {
                                 keymap.clear_pending();
+                                app.cancel_editor_leader();
                             }
                             let was_pane_drag = ui_state.pane_resize_drag.borrow().is_some();
                             let before_text_gesture = *ui_state.text_gesture.borrow();
@@ -6688,6 +6689,7 @@ pub async fn run_tui(cli: Cli) -> Result<RunOutcome> {
                             let now = std::time::Instant::now();
                             let before = keymap.sequence_state(&app, now);
                             keymap.clear_pending();
+                            app.cancel_editor_leader();
                             let had_text_gesture = ui_state.text_gesture.borrow().is_some();
                             ui_state.cancel_mouse_gesture();
                             let cancelled_pane_drag = ui_state.pane_resize_drag.borrow_mut().take().is_some();
@@ -6707,6 +6709,7 @@ pub async fn run_tui(cli: Cli) -> Result<RunOutcome> {
                             let now = std::time::Instant::now();
                             let before = keymap.sequence_state(&app, now);
                             keymap.clear_pending();
+                            app.cancel_editor_leader();
                             ui_state.cancel_mouse_gesture();
                             ui_state.pane_resize_drag.borrow_mut().take();
                             ui_state.grid_scrollbar_drag.borrow_mut().take();

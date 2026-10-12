@@ -3662,7 +3662,7 @@ fn pending_prefix_opens_floating_shortcut_window() {
         keymap.map(KeyEvent::new(KeyCode::Char(' '), KeyModifiers::NONE), &app),
         None
     );
-    let now = std::time::Instant::now();
+    let now = std::time::Instant::now() + std::time::Duration::from_secs(60);
     let sequence = keymap.sequence_state(&app, now).unwrap();
     let backend = TestBackend::new(120, 36);
     let mut terminal = Terminal::new(backend).unwrap();

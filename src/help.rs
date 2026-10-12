@@ -805,6 +805,7 @@ const fn footer_priority(id: HelpShortcutId) -> Option<u8> {
 pub enum ShortcutPrefix {
     Leader,
     EditorLeader,
+    EditorLeaderTransaction,
     Window,
     WindowCount(u32),
     Goto,
@@ -822,6 +823,7 @@ impl ShortcutPrefix {
         match self {
             Self::Leader => "Space ",
             Self::EditorLeader => "Space ",
+            Self::EditorLeaderTransaction => "Space t",
             Self::Window => "Ctrl-w ",
             Self::WindowCount(_) => "",
             Self::Goto => "g",
@@ -3574,6 +3576,11 @@ pub(crate) fn prefix_shortcuts_with_bindings(
                     || context == ShortcutContext::EditorNormal
                         && prefix == ShortcutPrefix::EditorLeader
                         && shortcut.id == HelpShortcutId::OpenNotificationHistoryLeader
+                    || prefix == ShortcutPrefix::EditorLeaderTransaction
+                        && matches!(
+                            shortcut.id,
+                            HelpShortcutId::ToggleTransaction | HelpShortcutId::TransactionControl
+                        )
                     || matches!(prefix, ShortcutPrefix::WindowCount(_))
                         && shortcut.prefix == Some(ShortcutPrefix::Window))
                 && !(context == ShortcutContext::EditorNormal
@@ -3588,7 +3595,13 @@ pub(crate) fn prefix_shortcuts_with_bindings(
     });
     candidates
         .into_iter()
-        .map(|(_, shortcut)| shortcut)
+        .map(|(_, mut shortcut)| {
+            if prefix == ShortcutPrefix::EditorLeaderTransaction {
+                shortcut.prefix = Some(prefix);
+                shortcut.suffix = shortcut.suffix.and_then(|suffix| suffix.strip_prefix('t'));
+            }
+            shortcut
+        })
         .collect()
 }
 
@@ -3624,6 +3637,11 @@ fn prefix_rank(prefix: ShortcutPrefix, id: HelpShortcutId) -> Option<u8> {
             Id::OpenSqlEditors => 8,
             Id::FocusExplorerLeader => 9,
             Id::OpenNotificationHistoryLeader => 10,
+            _ => return None,
+        },
+        ShortcutPrefix::EditorLeaderTransaction => match id {
+            Id::ToggleTransaction => 1,
+            Id::TransactionControl => 2,
             _ => return None,
         },
         ShortcutPrefix::Window | ShortcutPrefix::WindowCount(_) => match id {
@@ -4182,6 +4200,30 @@ mod tests {
             assert!(!shortcut.contexts.is_empty());
             assert!(!shortcut.sequence.trim().is_empty());
             assert!(!shortcut.description.trim().is_empty());
+        }
+    }
+
+    #[test]
+    fn leader_menu_transaction_candidates_only_show_the_remaining_key() {
+        let rows = prefix_shortcuts(
+            ShortcutContext::EditorNormal,
+            ShortcutCapabilities {
+                active_sql_console: true,
+                ..ShortcutCapabilities::default()
+            },
+            ShortcutPrefix::EditorLeaderTransaction,
+        );
+        assert_eq!(rows.len(), 2);
+        for (row, id, suffix) in [
+            (&rows[0], HelpShortcutId::ToggleTransaction, "t"),
+            (&rows[1], HelpShortcutId::TransactionControl, "c"),
+        ] {
+            assert_eq!(row.id, id);
+            assert_eq!(row.suffix, Some(suffix));
+            assert_eq!(
+                format!("{}{suffix}", row.prefix.unwrap().display()),
+                row.sequence
+            );
         }
     }
 

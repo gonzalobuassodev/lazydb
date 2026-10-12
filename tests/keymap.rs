@@ -27,6 +27,171 @@ fn control(code: KeyCode) -> KeyEvent {
     KeyEvent::new(code, KeyModifiers::CONTROL)
 }
 
+fn press_leader_menu(keymap: &mut Keymap, app: &mut App, event: KeyEvent) {
+    if let Some(action) = keymap.map(event, app) {
+        app.update(action);
+    }
+}
+
+#[test]
+fn leader_menu_editor_cancel_clears_the_hidden_binding() {
+    for cancel in [key(KeyCode::Esc), control(KeyCode::Char('c'))] {
+        for nested in [false, true] {
+            let mut app = App::new(Vec::new());
+            app.update(Action::EditorKey(key(KeyCode::Esc)));
+            let mut keymap = Keymap::default();
+            press_leader_menu(&mut keymap, &mut app, key(KeyCode::Char(' ')));
+            if nested {
+                press_leader_menu(&mut keymap, &mut app, key(KeyCode::Char('t')));
+            }
+            press_leader_menu(&mut keymap, &mut app, cancel);
+            assert!(
+                keymap
+                    .sequence_state(&app, std::time::Instant::now())
+                    .is_none()
+            );
+            press_leader_menu(&mut keymap, &mut app, key(KeyCode::Char('s')));
+            assert_eq!(app.overlay, None, "cancel={cancel:?}, nested={nested}");
+        }
+    }
+}
+
+#[test]
+fn leader_menu_editor_repeated_prefix_keeps_the_hint_and_binding() {
+    let mut app = App::new(Vec::new());
+    app.update(Action::EditorKey(key(KeyCode::Esc)));
+    let mut keymap = Keymap::default();
+    press_leader_menu(&mut keymap, &mut app, key(KeyCode::Char(' ')));
+    let mut repeat = key(KeyCode::Char(' '));
+    repeat.kind = KeyEventKind::Repeat;
+    press_leader_menu(&mut keymap, &mut app, repeat);
+    assert!(
+        keymap
+            .sequence_state(&app, std::time::Instant::now())
+            .is_some()
+    );
+    press_leader_menu(&mut keymap, &mut app, key(KeyCode::Char('s')));
+    assert!(matches!(app.overlay, Some(Overlay::SqlEditorList(_))));
+}
+
+#[test]
+fn leader_menu_editor_other_keys_do_not_leave_a_hidden_binding() {
+    for event in [
+        key(KeyCode::Left),
+        key(KeyCode::F(3)),
+        control(KeyCode::Char('r')),
+        KeyEvent::new(KeyCode::Char('s'), KeyModifiers::SUPER),
+    ] {
+        let mut app = App::new(Vec::new());
+        app.update(Action::EditorKey(key(KeyCode::Esc)));
+        let mut keymap = Keymap::default();
+        press_leader_menu(&mut keymap, &mut app, key(KeyCode::Char(' ')));
+        press_leader_menu(&mut keymap, &mut app, event);
+        assert!(
+            keymap
+                .sequence_state(&app, std::time::Instant::now())
+                .is_none()
+        );
+        press_leader_menu(&mut keymap, &mut app, key(KeyCode::Char('s')));
+        assert_eq!(app.overlay, None, "event={event:?}");
+    }
+}
+
+#[test]
+fn leader_menu_editor_alias_and_visual_cancel_preserve_the_mode() {
+    for visual in [false, true] {
+        for prefix in [' ', '\\'] {
+            let mut app = App::new(Vec::new());
+            app.update(Action::EditorKey(key(KeyCode::Esc)));
+            if visual {
+                app.update(Action::EditorKey(key(KeyCode::Char('v'))));
+            }
+            let mode = app.active_editor_mode();
+            let mut keymap = Keymap::default();
+            press_leader_menu(&mut keymap, &mut app, key(KeyCode::Char(prefix)));
+            let later = std::time::Instant::now() + std::time::Duration::from_secs(60);
+            assert!(keymap.sequence_state(&app, later).is_some());
+            press_leader_menu(&mut keymap, &mut app, key(KeyCode::Esc));
+            assert!(keymap.sequence_state(&app, later).is_none());
+            assert_eq!(app.active_editor_mode(), mode);
+            if visual {
+                app.update(Action::EditorKey(key(KeyCode::Esc)));
+            }
+            press_leader_menu(&mut keymap, &mut app, key(KeyCode::Char('s')));
+            assert_eq!(app.overlay, None);
+        }
+    }
+}
+
+#[test]
+fn leader_menu_enter_clears_the_editor_binding_after_execution() {
+    let mut app = App::new(Vec::new());
+    app.update(Action::EditorKey(key(KeyCode::Esc)));
+    let mut keymap = Keymap::default();
+    press_leader_menu(&mut keymap, &mut app, key(KeyCode::Char(' ')));
+    press_leader_menu(&mut keymap, &mut app, key(KeyCode::Enter));
+    assert!(
+        keymap
+            .sequence_state(&app, std::time::Instant::now())
+            .is_none()
+    );
+    assert_eq!(app.overlay, None);
+    press_leader_menu(&mut keymap, &mut app, key(KeyCode::Char('s')));
+    assert_eq!(app.overlay, None);
+}
+
+#[test]
+fn leader_menu_editor_context_change_does_not_restore_the_hidden_binding() {
+    for change in ["focus", "tab", "overlay", "omni"] {
+        let mut app = App::new(Vec::new());
+        app.update(Action::EditorKey(key(KeyCode::Esc)));
+        let mut keymap = Keymap::default();
+        press_leader_menu(&mut keymap, &mut app, key(KeyCode::Char(' ')));
+        let original = app.active_tab;
+        match change {
+            "focus" => {
+                app.update(Action::Focus(Focus::Results));
+                assert!(
+                    keymap
+                        .sequence_state(&app, std::time::Instant::now())
+                        .is_none()
+                );
+                app.update(Action::Focus(Focus::Editor));
+            }
+            "tab" => {
+                app.update(Action::NewConsole);
+                assert!(
+                    keymap
+                        .sequence_state(&app, std::time::Instant::now())
+                        .is_none()
+                );
+                app.update(Action::ActivateTab(original));
+            }
+            "overlay" => {
+                app.update(Action::ShowHelp);
+                assert!(
+                    keymap
+                        .sequence_state(&app, std::time::Instant::now())
+                        .is_none()
+                );
+                app.update(Action::DismissOverlay);
+            }
+            "omni" => {
+                app.update(Action::OpenOmni);
+                assert!(
+                    keymap
+                        .sequence_state(&app, std::time::Instant::now())
+                        .is_none()
+                );
+                app.update(Action::OmniDismiss);
+            }
+            _ => unreachable!(),
+        }
+        press_leader_menu(&mut keymap, &mut app, key(KeyCode::Char('s')));
+        assert_eq!(app.overlay, None, "change={change}");
+    }
+}
+
 #[test]
 fn pane_binding_cmd_ctrl_h_moves_focus_from_sql_modes() {
     let dir = tempfile::tempdir().unwrap();

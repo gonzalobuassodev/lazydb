@@ -462,11 +462,15 @@ impl EditorWorkspace {
         } else if crate::input::is_text_undo(event) {
             EditorKey::Undo
         } else if event.modifiers.contains(KeyModifiers::SUPER) {
+            self.cancel_leader_bindings();
             return Ok(());
         } else if event.modifiers.contains(KeyModifiers::CONTROL) {
             match event.code {
                 KeyCode::Char(c) => EditorKey::Control(c),
-                _ => return Ok(()),
+                _ => {
+                    self.cancel_leader_bindings();
+                    return Ok(());
+                }
             }
         } else {
             match event.code {
@@ -484,7 +488,10 @@ impl EditorWorkspace {
                 KeyCode::Tab => EditorKey::Tab,
                 KeyCode::PageUp => EditorKey::PageUp,
                 KeyCode::PageDown => EditorKey::PageDown,
-                _ => return Ok(()),
+                _ => {
+                    self.cancel_leader_bindings();
+                    return Ok(());
+                }
             }
         };
         self.press(id, key)
@@ -686,6 +693,18 @@ impl EditorWorkspace {
             || session.pending_count.is_some()
             || !session.current_sequence.is_empty()
             || session.keys.get_cursor_indicator().is_some()
+    }
+
+    pub(crate) fn cancel_leader_bindings(&mut self) {
+        for session in self.sessions.values_mut() {
+            if matches!(
+                session.pending_binding,
+                Some(PendingBinding::Leader | PendingBinding::LeaderTransaction)
+            ) {
+                session.pending_binding = None;
+                session.current_sequence.clear();
+            }
+        }
     }
 
     pub(crate) fn reset_interaction(&mut self, id: Uuid) -> Result<(), EditorError> {
@@ -2253,6 +2272,20 @@ impl EditorWorkspace {
         }
         if self.prompt.is_some() {
             return Ok(());
+        }
+        if matches!(key, EditorKey::Escape | EditorKey::Control('c'))
+            && self.sessions.get(&id).is_some_and(|session| {
+                matches!(
+                    session.pending_binding,
+                    Some(PendingBinding::Leader | PendingBinding::LeaderTransaction)
+                )
+            })
+        {
+            self.cancel_leader_bindings();
+            return Ok(());
+        }
+        if !matches!(key, EditorKey::Character(_)) {
+            self.cancel_leader_bindings();
         }
         if read_only
             && matches!(

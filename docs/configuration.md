@@ -193,8 +193,11 @@ Additional Results commands are `results-open-record`, `results-copy-cell`,
 `results-first-column`, and `results-last-column`.
 Results row alignment is configured by `results-align-middle`,
 `results-align-top`, and `results-align-bottom`.
-A key sequence remains active for 750 milliseconds by default, and
-`sequence_timeout_ms` must be at least `1`.
+An ordinary adjacent-key sequence remains active for 750 milliseconds by
+default, and `sequence_timeout_ms` must be at least `1`. This timeout does not
+apply to Space/Leader menus, including the editor's transaction submenu and `\`
+alias. These menus remain active until execution, cancellation, or an input
+context change; increasing the timeout is unnecessary to read Leader hints.
 
 | Option | Values / argument | Default | Description |
 | --- | --- | --- | --- |

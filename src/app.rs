@@ -4063,14 +4063,45 @@ impl App {
     }
 
     pub fn update(&mut self, action: Action) -> Vec<Command> {
+        let leader_context = (
+            self.focus,
+            self.tabs.get(self.active_tab).map(WorkspaceTab::id),
+            self.active_editor_mode(),
+            self.overlay.as_ref().map(std::mem::discriminant),
+            self.omni.is_some(),
+        );
+        if matches!(
+            action,
+            Action::ExecuteHelpShortcut(_)
+                | Action::ToggleTerminalSelection
+                | Action::SmartResizePane(_)
+                | Action::SmartTogglePaneMaximized
+        ) {
+            self.cancel_editor_leader();
+        }
         let review_session = self.review_preview_session_id();
         let commands = self.update_inner(action);
+        if leader_context
+            != (
+                self.focus,
+                self.tabs.get(self.active_tab).map(WorkspaceTab::id),
+                self.active_editor_mode(),
+                self.overlay.as_ref().map(std::mem::discriminant),
+                self.omni.is_some(),
+            )
+        {
+            self.cancel_editor_leader();
+        }
         if let Some(id) = review_session
             && self.review_preview_session_id() != Some(id)
         {
             self.editor.close_console(id);
         }
         commands
+    }
+
+    pub(crate) fn cancel_editor_leader(&mut self) {
+        self.editor.cancel_leader_bindings();
     }
 
     fn update_inner(&mut self, action: Action) -> Vec<Command> {

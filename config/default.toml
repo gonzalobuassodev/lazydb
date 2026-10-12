@@ -64,6 +64,8 @@ check_interval_hours = 24
 # steps with spaces (for example Ctrl-w h). Arrays replace defaults; use [] to
 # disable a configurable binding, or list both values to keep both bindings.
 preset = "vim"
+# Ordinary adjacent-key sequences expire after this interval. Space/Leader
+# menus remain active until execution, cancellation, or a context change.
 sequence_timeout_ms = 750
 
 [keybindings.global]

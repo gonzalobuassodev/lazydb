@@ -13,7 +13,8 @@ core Vim/modalkit bindings remain fixed. These grouped tables accept single key
 events or space-separated key sequences. They are organized as `global`,
 `leader`, `panes`, `explorer`, `results`, `editor`, and `overlays` according to
 the active panel. `keybindings.sequence_timeout_ms`
-configures the timeout for adjacent-key sequences used by this preset.
+configures the timeout for ordinary adjacent-key sequences used by this preset.
+Space/Leader menus do not expire while idle.
 
 Pane commands accept configurable modifier chords and key sequences. Modifier
 aliases include `Cmd`/`Command`/`Super`, `Ctrl`/`Control`, `Alt`/`Option`,
@@ -158,8 +159,15 @@ does not confirm it.
 ## Conventions
 
 `Ctrl-x` means hold Control while pressing `x`; `Shift-F5` means hold Shift
-while pressing F5. Adjacent-key sequences have a 750 ms timeout. A prefix that
-expires is discarded. A numeric count is displayed while it is being entered;
+while pressing F5. Ordinary adjacent-key sequences have a configurable 750 ms
+timeout. A prefix that expires is discarded. Space/Leader menus, including the
+editor's `Space t` transaction submenu and `\` Leader alias, remain visible
+until a command executes, `Esc` or `Ctrl-c` cancels, or the input context changes.
+Use `Up`/`Down` to select a menu command and `Enter` to execute it. Changing
+pane, editor mode, tab, or overlay cancels the menu. Mouse interaction, paste,
+terminal resize, and terminal focus changes also cancel it. Cancellation clears
+both the hint and the editor's pending Leader binding.
+A numeric count is displayed while it is being entered;
 after `Ctrl-w`, it applies to pane resize operations.
 
 The application Leader is used by Explorer and Results, but not by the SQL

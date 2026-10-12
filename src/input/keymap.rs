@@ -35,6 +35,39 @@ enum Pending {
     CatalogColumnDelete { selected_column: usize },
 }
 
+impl Pending {
+    fn is_leader(&self) -> bool {
+        matches!(
+            self,
+            Self::Leader | Self::EditorLeader | Self::LeaderTransaction | Self::RedisPreviewLeader
+        )
+    }
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+struct KeymapContext {
+    focus: Focus,
+    editor_mode: EditorMode,
+    tab_id: Uuid,
+    overlay: Option<std::mem::Discriminant<Overlay>>,
+    omni: bool,
+}
+
+impl KeymapContext {
+    fn from_app(app: &App) -> Self {
+        Self {
+            focus: app.focus,
+            editor_mode: app.active_editor_mode(),
+            tab_id: app
+                .tabs
+                .get(app.active_tab)
+                .map_or(Uuid::nil(), |tab| tab.id()),
+            overlay: app.overlay.as_ref().map(std::mem::discriminant),
+            omni: app.omni.is_some(),
+        }
+    }
+}
+
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct KeySequenceState {
     pub prefix: crate::help::ShortcutPrefix,
@@ -57,7 +90,7 @@ struct PendingState {
 #[derive(Debug)]
 pub struct Keymap {
     pending: Option<PendingState>,
-    observed: Option<(Focus, EditorMode, Uuid)>,
+    observed: Option<KeymapContext>,
     generation: u64,
     sequence_selected: usize,
     sequence_timeout: Duration,
@@ -311,9 +344,14 @@ impl Keymap {
             && (event.code == KeyCode::Esc
                 || event.modifiers == KeyModifiers::CONTROL && event.code == KeyCode::Char('c'))
         {
-            self.pending = None;
-            self.sequence_selected = 0;
-            return None;
+            let editor_leader = self.pending.as_ref().is_some_and(|pending| {
+                matches!(
+                    pending.pending,
+                    Pending::EditorLeader | Pending::LeaderTransaction
+                )
+            });
+            self.clear_pending();
+            return editor_leader.then_some(Action::EditorKey(event));
         }
         if self.bindings.matches("quit", event) {
             return Some(Action::Quit);
@@ -1248,6 +1286,13 @@ impl Keymap {
             return Some(Action::EditorKey(event));
         }
         if app.focus == Focus::Editor && (is_text_undo(event) || is_text_redo(event)) {
+            if self
+                .pending
+                .as_ref()
+                .is_some_and(|pending| pending.pending.is_leader())
+            {
+                self.clear_pending();
+            }
             return Some(Action::EditorKey(event));
         }
         if app.active_console_opt().is_some_and(|tab| {
@@ -1449,19 +1494,6 @@ impl Keymap {
                 }
                 return None;
             }
-            if pending == Pending::EditorLeader {
-                if app.focus == Focus::Editor {
-                    return Some(Action::EditorKey(event));
-                }
-                self.continue_pending(
-                    pending,
-                    focus,
-                    editor_mode,
-                    tab_id,
-                    matches!(app.overlay, Some(Overlay::RecordView(_))),
-                );
-                return Some(Action::EditorKey(event));
-            }
             if matches!(pending, Pending::CatalogColumnDelete { .. }) {
                 if event.kind == KeyEventKind::Press
                     && event.modifiers.is_empty()
@@ -1471,20 +1503,23 @@ impl Keymap {
                 }
                 return map_catalog_editor(event, app);
             }
-            if pending == Pending::EditorLeader {
-                if app.focus == Focus::Editor {
-                    if event.modifiers.is_empty() && event.code == KeyCode::Char('t') {
-                        self.continue_pending(
-                            Pending::LeaderTransaction,
-                            focus,
-                            editor_mode,
-                            tab_id,
-                            matches!(app.overlay, Some(Overlay::RecordView(_))),
-                        );
-                    }
-                    return Some(Action::EditorKey(event));
+            if matches!(pending, Pending::EditorLeader | Pending::LeaderTransaction) {
+                if event.modifiers.is_empty() && matches!(event.code, KeyCode::Char(' ' | '\\')) {
+                    self.set_pending(Pending::EditorLeader, app);
+                } else if pending == Pending::EditorLeader
+                    && editor_mode == EditorMode::Normal
+                    && event.modifiers.is_empty()
+                    && event.code == KeyCode::Char('t')
+                {
+                    self.continue_pending(
+                        Pending::LeaderTransaction,
+                        focus,
+                        editor_mode,
+                        tab_id,
+                        matches!(app.overlay, Some(Overlay::RecordView(_))),
+                    );
                 }
-                return None;
+                return Some(Action::EditorKey(event));
             }
             if let Pending::WindowCount { count } = pending {
                 if event.modifiers.is_empty()
@@ -1521,20 +1556,6 @@ impl Keymap {
                     matches!(app.overlay, Some(Overlay::RecordView(_))),
                 );
                 return None;
-            }
-            if pending == Pending::LeaderTransaction
-                && event.modifiers.is_empty()
-                && event.code == KeyCode::Char('c')
-            {
-                return Some(Action::OpenTransactionControl);
-            }
-            if pending == Pending::LeaderTransaction
-                && event.modifiers.is_empty()
-                && event.code == KeyCode::Char('t')
-            {
-                self.pending = None;
-                self.sequence_selected = 0;
-                return Some(Action::EditorKey(event));
             }
             if matches!(pending, Pending::Window { .. }) {
                 if event.kind == KeyEventKind::Press
@@ -2143,11 +2164,21 @@ impl Keymap {
             return Some(action);
         }
 
+        if app.focus == Focus::Editor
+            && matches!(
+                app.active_editor_mode(),
+                EditorMode::Normal
+                    | EditorMode::VisualChar
+                    | EditorMode::VisualLine
+                    | EditorMode::VisualBlock
+            )
+            && matches!(event.code, KeyCode::Char(' ' | '\\'))
+            && event.modifiers.is_empty()
+        {
+            self.set_pending(Pending::EditorLeader, app);
+            return Some(Action::EditorKey(event));
+        }
         if app.focus == Focus::Editor && app.active_editor_mode() == EditorMode::Normal {
-            if event.code == KeyCode::Char(' ') && event.modifiers.is_empty() {
-                self.set_pending(Pending::EditorLeader, app);
-                return Some(Action::EditorKey(event));
-            }
             match event.code {
                 KeyCode::Char('[') => {
                     self.set_pending(Pending::Previous, app);
@@ -2740,22 +2771,11 @@ impl Keymap {
     }
 
     fn observe_state(&mut self, app: &App) {
-        let state = (
-            app.focus,
-            app.active_editor_mode(),
-            app.tabs
-                .get(app.active_tab)
-                .map_or(Uuid::nil(), |tab| tab.id()),
-        );
+        let state = KeymapContext::from_app(app);
         if self.observed != Some(state) {
             if self.observed.is_some() {
                 self.generation = self.generation.wrapping_add(1);
-                if !matches!(
-                    self.pending.as_ref().map(|pending| &pending.pending),
-                    Some(Pending::EditorLeader)
-                ) {
-                    self.pending = None;
-                }
+                self.clear_pending();
             }
             self.observed = Some(state);
         }
@@ -3569,10 +3589,10 @@ fn pending_is_valid(
     generation: u64,
     sequence_timeout: Duration,
 ) -> bool {
-    let editor_leader = matches!(pending.pending, Pending::EditorLeader);
-    let base_valid = now.saturating_duration_since(pending.started_at) < sequence_timeout
-        && (editor_leader || pending.focus == app.focus)
-        && (editor_leader || pending.editor_mode == app.active_editor_mode())
+    let base_valid = (pending.pending.is_leader()
+        || now.saturating_duration_since(pending.started_at) < sequence_timeout)
+        && pending.focus == app.focus
+        && pending.editor_mode == app.active_editor_mode()
         && pending.generation == generation
         && pending.record_view_active == matches!(app.overlay, Some(Overlay::RecordView(_)))
         && app
@@ -3617,7 +3637,9 @@ fn pending_display(pending: Pending) -> Option<(crate::help::ShortcutPrefix, Str
         Pending::RecordViewGoto => Some((ShortcutPrefix::RecordViewGoto, "g".into())),
         Pending::ExplorerAlign => Some((ShortcutPrefix::ExplorerAlign, "z".into())),
         Pending::Goto => Some((ShortcutPrefix::Goto, "g".into())),
-        Pending::LeaderTransaction => Some((ShortcutPrefix::EditorLeader, "Space t".into())),
+        Pending::LeaderTransaction => {
+            Some((ShortcutPrefix::EditorLeaderTransaction, "Space t".into()))
+        }
         Pending::RedisPreviewLeader => Some((ShortcutPrefix::Leader, "Space".into())),
         Pending::CatalogColumnDelete { .. } => None,
     }
@@ -5561,6 +5583,59 @@ mod tests {
                 .prefix,
             crate::help::ShortcutPrefix::RecordViewGoto
         );
+    }
+
+    #[test]
+    fn leader_menu_survives_idle_and_executes_after_selection() {
+        for focus in [Focus::Explorer, Focus::Results] {
+            let mut app = App::new(Vec::new());
+            app.focus = focus;
+            let mut keymap = Keymap::default();
+            keymap.map(key(KeyCode::Char(' ')), &app);
+            let started = keymap.pending.as_ref().unwrap().started_at;
+            let later = started + Duration::from_secs(60);
+            assert!(!keymap.expire_pending(&app, later));
+            assert!(keymap.sequence_state(&app, later).is_some());
+            assert_eq!(keymap.map(key(KeyCode::Down), &app), None);
+            assert!(keymap.sequence_state(&app, later).is_some());
+            assert!(matches!(
+                keymap.map(key(KeyCode::Enter), &app),
+                Some(Action::ExecuteHelpShortcut(_))
+            ));
+            assert!(keymap.sequence_state(&app, later).is_none());
+
+            keymap.map(key(KeyCode::Char(' ')), &app);
+            keymap.pending.as_mut().unwrap().started_at = Instant::now() - Duration::from_secs(60);
+            assert_eq!(
+                keymap.map(key(KeyCode::Char('s')), &app),
+                Some(Action::OpenSqlEditorList)
+            );
+        }
+    }
+
+    #[test]
+    fn leader_menu_editor_transaction_survives_idle() {
+        let mut app = App::new(Vec::new());
+        app.update(Action::EditorKey(key(KeyCode::Esc)));
+        let mut keymap = Keymap::default();
+        for code in [KeyCode::Char(' '), KeyCode::Char('t')] {
+            let action = keymap.map(key(code), &app).unwrap();
+            app.update(action);
+            let later = Instant::now() + Duration::from_secs(60);
+            assert!(!keymap.expire_pending(&app, later));
+            let state = keymap.sequence_state(&app, later).unwrap();
+            assert_eq!(
+                state.display,
+                if code == KeyCode::Char('t') {
+                    "Space t"
+                } else {
+                    "Space"
+                }
+            );
+        }
+        let action = keymap.map(key(KeyCode::Char('c')), &app).unwrap();
+        app.update(action);
+        assert!(keymap.sequence_state(&app, Instant::now()).is_none());
     }
 
     #[test]
