@@ -18,6 +18,8 @@ use sha2::{Digest, Sha256};
 use thiserror::Error;
 use xz2::read::XzDecoder;
 
+mod cli_progress;
+
 const INSTALLATION_SCHEMA: u32 = 1;
 const CHANNEL_MANIFEST_SCHEMA: u32 = 1;
 const DEFAULT_CHANNEL_BASE_URL: &str = "https://lazydb.yelog.org/channels";
@@ -401,6 +403,35 @@ pub const UPDATE_STATUSES: [&str; 5] = [
 ];
 
 pub async fn run(args: crate::cli::UpdateArgs, _config: Option<PathBuf>) -> anyhow::Result<String> {
+    let mut progress = if args.json {
+        None
+    } else {
+        Some(cli_progress::CliProgress::start()?)
+    };
+    let mut installing = false;
+    let mut result = run_with_progress(&args, progress.as_ref(), &mut installing).await;
+    if let Some(progress) = &mut progress {
+        let cleanup = progress.finish();
+        if result.is_ok() {
+            result = result.and_then(|output| cleanup.map(|()| output).map_err(Into::into));
+        }
+    }
+    if args.json {
+        result
+    } else {
+        result.context(if installing {
+            "LazyDB update failed"
+        } else {
+            "Could not check for LazyDB updates"
+        })
+    }
+}
+
+async fn run_with_progress(
+    args: &crate::cli::UpdateArgs,
+    progress: Option<&cli_progress::CliProgress>,
+    installing: &mut bool,
+) -> anyhow::Result<String> {
     let paths = Some(crate::persistence::paths::AppPaths::discover()?);
     let source = SystemInstallationStateSource {
         path: paths
@@ -425,6 +456,10 @@ pub async fn run(args: crate::cli::UpdateArgs, _config: Option<PathBuf>) -> anyh
         && report.manager == InstallationManager::Native
         && report.status == "update_available"
     {
+        *installing = true;
+        if let Some(progress) = progress {
+            progress.available(&report)?;
+        }
         let state = source
             .state()?
             .ok_or_else(|| anyhow::anyhow!("native installation state is unavailable"))?;
@@ -434,11 +469,16 @@ pub async fn run(args: crate::cli::UpdateArgs, _config: Option<PathBuf>) -> anyh
             .await
             .map_err(anyhow::Error::msg)?;
         let lock = UpdateLock::acquire(&native_data_dir(&state)?)?;
-        let version = apply_native_update(
+        let version = apply_native_update_with_progress(
             &state,
             &target,
             &manifest,
             &SystemUpdateHttpClient::default(),
+            &|value| {
+                if let Some(progress) = progress {
+                    progress.progress(value);
+                }
+            },
         )
         .await?;
         drop(lock);
@@ -450,6 +490,12 @@ pub async fn run(args: crate::cli::UpdateArgs, _config: Option<PathBuf>) -> anyh
     }
     if args.json {
         return Ok(serde_json::to_string(&report)?);
+    }
+    if report.status == "error" {
+        anyhow::bail!(
+            "{}",
+            report.action.as_deref().unwrap_or("unknown update error")
+        );
     }
     Ok(format_update_report(
         &report,
@@ -1124,6 +1170,7 @@ fn native_data_dir(state: &InstallationState) -> anyhow::Result<PathBuf> {
         .to_owned())
 }
 
+#[cfg(test)]
 async fn apply_native_update<H: UpdateHttpClient + Sync>(
     state: &InstallationState,
     target: &str,
@@ -2509,14 +2556,31 @@ mod tests {
         let archive = archive_for("1.3.0", SUPPORTED_TARGETS[0], &archive_path);
         let digest = format!("{:x}", Sha256::digest(&archive));
         let manifest = update_manifest("1.3.0", digest);
-        let version = apply_native_update(
+        let progress = std::sync::Mutex::new(Vec::new());
+        let version = apply_native_update_with_progress(
             &state,
             SUPPORTED_TARGETS[0],
             &manifest,
             &FakeHttp { archive },
+            &|value| progress.lock().unwrap().push(value),
         )
         .await
         .unwrap();
+        let progress = progress.into_inner().unwrap();
+        assert_eq!(
+            progress.iter().map(|value| value.stage).collect::<Vec<_>>(),
+            vec![
+                UpdateStage::Preparing,
+                UpdateStage::Downloading,
+                UpdateStage::VerifyingChecksum,
+                UpdateStage::Extracting,
+                UpdateStage::VerifyingInstallation,
+                UpdateStage::Activating,
+                UpdateStage::Finishing,
+            ]
+        );
+        assert!(progress[1].downloaded_bytes > 0);
+        assert_eq!(progress[1].total_bytes, Some(progress[1].downloaded_bytes));
         assert_eq!(version, "1.3.0");
         assert!(old.exists());
         assert_eq!(

@@ -214,7 +214,12 @@ Ensure `$HOME/.local/bin` is in `PATH`. To upgrade a manually installed binary
 offline, download and verify the new archive, extract it, and repeat the `cp`
 step with the new versioned directory. Native script installations should use
 `lazydb update` when network access is available; package-manager installations
-must be upgraded by their owning package manager.
+must be upgraded by their owning package manager. The update command immediately
+shows the running version, then the check result, download progress, installation
+stages, and final outcome. Interactive terminals show a live progress bar when the
+download size is known; redirected output uses concise stage logs. Use
+`lazydb update --check` to check without installing, or add `--json` for the
+single-line machine-readable report.
 
 </details>
 
