@@ -1478,6 +1478,21 @@
 - [`3b57005`](https://github.com/yelog/lazydb/commit/3b57005558565b458d8c296e774a732691bc3490) fix(update): honor system proxies and preserve request errors
 - [`bc01be8`](https://github.com/yelog/lazydb/commit/bc01be88d9e0387adfe12bde63765a6284f045f8) test(runtime): drain pending app flow events
 
+## [0.1.9] - 2026-10-12
+
+### Added
+
+- Add four-way shortcut navigation for key sequences. ([d5f8f20](https://github.com/yelog/lazydb/commit/d5f8f203933fbd89431fad57d80a1b248aa4d38e))
+
+### Fixed
+
+- Keep leader menus active until a sequence completes or is cancelled. ([6d022f8](https://github.com/yelog/lazydb/commit/6d022f8be961f9b81d74022220cd942e3b39ec81))
+
+### Commits
+
+- feat(keymap): add four-way shortcut navigation ([d5f8f20](https://github.com/yelog/lazydb/commit/d5f8f203933fbd89431fad57d80a1b248aa4d38e))
+- fix(keymap): keep leader menus active until completion or cancellation ([6d022f8](https://github.com/yelog/lazydb/commit/6d022f8be961f9b81d74022220cd942e3b39ec81))
+
 ## Unreleased
 
 - Add persistent Explorer connection groups, group membership, and profile ordering.
