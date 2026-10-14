@@ -4334,6 +4334,109 @@ fn editing_explorer_find_treats_n_and_shift_n_as_query_text() {
 }
 
 #[test]
+fn editing_explorer_find_maps_ctrl_w_and_filters_other_modifiers() {
+    let mut app = App::new(Vec::new());
+    app.focus = Focus::Explorer;
+    app.explorer.open_find();
+    let mut keymap = Keymap::default();
+
+    assert_eq!(
+        keymap.map(control(KeyCode::Char('w')), &app),
+        Some(Action::ExplorerFindDeletePreviousWord)
+    );
+    assert_eq!(
+        keymap.map(key(KeyCode::Char('w')), &app),
+        Some(Action::ExplorerFindInsert('w'))
+    );
+    assert_eq!(
+        keymap.map(KeyEvent::new(KeyCode::Char('W'), KeyModifiers::SHIFT), &app),
+        Some(Action::ExplorerFindInsert('W'))
+    );
+    assert_eq!(
+        keymap.map(control(KeyCode::Char('u')), &app),
+        Some(Action::ExplorerFindClear)
+    );
+    assert_eq!(keymap.map(control(KeyCode::Char('r')), &app), None);
+    assert_eq!(
+        keymap.map(KeyEvent::new(KeyCode::Char('w'), KeyModifiers::ALT), &app),
+        None
+    );
+}
+
+#[test]
+fn editing_explorer_search_maps_ctrl_w_to_word_delete() {
+    let mut app = App::new(Vec::new());
+    app.focus = Focus::Explorer;
+    app.explorer.open_search(None, 1);
+    let mut keymap = Keymap::default();
+
+    assert_eq!(
+        keymap.map(control(KeyCode::Char('w')), &app),
+        Some(Action::ExplorerSearchDeletePreviousWord)
+    );
+    assert_eq!(
+        keymap.map(key(KeyCode::Char('w')), &app),
+        Some(Action::ExplorerSearchInsert('w'))
+    );
+    assert_eq!(
+        keymap.map(KeyEvent::new(KeyCode::Char('W'), KeyModifiers::SHIFT), &app),
+        Some(Action::ExplorerSearchInsert('W'))
+    );
+    assert_eq!(
+        keymap.map(control(KeyCode::Char('u')), &app),
+        Some(Action::ExplorerSearchClear)
+    );
+    assert_eq!(keymap.map(control(KeyCode::Char('r')), &app), None);
+}
+
+#[test]
+fn confirmed_explorer_search_keeps_ctrl_w_window_binding() {
+    let mut app = App::new(Vec::new());
+    app.focus = Focus::Explorer;
+    app.explorer.open_search(None, 1);
+    app.explorer.confirm_search();
+    let mut keymap = Keymap::default();
+
+    assert_eq!(keymap.map(control(KeyCode::Char('w')), &app), None);
+    assert_eq!(
+        keymap.map(control(KeyCode::Char('w')), &app),
+        Some(Action::FocusNext)
+    );
+}
+
+#[test]
+fn explorer_word_delete_actions_work_without_an_active_console() {
+    let mut app = App::new(Vec::new());
+    app.tabs
+        .push(WorkspaceTab::Relation(RelationTab::new("users")));
+    app.active_tab = 1;
+    app.focus = Focus::Explorer;
+    assert!(app.active_console_opt().is_none());
+
+    app.explorer.open_search(None, 1);
+    app.explorer
+        .edit_search_input(|query| query.set("alpha beta"));
+    assert!(
+        app.update(Action::ExplorerSearchDeletePreviousWord)
+            .is_empty()
+    );
+    assert_eq!(
+        app.explorer.search.as_ref().unwrap().query.value(),
+        "alpha "
+    );
+
+    app.explorer.search = None;
+    app.explorer.open_find();
+    app.explorer
+        .edit_find_input(|query| query.set("alpha beta"));
+    assert!(
+        app.update(Action::ExplorerFindDeletePreviousWord)
+            .is_empty()
+    );
+    assert_eq!(app.explorer.find.as_ref().unwrap().query.value(), "alpha ");
+}
+
+#[test]
 fn confirmed_explorer_find_maps_shift_n_to_previous_match() {
     let mut app = App::new(Vec::new());
     app.focus = Focus::Explorer;

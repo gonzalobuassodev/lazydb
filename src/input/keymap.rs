@@ -918,13 +918,22 @@ impl Keymap {
                 if is_text_undo(event) {
                     return Some(Action::ExplorerFindUndo);
                 }
+                if event.modifiers == KeyModifiers::CONTROL {
+                    match event.code {
+                        KeyCode::Char('w') => {
+                            return Some(Action::ExplorerFindDeletePreviousWord);
+                        }
+                        KeyCode::Char('u') => return Some(Action::ExplorerFindClear),
+                        _ => {}
+                    }
+                }
+                if !event.modifiers.is_empty() && event.modifiers != KeyModifiers::SHIFT {
+                    return None;
+                }
                 return match event.code {
                     KeyCode::Esc => Some(Action::ExplorerFindClose),
                     KeyCode::Enter => Some(Action::ExplorerFindConfirm),
                     KeyCode::Backspace => Some(Action::ExplorerFindBackspace),
-                    KeyCode::Char('u') if event.modifiers == KeyModifiers::CONTROL => {
-                        Some(Action::ExplorerFindClear)
-                    }
                     KeyCode::Char(character) => Some(Action::ExplorerFindInsert(character)),
                     _ => None,
                 };
@@ -972,6 +981,9 @@ impl Keymap {
                 }
                 if is_text_undo(event) {
                     return Some(Action::ExplorerSearchUndo);
+                }
+                if event.modifiers == KeyModifiers::CONTROL && event.code == KeyCode::Char('w') {
+                    return Some(Action::ExplorerSearchDeletePreviousWord);
                 }
                 if event.modifiers == KeyModifiers::CONTROL && event.code == KeyCode::Char('u') {
                     return Some(Action::ExplorerSearchClear);

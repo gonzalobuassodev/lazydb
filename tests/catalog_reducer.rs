@@ -318,6 +318,120 @@ fn frontend_explorer_search_is_synchronous_and_local() {
 }
 
 #[test]
+fn explorer_search_ctrl_w_deletes_word_refreshes_and_undoes_atomically() {
+    use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
+    use lazydb::input::keymap::Keymap;
+    use lazydb::model::workspace::Focus;
+
+    let (mut app, profile) = connected_app();
+    let database = install_database(&mut app, &profile);
+    let schema = install_schema(&mut app, &profile, &database);
+    let users = install_table(&mut app, &profile, &schema, "users");
+    app.focus = Focus::Explorer;
+    app.update(Action::ExplorerSearchOpen);
+
+    let mut keymap = Keymap::default();
+    for character in "users extra".chars() {
+        let action = keymap
+            .map(
+                KeyEvent::new(KeyCode::Char(character), KeyModifiers::NONE),
+                &app,
+            )
+            .unwrap();
+        assert!(app.update(action).is_empty());
+    }
+    let generation_before_delete = app.explorer.search.as_ref().unwrap().generation;
+    let delete = keymap
+        .map(
+            KeyEvent::new(KeyCode::Char('w'), KeyModifiers::CONTROL),
+            &app,
+        )
+        .unwrap();
+    assert_eq!(delete, Action::ExplorerSearchDeletePreviousWord);
+    assert!(app.update(delete).is_empty());
+
+    let search = app.explorer.search.as_ref().unwrap();
+    assert_eq!(search.query.value(), "users ");
+    assert_eq!(search.query.cursor(), 6);
+    assert!(search.generation > generation_before_delete);
+    assert!(matches!(
+        search.lifecycle,
+        lazydb::model::workspace::ExplorerSearchLifecycle::Ready
+    ));
+    assert!(search.frontend_match_rows.iter().any(|index| {
+        search.frontend_rows[*index].id == ExplorerNodeId::Catalog(users.id.clone())
+    }));
+
+    assert!(app.update(Action::ExplorerSearchUndo).is_empty());
+    assert_eq!(
+        app.explorer.search.as_ref().unwrap().query.value(),
+        "users extra"
+    );
+    assert!(app.update(Action::ExplorerSearchRedo).is_empty());
+    assert_eq!(
+        app.explorer.search.as_ref().unwrap().query.value(),
+        "users "
+    );
+}
+
+#[test]
+fn explorer_find_ctrl_w_refreshes_matches_and_restores_origin() {
+    use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
+    use lazydb::input::keymap::Keymap;
+    use lazydb::model::workspace::Focus;
+
+    let (mut app, profile) = connected_app();
+    let database = install_database(&mut app, &profile);
+    let schema = install_schema(&mut app, &profile, &database);
+    install_table(&mut app, &profile, &schema, "users");
+    app.focus = Focus::Explorer;
+    let origin = app.explorer.normalized.selected.clone();
+    app.update(Action::ExplorerFindOpen);
+
+    let mut keymap = Keymap::default();
+    for character in "users extra".chars() {
+        let action = keymap
+            .map(
+                KeyEvent::new(KeyCode::Char(character), KeyModifiers::NONE),
+                &app,
+            )
+            .unwrap();
+        assert!(app.update(action).is_empty());
+    }
+    let delete = keymap
+        .map(
+            KeyEvent::new(KeyCode::Char('w'), KeyModifiers::CONTROL),
+            &app,
+        )
+        .unwrap();
+    assert_eq!(delete, Action::ExplorerFindDeletePreviousWord);
+    assert!(app.update(delete).is_empty());
+
+    let find = app.explorer.find.as_ref().unwrap();
+    assert_eq!(find.query.value(), "users ");
+    assert_eq!(find.query.cursor(), 6);
+    assert_eq!(find.current, 0);
+    assert_eq!(
+        find.matches,
+        vec![ExplorerNodeId::PrincipalGroup {
+            profile_id: profile.id,
+        }]
+    );
+
+    assert!(app.update(Action::ExplorerFindUndo).is_empty());
+    assert_eq!(
+        app.explorer.find.as_ref().unwrap().query.value(),
+        "users extra"
+    );
+    assert!(app.update(Action::ExplorerFindRedo).is_empty());
+    assert_eq!(app.explorer.find.as_ref().unwrap().query.value(), "users ");
+
+    app.update(Action::ExplorerFindClear);
+    assert!(app.explorer.find.as_ref().unwrap().query.value().is_empty());
+    assert_eq!(app.explorer.normalized.selected, origin);
+}
+
+#[test]
 fn frontend_explorer_search_excludes_relation_children() {
     let (mut app, profile) = connected_app();
     let database = install_database(&mut app, &profile);

@@ -4295,6 +4295,7 @@ impl App {
                         | Action::ExplorerFindOpen
                         | Action::ExplorerFindInsert(_)
                         | Action::ExplorerFindBackspace
+                        | Action::ExplorerFindDeletePreviousWord
                         | Action::ExplorerFindClear
                         | Action::ExplorerFindUndo
                         | Action::ExplorerFindRedo
@@ -4312,6 +4313,7 @@ impl App {
                         | Action::ExplorerSearchOpen
                         | Action::ExplorerSearchInsert(_)
                         | Action::ExplorerSearchBackspace
+                        | Action::ExplorerSearchDeletePreviousWord
                         | Action::ExplorerSearchClear
                         | Action::ExplorerSearchUndo
                         | Action::ExplorerSearchRedo
@@ -14525,6 +14527,11 @@ impl App {
                 });
                 Vec::new()
             }
+            Action::ExplorerFindDeletePreviousWord => {
+                self.explorer
+                    .edit_find_input(|query| query.delete_previous_word());
+                Vec::new()
+            }
             Action::ExplorerFindClear => {
                 self.explorer.edit_find_input(|query| query.clear());
                 Vec::new()
@@ -14575,6 +14582,9 @@ impl App {
             Action::ExplorerSearchBackspace => self.edit_explorer_search(|query| {
                 query.backspace();
             }),
+            Action::ExplorerSearchDeletePreviousWord => {
+                self.edit_explorer_search(|query| query.delete_previous_word())
+            }
             Action::ExplorerSearchClear => self.edit_explorer_search(|query| query.clear()),
             Action::ExplorerSearchUndo => self.edit_explorer_search(|query| {
                 query.undo();

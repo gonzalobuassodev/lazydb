@@ -361,10 +361,12 @@ not expose every session. Filtering applies to the bounded visible snapshot.
 | `y` | Copy selected node name |
 
 Visible-node find is Editing until Enter. While Editing, printable keys,
-Backspace, Ctrl-U, Enter, and Esc belong to find input. After confirmation,
-`n`, `N`, and Esc cycle or close it. Catalog search Editing accepts text,
-Backspace, Ctrl-U, navigation, Enter to locate, and Esc; after confirmation,
-`n`, `N`, and Esc are the active controls.
+Backspace, Ctrl-W (delete the previous whitespace-delimited word), Ctrl-U
+(clear), Enter, and Esc belong to find input. After confirmation, `n`, `N`, and
+Esc cycle or close it. Catalog search Editing accepts text, Backspace, Ctrl-W
+(delete the previous whitespace-delimited word), Ctrl-U (clear), navigation,
+Enter to locate, and Esc; after confirmation, `n`, `N`, and Esc are the active
+controls.
 
 The Explorer `a` and catalog-object `e` rows are capability-aware. They are
 not shown for unsupported drivers, synthetic/status rows, or objects without

@@ -2375,8 +2375,8 @@ static SHORTCUT_CATALOG: &[Shortcut] = &[
     row!(
         ExplorerFindEdit,
         [ExplorerFindEditing],
-        "type / Backspace / Ctrl-u",
-        "edit visible-node search",
+        "type / Backspace / Ctrl-w / Ctrl-u",
+        "edit; Ctrl-w deletes previous word",
         display
     ),
     row!(
@@ -2403,8 +2403,8 @@ static SHORTCUT_CATALOG: &[Shortcut] = &[
     row!(
         ExplorerSearchEdit,
         [ExplorerCatalogSearchEditing],
-        "type / Backspace",
-        "edit catalog search",
+        "type / Backspace / Ctrl-w / Ctrl-u",
+        "edit; Ctrl-w deletes previous word",
         display
     ),
     row!(
@@ -5197,12 +5197,12 @@ mod tests {
         let cases = [
             (
                 ShortcutContext::ExplorerFindEditing,
-                vec!["type / Backspace / Ctrl-u", "Enter"],
+                vec!["type / Backspace / Ctrl-w / Ctrl-u", "Enter"],
             ),
             (ShortcutContext::ExplorerFindConfirmed, vec!["n", "N"]),
             (
                 ShortcutContext::ExplorerCatalogSearchEditing,
-                vec!["type / Backspace", "Enter"],
+                vec!["type / Backspace / Ctrl-w / Ctrl-u", "Enter"],
             ),
             (
                 ShortcutContext::ExplorerCatalogSearchConfirmed,
