@@ -706,6 +706,69 @@ fn relation_cell_edit_confirm_changes_only_the_local_draft() {
 }
 
 #[test]
+fn relation_cell_paste_changes_only_the_cell_draft_even_with_a_yanked_row() {
+    use lazydb::input::keymap::map_paste;
+    use lazydb::model::cell_editor::{CellEditorContent, CellEditorPresence};
+    use lazydb::model::relation_edit::{CellEditorState, RelationGridMode};
+    use lazydb::model::text_input::TextInput;
+    use lazydb::model::workspace::Focus;
+
+    let mut app = app_with_relation_columns(&["name"]);
+    let row = CellValue::Text("original".into());
+    if let WorkspaceTab::Relation(tab) = &mut app.tabs[1] {
+        let mut edit =
+            lazydb::model::relation_edit::RelationEditSession::from_rows(vec![vec![row.clone()]]);
+        edit.yank = Some(vec![CellValue::Text("yanked".into())]);
+        edit.mode = RelationGridMode::EditCell(Box::new(CellEditorState {
+            row: 0,
+            column: 0,
+            input: lazydb::model::cell_editor::CellEditorBuffer {
+                presence: CellEditorPresence::Value,
+                content: CellEditorContent::Text(TextInput::from("original")),
+                presence_history: Vec::new(),
+                presence_redo: Vec::new(),
+            },
+            error: None,
+        }));
+        tab.edit = Some(edit);
+    }
+    app.focus = Focus::Results;
+
+    let actions = map_paste("pasted 世界".into(), &app);
+    assert_eq!(
+        actions,
+        vec![Action::RelationEditPaste("pasted 世界".into())]
+    );
+    let commands = actions
+        .into_iter()
+        .flat_map(|action| app.update(action))
+        .collect::<Vec<_>>();
+    assert!(commands.is_empty());
+    let edit = relation_tab(&app).edit.as_ref().unwrap();
+    assert_eq!(edit.rows.len(), 1);
+    assert_eq!(edit.yank, Some(vec![CellValue::Text("yanked".into())]));
+    assert_eq!(edit.rows[0].current, vec![row.clone()]);
+    let RelationGridMode::EditCell(state) = &edit.mode else {
+        panic!("paste should keep the cell editor open")
+    };
+    assert_eq!(state.input.value(), Some("originalpasted 世界"));
+
+    assert!(app.update(Action::RelationEditUndo).is_empty());
+    let edit = relation_tab(&app).edit.as_ref().unwrap();
+    let RelationGridMode::EditCell(state) = &edit.mode else {
+        panic!("undo should keep the cell editor open")
+    };
+    assert_eq!(state.input.value(), Some("original"));
+    assert_eq!(edit.rows[0].current, vec![row]);
+
+    assert!(app.update(Action::RelationEditCancel).is_empty());
+    assert_eq!(
+        relation_tab(&app).edit.as_ref().unwrap().rows[0].current,
+        vec![CellValue::Text("original".into())]
+    );
+}
+
+#[test]
 fn temporal_relation_editor_uses_segmented_input_and_preserves_fraction() {
     let mut app = app_with_relation_columns_with_types(&[("created_at", "timestamp")]);
     if let WorkspaceTab::Relation(tab) = &mut app.tabs[1] {

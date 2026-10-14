@@ -3909,6 +3909,42 @@ pub fn map_paste(value: String, app: &App) -> Vec<Action> {
     {
         return vec![Action::EditorPaste(value)];
     }
+    if app.focus == Focus::Results
+        && let Some(query) = app.tabs.get(app.active_tab).and_then(|tab| match tab {
+            crate::model::tab::WorkspaceTab::Relation(tab)
+                if tab.view == crate::model::relation::RelationView::Data =>
+            {
+                Some(&tab.query)
+            }
+            crate::model::tab::WorkspaceTab::Sql(tab)
+                if tab.result_view == crate::model::tab::ResultView::Data =>
+            {
+                Some(&tab.query)
+            }
+            _ => None,
+        })
+        && query.focus.is_some()
+        && matches!(
+            query.capability,
+            crate::model::data_query::DataQueryCapability::Relation
+                | crate::model::data_query::DataQueryCapability::Sql
+        )
+    {
+        return vec![Action::DataQueryPaste(value)];
+    }
+    if app.focus == Focus::Results
+        && let Some(crate::model::tab::WorkspaceTab::Relation(tab)) = app.tabs.get(app.active_tab)
+        && tab.view == crate::model::relation::RelationView::Data
+    {
+        use crate::model::relation_edit::RelationGridMode;
+        match tab.edit.as_ref().map(|edit| &edit.mode) {
+            Some(RelationGridMode::EditCell(_)) => {
+                return vec![Action::RelationEditPaste(value)];
+            }
+            Some(RelationGridMode::Busy) => return Vec::new(),
+            _ => {}
+        }
+    }
     if is_relation_data_focus(app) {
         return vec![Action::RelationPaste];
     }

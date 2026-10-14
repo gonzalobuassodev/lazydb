@@ -4218,6 +4218,7 @@ impl App {
                         | Action::SetResultPageSize(_)
                         | Action::FocusDataQueryInput(_)
                         | Action::DataQueryInsert(_)
+                        | Action::DataQueryPaste(_)
                         | Action::DataQueryBackspace
                         | Action::DataQueryDeletePreviousWord
                         | Action::DataQueryDeleteToStart
@@ -4255,6 +4256,7 @@ impl App {
                         | Action::RelationEditRestoreDefault
                         | Action::RelationEditUseValue
                         | Action::RelationEditInsert(_)
+                        | Action::RelationEditPaste(_)
                         | Action::RelationEditBackspace
                         | Action::RelationEditDeletePreviousWord
                         | Action::RelationEditDeleteToStart
@@ -12407,6 +12409,16 @@ impl App {
                 self.refresh_active_data_query_completion();
                 Vec::new()
             }
+            Action::DataQueryPaste(text) => {
+                self.with_active_data_query(|input| input.paste(&text));
+                if !text.is_empty() {
+                    self.refresh_active_data_query_completion();
+                }
+                if let Some(query) = self.active_data_query_mut() {
+                    query.error = None;
+                }
+                Vec::new()
+            }
             Action::DataQueryBackspace => {
                 self.with_active_data_query(|input| input.backspace());
                 self.refresh_active_data_query_completion();
@@ -16048,6 +16060,17 @@ impl App {
             }
             Action::RelationEditInsert(character) => {
                 self.relation_edit_insert(character);
+                Vec::new()
+            }
+            Action::RelationEditPaste(text) => {
+                if let Some(edit) = self.relation_session_mut()
+                    && let RelationGridMode::EditCell(state) = &mut edit.mode
+                {
+                    state.input.finish_edit_group();
+                    if state.input.paste(&text) {
+                        state.error = None;
+                    }
+                }
                 Vec::new()
             }
             Action::RelationEditJsonFormat => {
@@ -28560,6 +28583,58 @@ mod tests {
             [Command::RunDerivedQueryPage { where_clause, .. }]
                 if where_clause == "id > 10"
         ));
+    }
+
+    #[test]
+    fn data_query_paste_replaces_unicode_selection_as_one_undo_step() {
+        let (mut app, tab_id, generation) = connected_query_app("SELECT id FROM users");
+        let connection = app.connection.active_identity().unwrap();
+        app.update(Action::QueryFinished {
+            tab_id,
+            generation,
+            connection,
+            outcome: empty_outcome(),
+        });
+        app.update(Action::FocusDataQueryInput(DataQueryInput::Where));
+        app.update(Action::DataQueryPaste("a中文z".into()));
+
+        {
+            let input = &mut app.active_console_mut().query.where_input;
+            input.begin_selection(1);
+            input.extend_selection(3);
+        }
+        let commands = app.update(Action::DataQueryPaste("é🚀".into()));
+        assert!(commands.is_empty());
+        assert_eq!(app.active_console().query.where_input.value(), "aé🚀z");
+        assert_eq!(
+            app.active_console().query.focus,
+            Some(DataQueryInput::Where)
+        );
+
+        app.update(Action::DataQueryUndo);
+        assert_eq!(app.active_console().query.where_input.value(), "a中文z");
+        app.update(Action::DataQueryRedo);
+        assert_eq!(app.active_console().query.where_input.value(), "aé🚀z");
+    }
+
+    #[test]
+    fn data_query_paste_refreshes_completion_without_submitting() {
+        let (mut app, tab_id, generation) = connected_query_app("SELECT id FROM users");
+        let connection = app.connection.active_identity().unwrap();
+        app.update(Action::QueryFinished {
+            tab_id,
+            generation,
+            connection,
+            outcome: empty_outcome(),
+        });
+        app.update(Action::FocusDataQueryInput(DataQueryInput::Where));
+
+        let commands = app.update(Action::DataQueryPaste("id > 10".into()));
+        assert!(commands.is_empty());
+        let query = &app.active_console().query;
+        assert_eq!(query.where_input.value(), "id > 10");
+        assert_eq!(query.submitted, DataQueryOptions::default());
+        assert_eq!(app.active_console().derived, None);
     }
 
     #[test]

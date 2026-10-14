@@ -882,6 +882,60 @@ fn temporal_editor_owns_field_and_month_navigation() {
 }
 
 #[test]
+fn relation_cell_paste_routes_text_payload_instead_of_yanked_row() {
+    use lazydb::model::relation_edit::{CellEditorState, RelationEditSession, RelationGridMode};
+
+    let mut app = App::new(Vec::new());
+    let mut relation = RelationTab::new("users");
+    let mut edit = RelationEditSession::from_rows(vec![vec![lazydb::db::value::CellValue::Text(
+        "original".into(),
+    )]]);
+    edit.yank = Some(vec![lazydb::db::value::CellValue::Text("yanked".into())]);
+    edit.mode = RelationGridMode::EditCell(Box::new(CellEditorState {
+        row: 0,
+        column: 0,
+        input: lazydb::model::cell_editor::CellEditorBuffer::default(),
+        error: None,
+    }));
+    relation.edit = Some(edit);
+    app.tabs.push(WorkspaceTab::Relation(relation));
+    app.active_tab = 1;
+    app.focus = Focus::Results;
+
+    assert_eq!(
+        map_paste("clipboard text".into(), &app),
+        vec![Action::RelationEditPaste("clipboard text".into())]
+    );
+}
+
+#[test]
+fn paste_ignores_relation_query_focus_outside_results_and_busy_grid() {
+    use lazydb::model::relation_edit::{RelationEditSession, RelationGridMode};
+
+    let mut app = App::new(Vec::new());
+    let mut relation = RelationTab::new("users");
+    relation.query.capability = lazydb::model::data_query::DataQueryCapability::Relation;
+    relation.query.focus = Some(DataQueryInput::Where);
+    app.tabs.push(WorkspaceTab::Relation(relation));
+    app.active_tab = 1;
+
+    app.focus = Focus::Editor;
+    assert_eq!(
+        map_paste("editor paste".into(), &app),
+        vec![Action::EditorPaste("editor paste".into())]
+    );
+
+    app.focus = Focus::Results;
+    if let WorkspaceTab::Relation(tab) = &mut app.tabs[1] {
+        tab.query.focus = None;
+        let mut edit = RelationEditSession::from_rows(Vec::new());
+        edit.mode = RelationGridMode::Busy;
+        tab.edit = Some(edit);
+    }
+    assert!(map_paste("ignored".into(), &app).is_empty());
+}
+
+#[test]
 fn cell_presence_shortcuts_do_not_override_json_or_relation_transaction_keys() {
     let mut app = App::new(Vec::new());
     app.tabs
@@ -3294,6 +3348,44 @@ fn numeric_result_keys_start_window_counts_without_stealing_query_input() {
             delta: 1,
         }))
     );
+}
+
+#[test]
+fn data_query_paste_routes_relation_and_sql_fields() {
+    use lazydb::model::{
+        data_query::{DataQueryCapability, DataQueryInput},
+        tab::{ConsoleTab, ResultView},
+    };
+
+    let payload = "status = 'café'\nAND active = true";
+    for input in [DataQueryInput::Where, DataQueryInput::OrderBy] {
+        let mut relation = RelationTab::new("users");
+        relation.query.capability = DataQueryCapability::Relation;
+        relation.query.focus = Some(input);
+        let mut relation_app = App::new(Vec::new());
+        relation_app.tabs.push(WorkspaceTab::Relation(relation));
+        relation_app.active_tab = 1;
+        relation_app.focus = Focus::Results;
+        assert_eq!(
+            map_paste(payload.to_owned(), &relation_app),
+            vec![Action::DataQueryPaste(payload.to_owned())],
+            "relation {input:?} input should receive the complete paste"
+        );
+
+        let mut console = ConsoleTab::new("query");
+        console.result_view = ResultView::Data;
+        console.query.capability = DataQueryCapability::Sql;
+        console.query.focus = Some(input);
+        let mut sql_app = App::new(Vec::new());
+        sql_app.tabs.push(WorkspaceTab::Sql(console));
+        sql_app.active_tab = 1;
+        sql_app.focus = Focus::Results;
+        assert_eq!(
+            map_paste(payload.to_owned(), &sql_app),
+            vec![Action::DataQueryPaste(payload.to_owned())],
+            "SQL {input:?} input should receive the complete paste"
+        );
+    }
 }
 
 #[test]

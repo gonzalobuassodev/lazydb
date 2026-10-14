@@ -510,6 +510,11 @@ are atomic edits. Moving to another field closes the current edit group. A new
 edit after undo discards the redo branch. History is local to the focused field
 and is not persisted.
 
+The terminal's native paste command (Cmd-V by default on macOS terminals) pastes
+text into focused WHERE/ORDER BY fields and cell editors. Text and JSON replace a
+selection or insert at the cursor; Boolean and temporal cell editors replace the
+whole draft. Paste does not submit a query or confirm a cell edit.
+
 On macOS, Command shortcuts require a terminal that forwards the Command modifier
 as a Super key event. If the terminal reserves `Cmd-Z` or does not support enhanced
 keyboard reporting, configure the terminal to forward that key combination.
@@ -640,6 +645,10 @@ mapper and are not documented as actions.
 | `Esc` | Cancel cell edit |
 | Printable text, Backspace, Delete | Edit the cell value |
 | `Ctrl-w`, `Ctrl-u`, `Ctrl-h` | Delete word, to start, or backspace |
+| Terminal paste (Cmd-V by default on macOS terminals) | Paste into the cell draft; text/JSON use the cursor or selection, Boolean/temporal values replace the whole draft |
+
+Cell paste is one undoable edit and does not confirm the cell. The terminal must
+send a paste event; this is separate from forwarding Cmd as a keyboard modifier.
 
 ### Visual Line
 
