@@ -174,6 +174,18 @@ impl JsonBuffer {
         self.cursor += 1;
     }
 
+    pub fn paste(&mut self, text: &str) {
+        if text.is_empty() {
+            return;
+        }
+        self.record();
+        self.remove_selection();
+        let index = self.byte_index(self.cursor);
+        self.value.insert_str(index, text);
+        self.cursor += text.chars().count();
+        self.sql_null = false;
+    }
+
     pub fn backspace(&mut self) {
         if self.selection().is_some() {
             self.record();
@@ -909,6 +921,7 @@ impl CellEditorBuffer {
         if matches!(edit, crate::model::text_input::TextInputEdit::Redo) {
             return self.redo();
         }
+        self.finish_edit_group();
         let before = self.snapshot();
         let changed = match &mut self.content {
             CellEditorContent::Text(input) => input.apply(edit),
@@ -939,9 +952,102 @@ impl CellEditorBuffer {
         changed
     }
 
+    pub(crate) fn paste(&mut self, text: &str) -> bool {
+        let old_presence = self.presence.clone();
+        if text.is_empty() {
+            return false;
+        }
+        if matches!(
+            &self.content,
+            CellEditorContent::Typed {
+                draft: TypedDraft::Boolean(_) | TypedDraft::Temporal(_),
+                ..
+            }
+        ) && text.trim().is_empty()
+        {
+            return false;
+        }
+        self.finish_edit_group();
+        let before = self.snapshot();
+        let changed = match &mut self.content {
+            CellEditorContent::Text(input) => {
+                let old_value = input.value().to_owned();
+                let old_cursor = input.cursor();
+                let old_selection = input.selection_range();
+                if old_presence != CellEditorPresence::Value {
+                    input.set(text);
+                } else {
+                    input.paste(text);
+                }
+                input.value() != old_value
+                    || input.cursor() != old_cursor
+                    || input.selection_range() != old_selection
+            }
+            CellEditorContent::Typed { draft, .. } => match draft {
+                TypedDraft::Boolean(input) => {
+                    let value = text.trim();
+                    if value.is_empty() || input.value() == value {
+                        false
+                    } else {
+                        input.set(value);
+                        true
+                    }
+                }
+                TypedDraft::Temporal(draft) => {
+                    let value = text.trim();
+                    if value.is_empty() || draft.render() == value {
+                        false
+                    } else if let Some(replacement) =
+                        TemporalDraft::from_kind_and_text(draft.kind(), value)
+                    {
+                        *draft = replacement;
+                        true
+                    } else {
+                        false
+                    }
+                }
+                TypedDraft::Json(buffer) => {
+                    let old_value = buffer.value().to_owned();
+                    let old_cursor = buffer.cursor();
+                    let old_selection = buffer.selection();
+                    let old_sql_null = buffer.is_sql_null();
+                    if old_presence != CellEditorPresence::Value {
+                        *buffer = JsonBuffer::new(text);
+                    } else {
+                        buffer.paste(text);
+                    }
+                    buffer.value() != old_value
+                        || buffer.cursor() != old_cursor
+                        || buffer.selection() != old_selection
+                        || buffer.is_sql_null() != old_sql_null
+                }
+            },
+        };
+        let presence_changed = old_presence != CellEditorPresence::Value;
+        if !changed && !presence_changed {
+            return false;
+        }
+
+        if changed {
+            match &mut self.content {
+                CellEditorContent::Text(input) => *input = input.without_history(),
+                CellEditorContent::Typed { draft, .. } => match draft {
+                    TypedDraft::Boolean(input) => *input = input.without_history(),
+                    TypedDraft::Temporal(draft) => {
+                        *draft.input_mut() = draft.input().without_history();
+                    }
+                    TypedDraft::Json(buffer) => *buffer = buffer.without_history(),
+                },
+            }
+        }
+        self.presence = CellEditorPresence::Value;
+        self.record_presence_transition(before);
+        true
+    }
+
     pub(crate) fn undo(&mut self) -> bool {
         if let Some(snapshot) = self.presence_history.last().cloned()
-            && self.snapshot().content != snapshot.content
+            && self.snapshot() != snapshot
         {
             let current = self.snapshot();
             self.presence_history.pop();
@@ -997,6 +1103,17 @@ impl CellEditorBuffer {
             return false;
         }
         true
+    }
+
+    pub(crate) fn finish_edit_group(&mut self) {
+        match &mut self.content {
+            CellEditorContent::Text(input) => input.finish_edit_group(),
+            CellEditorContent::Typed { draft, .. } => match draft {
+                TypedDraft::Boolean(input) => input.finish_edit_group(),
+                TypedDraft::Temporal(draft) => draft.input.finish_edit_group(),
+                TypedDraft::Json(_) => {}
+            },
+        }
     }
 
     pub(crate) fn input(&self) -> Option<&TextInput> {
@@ -1418,6 +1535,20 @@ mod tests {
     }
 
     #[test]
+    fn json_buffer_paste_replaces_multiline_selection_atomically() {
+        let mut buffer = JsonBuffer::new("{\"name\": \"Ada\"}");
+        buffer.begin_selection(1);
+        buffer.extend_selection(5);
+        buffer.paste("\"x\": 1,\n  \"y\": \"雪\"");
+        assert_eq!(buffer.value(), "{\"x\": 1,\n  \"y\": \"雪\"e\": \"Ada\"}");
+        buffer.undo();
+        assert_eq!(buffer.value(), "{\"name\": \"Ada\"}");
+        assert_eq!(buffer.selection(), Some((1, 5)));
+        buffer.redo();
+        assert!(buffer.value().contains("雪"));
+    }
+
+    #[test]
     fn json_validation_preserves_source_semantics_and_reports_line_and_column() {
         assert!(validate_json("{\"n\":90071992547409931234567890,\"x\":true,\"z\":null}").is_ok());
         let error = validate_json("{\n  \"name\": \"unterminated\n}").unwrap_err();
@@ -1611,6 +1742,108 @@ mod tests {
         assert_eq!(input.value(), Some(""));
         input.redo();
         assert_eq!(input.presence(), CellEditorPresence::Value);
+    }
+
+    #[test]
+    fn cell_paste_is_atomic_and_restores_presence_and_content() {
+        let mut input = CellEditorBuffer::unprovided();
+        assert!(input.paste("hello 世界"));
+        assert_eq!(input.presence(), CellEditorPresence::Value);
+        assert_eq!(input.value(), Some("hello 世界"));
+        assert!(input.undo());
+        assert_eq!(input.presence(), CellEditorPresence::Unprovided);
+        assert_eq!(input.value(), Some(""));
+        assert!(input.redo());
+        assert_eq!(input.value(), Some("hello 世界"));
+        assert!(!input.paste(""));
+
+        let mut json = CellEditorBuffer::typed_null(CellEditorKind::Json);
+        assert!(json.paste("null"));
+        assert_eq!(json.presence(), CellEditorPresence::Value);
+        assert!(!json.is_null());
+        assert_eq!(json.value(), Some("null"));
+        assert!(json.undo());
+        assert_eq!(json.presence(), CellEditorPresence::Null);
+        assert!(json.is_null());
+    }
+
+    #[test]
+    fn cell_paste_replaces_boolean_and_temporal_typed_drafts() {
+        let mut boolean = CellEditorBuffer::typed_unprovided(CellEditorKind::Boolean);
+        assert!(boolean.paste("  true \n"));
+        assert_eq!(boolean.value(), Some("true"));
+        assert!(boolean.undo());
+        assert_eq!(boolean.presence(), CellEditorPresence::Unprovided);
+        assert!(!boolean.paste(" \n\t"));
+
+        let mut date = CellEditorBuffer::typed_null(CellEditorKind::Date);
+        assert!(date.paste("2026-10-14"));
+        assert_eq!(date.value(), Some("2026-10-14"));
+        assert_eq!(
+            date.typed_value().unwrap().unwrap(),
+            CellValue::Date(NaiveDate::from_ymd_opt(2026, 10, 14).unwrap())
+        );
+        assert!(date.undo());
+        assert_eq!(date.presence(), CellEditorPresence::Null);
+        assert!(!date.paste(" \n"));
+
+        let mut timestamp = CellEditorBuffer::typed_unprovided(CellEditorKind::Timestamp);
+        assert!(timestamp.paste("2026-10-14 12:34:56.123456 +08:00"));
+        assert_eq!(timestamp.value(), Some("2026-10-14 12:34:56.123456 +08:00"));
+        assert!(timestamp.typed_value().unwrap().is_ok());
+        timestamp.temporal_move_to(6);
+        timestamp.temporal_insert('0');
+        assert!(timestamp.value().unwrap().contains(".023456"));
+        assert!(timestamp.undo());
+        assert_eq!(timestamp.value(), Some("2026-10-14 12:34:56.123456 +08:00"));
+        assert!(timestamp.undo());
+        assert_eq!(timestamp.presence(), CellEditorPresence::Unprovided);
+    }
+
+    #[test]
+    fn text_cell_paste_replaces_selection_and_undoes_atomically() {
+        let mut input = CellEditorBuffer::default();
+        input.apply_text_edit(crate::model::text_input::TextInputEdit::Insert('a'));
+        input.apply_text_edit(crate::model::text_input::TextInputEdit::Insert('b'));
+        input.apply_text_edit(crate::model::text_input::TextInputEdit::Insert('c'));
+        if let CellEditorContent::Text(text) = &mut input.content {
+            text.finish_edit_group();
+        }
+        let CellEditorContent::Text(text) = &mut input.content else {
+            panic!("default cell buffer is text")
+        };
+        text.begin_selection(1);
+        text.extend_selection(2);
+
+        assert!(input.paste("雪"));
+        assert_eq!(input.value(), Some("a雪c"));
+        assert!(input.undo());
+        assert_eq!(input.value(), Some("abc"));
+        assert!(input.undo());
+        assert_eq!(input.value(), Some("ab"));
+        assert!(input.redo());
+        assert_eq!(input.value(), Some("abc"));
+        assert!(input.redo());
+        assert_eq!(input.value(), Some("a雪c"));
+    }
+
+    #[test]
+    fn cell_paste_clears_old_redo_history() {
+        use crate::model::text_input::TextInputEdit;
+
+        let mut input = CellEditorBuffer::default();
+        input.apply_text_edit(TextInputEdit::Insert('a'));
+        input.finish_edit_group();
+        input.apply_text_edit(TextInputEdit::Insert('b'));
+        input.finish_edit_group();
+        assert!(input.undo());
+        assert_eq!(input.value(), Some("a"));
+
+        assert!(input.paste("x"));
+        assert_eq!(input.value(), Some("ax"));
+        assert!(!input.redo());
+        assert!(input.undo());
+        assert_eq!(input.value(), Some("a"));
     }
 
     #[test]
