@@ -87,18 +87,26 @@ async fn reports_v2_shadowing_and_does_not_merge_server_objects() {
 #[tokio::test]
 async fn reports_missing_configs_without_database_io() {
     let dir = tempdir().unwrap();
-    let output = doctor::run(
+    let config = dir.path().join(".mcp.json");
+    assert!(!config.exists());
+    let output = doctor::run_with_options(
         vec![McpClient::ClaudeCode],
         Some(dir.path().to_owned()),
-        None,
+        Some(config),
         false,
         true,
+        None,
     )
     .await
     .unwrap();
-    assert!(output.contains("\"status\":\"warning\""));
-    assert!(output.contains("missing"));
-    assert!(output.contains("database I/O was not performed"));
+    let report: serde_json::Value = serde_json::from_str(&output).unwrap();
+    assert_eq!(report["status"], "warning", "{output}");
+    assert_eq!(report["clients"][0]["status"], "warning", "{output}");
+    assert!(output.contains("missing"), "{output}");
+    assert!(
+        output.contains("database I/O was not performed"),
+        "{output}"
+    );
 }
 
 #[tokio::test]
@@ -130,17 +138,22 @@ async fn recognizes_generated_read_only_configuration() {
         false,
     )
     .unwrap();
-    let output = doctor::run(
+    let config = dir.path().join(".codex/config.toml");
+    assert!(config.exists());
+    let output = doctor::run_with_options(
         vec![McpClient::Codex],
         Some(dir.path().to_owned()),
-        None,
+        Some(config),
         false,
         true,
+        None,
     )
     .await
     .unwrap();
-    assert!(output.contains("\"status\":\"ok\""));
-    assert!(output.contains("deny policy"));
+    let report: serde_json::Value = serde_json::from_str(&output).unwrap();
+    assert_eq!(report["status"], "ok", "{output}");
+    assert_eq!(report["clients"][0]["status"], "ok", "{output}");
+    assert!(output.contains("deny policy"), "{output}");
 }
 
 #[tokio::test]
