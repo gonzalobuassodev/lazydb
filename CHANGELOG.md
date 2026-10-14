@@ -1493,6 +1493,34 @@
 - feat(keymap): add four-way shortcut navigation ([d5f8f20](https://github.com/yelog/lazydb/commit/d5f8f203933fbd89431fad57d80a1b248aa4d38e))
 - fix(keymap): keep leader menus active until completion or cancellation ([6d022f8](https://github.com/yelog/lazydb/commit/6d022f8be961f9b81d74022220cd942e3b39ec81))
 
+## [0.2.0] - 2026-10-14
+
+### Changed
+
+- `lazydb update` now reports the running version, update availability, download progress, installation stages, and final outcome, while preserving JSON output ([`3cbb4ef`](https://github.com/yelog/lazydb/commit/3cbb4ef38b3c74031a9ce161a085c7349b43c24a)).
+
+### Fixed
+
+- Clipboard paste now routes text correctly to query and relation cell inputs, including atomic editing and undo behavior ([`f3fdb44`](https://github.com/yelog/lazydb/commit/f3fdb44f91f221ba6dacb844bb66819e87f546d5)).
+- Explorer search supports deleting the previous word with `Ctrl-w` ([`006a9f4`](https://github.com/yelog/lazydb/commit/006a9f47b799624a546997d7d549c5ebde307c5f)).
+
+### Internal
+
+- MCP doctor tests now inspect their own temporary configuration files, making their results independent of user Claude Code and Codex configuration ([`dff0ab7`](https://github.com/yelog/lazydb/commit/dff0ab72e1c0fad1cc9dc0af756613f81ed900c7)).
+- Updated the GitHub Actions artifact dependencies used by the release workflow ([`d06186f`](https://github.com/yelog/lazydb/commit/d06186f3aaf2d7d643b033cbb57ee18e7808b475), [`3035063`](https://github.com/yelog/lazydb/commit/30350631c09e7b81fa86f83e2f1c3a2809603a19)).
+- Integrated the dependency updates and relation result paste work into `main` ([`df42eac`](https://github.com/yelog/lazydb/commit/df42eac22eb662d08066f1e25691b1787181a529), [`794871b`](https://github.com/yelog/lazydb/commit/794871bed300c55062904ec531cba4c83fd03038)).
+
+### Commits
+
+- [`dff0ab7`](https://github.com/yelog/lazydb/commit/dff0ab72e1c0fad1cc9dc0af756613f81ed900c7) test(mcp): isolate doctor fixtures from user config
+- [`794871b`](https://github.com/yelog/lazydb/commit/794871bed300c55062904ec531cba4c83fd03038) merge: relation result paste fix
+- [`f3fdb44`](https://github.com/yelog/lazydb/commit/f3fdb44f91f221ba6dacb844bb66819e87f546d5) fix(paste): route clipboard text to query and cell inputs
+- [`006a9f4`](https://github.com/yelog/lazydb/commit/006a9f47b799624a546997d7d549c5ebde307c5f) fix(explorer): delete previous word in search
+- [`df42eac`](https://github.com/yelog/lazydb/commit/df42eac22eb662d08066f1e25691b1787181a529) Merge branch 'main' of github.com:yelog/lazydb
+- [`d06186f`](https://github.com/yelog/lazydb/commit/d06186f3aaf2d7d643b033cbb57ee18e7808b475) build(deps): bump actions/upload-artifact from 7.0.1 to 7.0.2 (#13)
+- [`3035063`](https://github.com/yelog/lazydb/commit/30350631c09e7b81fa86f83e2f1c3a2809603a19) build(deps): bump actions/download-artifact from 8.0.1 to 8.0.2 (#14)
+- [`3cbb4ef`](https://github.com/yelog/lazydb/commit/3cbb4ef38b3c74031a9ce161a085c7349b43c24a) fix(update): show immediate feedback and live update progress
+
 ## Unreleased
 
 - Add persistent Explorer connection groups, group membership, and profile ordering.
