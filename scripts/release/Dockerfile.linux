@@ -1,0 +1,30 @@
+# The release workflow pins this base image by digest at build time.
+ARG BASE_IMAGE=ubuntu:24.04
+FROM ${BASE_IMAGE}
+ARG RUSTUP_ARCH=x86_64
+ARG RUST_TARGET=x86_64-unknown-linux-gnu
+
+ENV DEBIAN_FRONTEND=noninteractive \
+    RUSTUP_HOME=/opt/rustup \
+    CARGO_HOME=/opt/cargo \
+    PATH=/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin \
+    LC_ALL=C
+
+RUN apt-get update \
+    && apt-get install -y --no-install-recommends \
+        build-essential ca-certificates curl file git pkg-config python3 xz-utils \
+        binutils \
+    && rm -rf /var/lib/apt/lists/* \
+    && curl --fail --location --proto '=https' --tlsv1.2 \
+        "https://static.rust-lang.org/rustup/dist/${RUSTUP_ARCH}-unknown-linux-gnu/rustup-init" \
+        -o /tmp/rustup-init \
+    && chmod 0755 /tmp/rustup-init \
+    && RUSTUP_HOME=/opt/rustup CARGO_HOME=/opt/cargo /tmp/rustup-init -y --no-modify-path --profile minimal --default-toolchain 1.94.0 \
+    && /opt/cargo/bin/rustup target add "${RUST_TARGET}" --toolchain 1.94.0 \
+    && chmod -R a+rX /opt/rustup /opt/cargo \
+    && rm -f /tmp/rustup-init
+
+ENV PATH=/opt/cargo/bin:/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin
+
+WORKDIR /workspace
+ENTRYPOINT ["/bin/bash", "-euo", "pipefail", "-c"]

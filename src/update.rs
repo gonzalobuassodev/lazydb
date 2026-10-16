@@ -21,7 +21,7 @@ use xz2::read::XzDecoder;
 mod cli_progress;
 
 const INSTALLATION_SCHEMA: u32 = 1;
-const CHANNEL_MANIFEST_SCHEMA: u32 = 1;
+const CHANNEL_MANIFEST_SCHEMA: u32 = 2;
 const DEFAULT_CHANNEL_BASE_URL: &str = "https://lazydb.yelog.org/channels";
 const GITHUB_HOST: &str = "github.com";
 const PAGES_HOST: &str = "lazydb.yelog.org";
@@ -110,6 +110,21 @@ pub struct ChannelManifest {
 pub struct ManifestAsset {
     pub url: String,
     pub sha256: String,
+    #[serde(default)]
+    pub requirements: Option<AssetRequirements>,
+}
+
+#[derive(Clone, Debug, Deserialize, Serialize, PartialEq, Eq)]
+#[serde(deny_unknown_fields)]
+pub struct AssetRequirements {
+    pub libc: LibcRequirement,
+}
+
+#[derive(Clone, Debug, Deserialize, Serialize, PartialEq, Eq)]
+#[serde(deny_unknown_fields)]
+pub struct LibcRequirement {
+    pub family: String,
+    pub min_version: String,
 }
 
 #[derive(Debug, Error, PartialEq, Eq)]
@@ -127,7 +142,7 @@ pub fn parse_channel_manifest(input: &str) -> Result<ChannelManifest, ManifestEr
 }
 
 fn validate_channel_manifest(manifest: ChannelManifest) -> Result<ChannelManifest, ManifestError> {
-    if manifest.schema != CHANNEL_MANIFEST_SCHEMA || manifest.product != "lazydb" {
+    if !matches!(manifest.schema, 1 | CHANNEL_MANIFEST_SCHEMA) || manifest.product != "lazydb" {
         return Err(ManifestError::Invalid(
             "unsupported schema or product".into(),
         ));
@@ -198,8 +213,33 @@ fn validate_channel_manifest(manifest: ChannelManifest) -> Result<ChannelManifes
                 "invalid asset for {target}"
             )));
         }
+        if target.ends_with("-linux-gnu") {
+            match (manifest.schema, &asset.requirements) {
+                (1, None) => {}
+                (2, Some(requirements))
+                    if requirements.libc.family == "glibc"
+                        && valid_glibc_version(&requirements.libc.min_version) => {}
+                _ => {
+                    return Err(ManifestError::Invalid(format!(
+                        "invalid Linux requirements for {target}"
+                    )));
+                }
+            }
+        } else if asset.requirements.is_some() {
+            return Err(ManifestError::Invalid(format!(
+                "unexpected requirements for {target}"
+            )));
+        }
     }
     Ok(manifest)
+}
+
+fn valid_glibc_version(value: &str) -> bool {
+    let mut parts = value.split('.');
+    matches!((parts.next(), parts.next(), parts.next()), (Some(major), Some(minor), None)
+        if !major.is_empty() && !minor.is_empty()
+            && major.bytes().all(|byte| byte.is_ascii_digit())
+            && minor.bytes().all(|byte| byte.is_ascii_digit()))
 }
 
 fn approved_url(value: &str, host: &str) -> bool {
@@ -209,6 +249,10 @@ fn approved_url(value: &str, host: &str) -> bool {
 #[async_trait]
 pub trait UpdateHttpClient {
     async fn get(&self, url: &str) -> anyhow::Result<String>;
+
+    async fn get_manifest(&self, url: &str) -> anyhow::Result<(u16, String)> {
+        self.get(url).await.map(|body| (200, body))
+    }
 
     async fn download(&self, url: &str) -> anyhow::Result<Vec<u8>>;
 
@@ -283,19 +327,23 @@ fn validate_response_url(requested: &str, response: &url::Url) -> anyhow::Result
 #[async_trait]
 impl UpdateHttpClient for SystemUpdateHttpClient {
     async fn get(&self, url: &str) -> anyhow::Result<String> {
+        self.get_manifest(url).await.map(|(_, body)| body)
+    }
+
+    async fn get_manifest(&self, url: &str) -> anyhow::Result<(u16, String)> {
         let response = self
             .client
             .get(url)
             .send()
             .await
-            .with_context(|| format!("failed to request update manifest {url}"))?
-            .error_for_status()
-            .with_context(|| format!("update manifest request failed for {url}"))?;
+            .with_context(|| format!("failed to request update manifest {url}"))?;
         validate_response_url(url, response.url())?;
-        response
+        let status = response.status().as_u16();
+        let body = response
             .text()
             .await
-            .context("failed to read update manifest response")
+            .context("failed to read update manifest response")?;
+        Ok((status, body))
     }
 
     async fn download(&self, url: &str) -> anyhow::Result<Vec<u8>> {
@@ -514,7 +562,7 @@ async fn inspect_local_installation<P, S, H>(
 where
     P: InstallationProbe,
     S: InstallationStateSource,
-    H: UpdateHttpClient,
+    H: UpdateHttpClient + Sync,
 {
     let inspection = inspect_installation(
         requested_channel,
@@ -646,7 +694,7 @@ async fn inspect_installation<P, S, H>(
 where
     P: InstallationProbe,
     S: InstallationStateSource,
-    H: UpdateHttpClient,
+    H: UpdateHttpClient + Sync,
 {
     let (state, state_error) = match source.state() {
         Ok(state) => (state, None),
@@ -670,8 +718,20 @@ where
         .as_ref()
         .ok()
         .map(|manifest| manifest.version.clone());
-    let status = match &manifest {
-        Ok(_) => match manager {
+    let runtime_error = manifest.as_ref().ok().and_then(|manifest| {
+        current_target(None).and_then(|target| {
+            manifest.assets.get(&target).and_then(|asset| {
+                asset.requirements.as_ref().and_then(|requirements| {
+                    check_linux_runtime_requirements(&requirements.libc)
+                        .err()
+                        .map(|error| format!("{error:#}"))
+                })
+            })
+        })
+    });
+    let status = match (&manifest, &runtime_error) {
+        (Ok(_), Some(_)) => UpdateStatus::Error,
+        (Ok(_), None) => match manager {
             InstallationManager::Native => {
                 let status = version_status_kind(
                     installed_version.as_deref(),
@@ -693,7 +753,7 @@ where
             )
             .map_manager_action_required(),
         },
-        Err(_) => UpdateStatus::Error,
+        (Err(_), _) => UpdateStatus::Error,
     };
     let action = match status {
         UpdateStatus::Available if manager == InstallationManager::Native => {
@@ -709,9 +769,12 @@ where
                 action
             }
         }
-        UpdateStatus::Error => Some(match manifest {
-            Err(error) => error,
-            Ok(_) => "installed version is invalid; repair the native installation".to_owned(),
+        UpdateStatus::Error => Some(match (manifest, runtime_error) {
+            (Ok(_), Some(error)) => error,
+            (Ok(_), None) => {
+                "installed version is invalid; repair the native installation".to_owned()
+            }
+            (Err(error), _) => error,
         }),
         _ => None,
     };
@@ -822,7 +885,7 @@ fn version_status(current: Option<&str>, target: &str, allow_downgrade: bool) ->
     }
 }
 
-async fn fetch_manifest<H: UpdateHttpClient>(
+async fn fetch_manifest<H: UpdateHttpClient + Sync>(
     channel: UpdateChannel,
     http: &H,
 ) -> Result<ChannelManifest, String> {
@@ -838,17 +901,42 @@ async fn fetch_manifest<H: UpdateHttpClient>(
     {
         return Err("channel base URL must use HTTPS".to_owned());
     }
-    let url = format!(
-        "{}/{}.json",
+    let v2_url = format!(
+        "{}/v2/{}.json",
         base.trim_end_matches('/'),
         channel_name(channel)
     );
-    let input = http
-        .get(&url)
-        .await
-        .map_err(|error| format!("failed to fetch {url}: {error:#}"))?;
+    let (url, input, expected_schema) = match http.get_manifest(&v2_url).await {
+        Ok((200, body)) => (v2_url, body, 2),
+        Ok((404, _)) => {
+            let legacy_url = format!(
+                "{}/{}.json",
+                base.trim_end_matches('/'),
+                channel_name(channel)
+            );
+            let (status, body) = http
+                .get_manifest(&legacy_url)
+                .await
+                .map_err(|error| format!("failed to fetch {legacy_url}: {error:#}"))?;
+            if status != 200 {
+                return Err(format!(
+                    "channel manifest request returned HTTP {status} at {legacy_url}"
+                ));
+            }
+            (legacy_url, body, 1)
+        }
+        Ok((status, _)) => {
+            return Err(format!(
+                "channel manifest request returned HTTP {status} at {v2_url}"
+            ));
+        }
+        Err(error) => return Err(format!("failed to fetch {v2_url}: {error:#}")),
+    };
     let manifest = parse_channel_manifest(&input)
         .map_err(|error| format!("invalid channel manifest at {url}: {error}"))?;
+    if manifest.schema != expected_schema {
+        return Err(format!("channel manifest schema mismatch at {url}"));
+    }
     (manifest.channel == channel)
         .then_some(manifest)
         .ok_or_else(|| "manifest channel mismatch".to_owned())
@@ -1196,6 +1284,9 @@ async fn apply_native_update_with_progress<H: UpdateHttpClient + Sync>(
         downloaded_bytes: 0,
         total_bytes: None,
     });
+    if let Some(requirements) = &asset.requirements {
+        check_linux_runtime_requirements(&requirements.libc)?;
+    }
     let archive = http.download_with_progress(&asset.url, progress).await?;
     progress(UpdateProgress {
         stage: UpdateStage::VerifyingChecksum,
@@ -1287,6 +1378,42 @@ async fn apply_native_update_with_progress<H: UpdateHttpClient + Sync>(
         total_bytes: Some(archive.len() as u64),
     });
     Ok(manifest.version.clone())
+}
+
+fn check_linux_runtime_requirements(requirement: &LibcRequirement) -> anyhow::Result<()> {
+    if requirement.family != "glibc" {
+        anyhow::bail!("unsupported Linux libc requirement: {}", requirement.family)
+    }
+    if !cfg!(target_os = "linux") {
+        return Ok(());
+    }
+    #[cfg(target_os = "linux")]
+    {
+        let output = Command::new("getconf")
+            .arg("GNU_LIBC_VERSION")
+            .output()
+            .context("could not determine the installed glibc version")?;
+        if !output.status.success() {
+            anyhow::bail!("could not determine the installed glibc version")
+        }
+        let text = String::from_utf8_lossy(&output.stdout);
+        let current = text
+            .split_whitespace()
+            .last()
+            .ok_or_else(|| anyhow::anyhow!("invalid getconf output"))?;
+        let current =
+            Version::parse(&format!("{}.0", current)).or_else(|_| Version::parse(current))?;
+        let required = Version::parse(&format!("{}.0", requirement.min_version))
+            .or_else(|_| Version::parse(&requirement.min_version))?;
+        if current < required {
+            anyhow::bail!(
+                "Linux runtime requires glibc {}, but this system has {}",
+                requirement.min_version,
+                current
+            )
+        }
+    }
+    Ok(())
 }
 
 fn extract_archive(
@@ -1921,6 +2048,17 @@ mod tests {
             self.0.clone().map_err(anyhow::Error::msg)
         }
 
+        async fn get_manifest(&self, url: &str) -> anyhow::Result<(u16, String)> {
+            if url.contains("/v2/") {
+                return match &self.0 {
+                    Err(error) => Err(anyhow::anyhow!(*error)),
+                    Ok(body) if body == "not JSON" => Ok((200, body.clone())),
+                    Ok(body) => Ok((200, body.clone())),
+                };
+            }
+            self.get(url).await.map(|body| (200, body))
+        }
+
         async fn download(&self, _url: &str) -> anyhow::Result<Vec<u8>> {
             panic!("inspection must not download an archive")
         }
@@ -2179,12 +2317,17 @@ mod tests {
                             if *target == "x86_64-pc-windows-msvc" { "zip" } else { "tar.xz" }
                         ),
                         sha256: "a".repeat(64),
+                        requirements: if target.ends_with("-linux-gnu") {
+                            Some(AssetRequirements {
+                                libc: LibcRequirement { family: "glibc".into(), min_version: "2.34".into() },
+                            })
+                        } else { None },
                     },
                 )
             })
             .collect::<BTreeMap<_, _>>();
         serde_json::to_string(&ChannelManifest {
-            schema: 1,
+            schema: 2,
             product: "lazydb".into(),
             channel: UpdateChannel::Stable,
             version: "1.3.0".into(),
@@ -2207,6 +2350,15 @@ mod tests {
             parse_channel_manifest(&value.to_string()),
             Err(ManifestError::Invalid(_))
         ));
+    }
+
+    #[test]
+    fn glibc_requirements_accept_release_format_and_reject_invalid_versions() {
+        assert!(valid_glibc_version("2.17"));
+        assert!(valid_glibc_version("2.38"));
+        for invalid in ["2", "2.17.1", "v2.17", "2.x", "", "2.17-beta"] {
+            assert!(!valid_glibc_version(invalid), "accepted {invalid}");
+        }
     }
 
     #[test]
@@ -2468,6 +2620,7 @@ mod tests {
                 ManifestAsset {
                     url: format!("https://github.com/yelog/lazydb/releases/download/v{version}/lazydb_{version}_{supported}.tar.xz"),
                     sha256: if supported == target { digest.clone() } else { "a".repeat(64) },
+                    requirements: None,
                 },
             );
         }

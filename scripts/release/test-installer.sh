@@ -11,19 +11,30 @@ cat > "$TMP/bin/curl" <<'SH'
 set -eu
 out=
 url=
+status_output=
 while [ "$#" -gt 0 ]; do
     case "$1" in
         -o) shift; out=$1 ;;
+        -w) shift; status_output=$1 ;;
         http*) url=$1 ;;
     esac
     shift
 done
+case "$url" in
+  */v2/*)
+    case "${FIXTURE_V2_STATUS:-404}" in
+      200) src="$TMPDIR_TEST/server/channels/v2/${url##*/}"; if [ -f "$src" ]; then cp "$src" "$out"; else cp "$TMPDIR_TEST/server/channels/${url##*/}" "$out"; fi; printf 200; exit 0 ;;
+      404) printf 404; exit 0 ;;
+      *) printf '%s' "${FIXTURE_V2_STATUS}"; exit 0 ;;
+    esac ;;
+esac
 case "$url" in
   *channels/*) src="$TMPDIR_TEST/server/${url##*/}"; src="$TMPDIR_TEST/server/channels/${url##*/}" ;;
   *releases/download/*) src="$TMPDIR_TEST/server/assets/${url##*/}" ;;
   *) exit 1 ;;
 esac
 cp "$src" "$out"
+[ -z "$status_output" ] || printf 200
 SH
 chmod 755 "$TMP/bin/curl"
 cat > "$TMP/bin/uname" <<'SH'
@@ -47,6 +58,17 @@ done
 printf '%s\n' windows > "$TMP/server/assets/lazydb_1.2.3_x86_64-pc-windows-msvc.zip"
 (cd "$TMP/server/assets" && sha256sum lazydb_*.tar.xz lazydb_*.zip > SHA256SUMS)
 python3 "$ROOT/scripts/release/generate-channel-manifest.py" stable 1.2.3 2026-09-05T00:00:00Z "$TMP/server/assets" "$TMP/server/channels/stable.json"
+mkdir -p "$TMP/server/channels/v2"
+cp "$TMP/server/channels/stable.json" "$TMP/server/channels/v2/stable.json"
+python3 - "$TMP/server/channels/v2/stable.json" <<'PY'
+import json,sys
+from pathlib import Path
+path=Path(sys.argv[1]); data=json.loads(path.read_text())
+data['schema']=2
+for target in ('x86_64-unknown-linux-gnu','aarch64-unknown-linux-gnu'):
+    data['assets'][target]['requirements']={'libc':{'family':'glibc','min_version':'2.34'}}
+path.write_text(json.dumps(data))
+PY
 cat > "$TMP/assets/beta-lazydb" <<'SH'
 #!/bin/sh
 [ "${1:-}" = version ] && printf '%s\n' '{"version":"1.2.3-beta.1"}'
@@ -61,6 +83,7 @@ done
 printf '%s\n' windows > "$TMP/server/assets/lazydb_1.2.3-beta.1_x86_64-pc-windows-msvc.zip"
 (cd "$TMP/server/assets" && sha256sum lazydb_*.tar.xz lazydb_*.zip > SHA256SUMS)
 python3 "$ROOT/scripts/release/generate-channel-manifest.py" beta 1.2.3-beta.1 2026-09-05T00:00:00Z "$TMP/server/assets" "$TMP/server/channels/beta.json"
+cp "$TMP/server/channels/beta.json" "$TMP/server/channels/v2/beta.json"
 export TMPDIR_TEST="$TMP" PATH="$TMP/bin:$PATH" LAZYDB_CHANNEL_BASE_URL=https://fixture/channels
 export LAZYDB_CONFIG_HOME="$TMP/home/config"
 export SHELL=/bin/bash LAZYDB_MCP_SETUP=skip
@@ -93,6 +116,39 @@ fi
 [ -f "$TMP/home/config/install.json" ]
 [ "$(python3 -c 'import json; print(json.load(open("'$TMP'/home/config/install.json"))["channel"])')" = stable ]
 [ -e "$TMP/install/lazydb" ]
+if HOME="$TMP/reject-home" LAZYDB_CONFIG_HOME="$TMP/reject-home/config" LAZYDB_INSTALL_TEST_LOG="$TMP/reject-downloads" FIXTURE_V2_STATUS=500 sh "$TMP/pages/install.sh" --install-dir "$TMP/reject-install" >"$TMP/reject-output" 2>&1; then
+    printf '%s\n' 'installer accepted an HTTP 500 manifest response' >&2; exit 1
+fi
+[ "$(wc -l < "$TMP/reject-downloads" | tr -d ' ')" = 1 ]
+[ ! -e "$TMP/reject-home/config/install.json" ]
+[ ! -e "$TMP/reject-home/config/current" ]
+cat > "$TMP/bin/getconf" <<'SH'
+#!/bin/sh
+if [ "${FIXTURE_GLIBC_VERSION:-2.17}" = invalid ]; then printf '%s\n' 'glibc unknown'; else printf 'glibc %s\n' "${FIXTURE_GLIBC_VERSION:-2.17}"; fi
+SH
+chmod 755 "$TMP/bin/getconf"
+if HOME="$TMP/incompatible-home" LAZYDB_CONFIG_HOME="$TMP/incompatible-home/config" LAZYDB_INSTALL_TEST_LOG="$TMP/incompatible-downloads" FIXTURE_V2_STATUS=200 sh "$TMP/pages/install.sh" --install-dir "$TMP/incompatible-install" >"$TMP/incompatible-output" 2>&1; then
+    printf '%s\n' 'installer accepted an incompatible glibc runtime' >&2; exit 1
+fi
+grep -q 'requires glibc' "$TMP/incompatible-output"
+[ "$(wc -l < "$TMP/incompatible-downloads" | tr -d ' ')" = 1 ]
+[ ! -e "$TMP/incompatible-home/config/install.json" ]
+[ ! -e "$TMP/incompatible-home/config/current" ]
+cat > "$TMP/bin/getconf" <<'SH'
+#!/bin/sh
+printf '%s\n' 'glibc 2.9'
+SH
+chmod 755 "$TMP/bin/getconf"
+if HOME="$TMP/numeric-home" LAZYDB_CONFIG_HOME="$TMP/numeric-home/config" LAZYDB_INSTALL_TEST_LOG="$TMP/numeric-downloads" FIXTURE_V2_STATUS=200 sh "$TMP/pages/install.sh" --install-dir "$TMP/numeric-install" >"$TMP/numeric-output" 2>&1; then
+    printf '%s\n' 'installer accepted glibc 2.9 for a 2.34 requirement' >&2; exit 1
+fi
+[ "$(wc -l < "$TMP/numeric-downloads" | tr -d ' ')" = 1 ]
+[ ! -e "$TMP/numeric-home/config/install.json" ]
+if HOME="$TMP/malformed-libc-home" LAZYDB_CONFIG_HOME="$TMP/malformed-libc-home/config" LAZYDB_INSTALL_TEST_LOG="$TMP/malformed-libc-downloads" FIXTURE_V2_STATUS=200 FIXTURE_GLIBC_VERSION=invalid sh "$TMP/pages/install.sh" --install-dir "$TMP/malformed-libc-install" >"$TMP/malformed-libc-output" 2>&1; then
+    printf '%s\n' 'installer accepted an unparseable glibc version' >&2; exit 1
+fi
+[ "$(wc -l < "$TMP/malformed-libc-downloads" | tr -d ' ')" = 1 ]
+[ ! -e "$TMP/malformed-libc-home/config/install.json" ]
 HOME="$TMP/home" sh "$TMP/pages/install.sh" --install-dir "$TMP/install" >/dev/null
 [ -d "$TMP/home/config/releases/1.2.3" ]
 if HOME="$TMP/home" sh "$TMP/pages/install.sh" --channel invalid --install-dir "$TMP/install" >/dev/null 2>&1; then

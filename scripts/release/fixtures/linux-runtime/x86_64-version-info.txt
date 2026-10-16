@@ -1,0 +1,16 @@
+Version symbols section '.gnu.version' contains 8 entries:
+ Addr: 0x0000000000000000  Offset: 0x00000000  Link: 3 (.dynsym)
+  000:   0 (*local*)       2 (GLIBC_2.2.5)   3 (GLIBC_2.34)    4h(GLIBC_2.39)
+
+Version needs section '.gnu.version_r' contains 2 entries:
+ Addr: 0x0000000000000000  Offset: 0x00000000  Link: 4 (.dynstr)
+  000000: Version: 1  File: libc.so.6  Cnt: 3
+  0x0010:   Name: GLIBC_2.39  Flags: WEAK  Version: 4
+  0x0020:   Name: GLIBC_2.34  Flags: none  Version: 3
+  0x0030:   Name: GLIBC_2.2.5  Flags: none  Version: 2
+
+Version definition section '.gnu.version_d' contains 4 entries:
+  000000: Rev: 1  Flags: BASE  Index: 1  Cnt: 1  Name: lazydb
+  0x0020: Rev: 1  Flags: none  Index: 2  Cnt: 1  Name: GLIBC_2.34
+  0x0040: Rev: 1  Flags: none  Index: 3  Cnt: 1  Name: GLIBC_2.39
+  0x0060: Rev: 1  Flags: none  Index: 4  Cnt: 1  Name: APP_1.0

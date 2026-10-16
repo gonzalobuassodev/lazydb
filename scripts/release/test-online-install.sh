@@ -12,11 +12,13 @@ url=
 while [ "$#" -gt 0 ]; do
     case "$1" in
         -o) shift; out=$1 ;;
+        -w) shift ;;
         https:*) url=$1 ;;
     esac
     shift
 done
 printf '%s\n' "$url" >> "$TEST_LOG"
+case "$url" in */v2/*) printf 500; exit 0 ;; esac
 cp "$TEST_INSTALLER" "$out"
 SH
 cat > "$TMP/bin/sleep" <<'SH'

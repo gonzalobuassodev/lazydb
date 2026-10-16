@@ -86,7 +86,13 @@ and enforce HTTPS. Verify the deployment and both channel documents:
 curl --fail --proto '=https' --tlsv1.2 https://lazydb.yelog.org/CNAME
 curl --fail --proto '=https' --tlsv1.2 https://lazydb.yelog.org/channels/stable.json
 curl --fail --proto '=https' --tlsv1.2 https://lazydb.yelog.org/channels/beta.json
+curl --fail --proto '=https' --tlsv1.2 https://lazydb.yelog.org/channels/v2/stable.json
+curl --fail --proto '=https' --tlsv1.2 https://lazydb.yelog.org/channels/v2/beta.json
 ```
+
+Linux release assets include per-architecture runtime reports and schema 2
+channel requirements. The report and package checks are described in
+[Linux runtime compatibility](linux-runtime-compatibility.md).
 
 The Pages job preserves the other channel manifest while publishing the
 channel associated with the newly published Release. It intentionally deploys

@@ -9,6 +9,7 @@ import sys
 import tempfile
 from pathlib import Path
 from typing import NoReturn
+import importlib.util
 
 
 TARGETS = (
@@ -21,6 +22,19 @@ TARGETS = (
 REPOSITORY = "yelog/lazydb"
 TAG_RE = re.compile(r"^v(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)(-beta\.[1-9][0-9]*)?$")
 SHA256_RE = re.compile(r"^[0-9a-fA-F]{64}$")
+LINUX_TARGETS = ("x86_64-unknown-linux-gnu", "aarch64-unknown-linux-gnu")
+
+
+def load_runtime_scanner():
+    path = Path(__file__).with_name("linux-runtime.py")
+    spec = importlib.util.spec_from_file_location("lazydb_linux_runtime", path)
+    if spec is None or spec.loader is None:
+        fail(f"could not load Linux runtime validator: {path}")
+    module = importlib.util.module_from_spec(spec)
+    import sys
+    sys.modules[spec.name] = module
+    spec.loader.exec_module(module)
+    return module
 
 
 def fail(message: str) -> "NoReturn":
@@ -44,9 +58,16 @@ def parse_checksums(path: Path) -> dict[str, str]:
 
 
 def main() -> None:
-    if len(sys.argv) != 6:
-        fail("usage: generate-channel-manifest.py CHANNEL VERSION PUBLISHED_AT ASSET_DIR OUTPUT")
-    channel, version, published_at, asset_dir, output = sys.argv[1:]
+    arguments = sys.argv[1:]
+    schema = 1
+    if arguments and arguments[0] == "--schema":
+        if len(arguments) < 3 or arguments[1] not in {"1", "2"}:
+            fail("--schema must be 1 or 2")
+        schema = int(arguments[1])
+        arguments = arguments[2:]
+    if len(arguments) != 5:
+        fail("usage: generate-channel-manifest.py [--schema 1|2] CHANNEL VERSION PUBLISHED_AT ASSET_DIR OUTPUT")
+    channel, version, published_at, asset_dir, output = arguments
     if channel not in {"stable", "beta"}:
         fail(f"invalid channel: {channel}")
     tag = f"v{version}"
@@ -59,6 +80,10 @@ def main() -> None:
     asset_dir_path = Path(asset_dir)
     checksums = parse_checksums(asset_dir_path / "SHA256SUMS")
     assets = {}
+    requirements: dict[str, dict[str, str]] = {}
+    runtime = None
+    if schema == 2:
+        runtime = load_runtime_scanner()
     for target in TARGETS:
         suffix = "zip" if target == "x86_64-pc-windows-msvc" else "tar.xz"
         name = f"lazydb_{version}_{target}.{suffix}"
@@ -74,9 +99,27 @@ def main() -> None:
             "url": f"https://github.com/{REPOSITORY}/releases/download/{tag}/{name}",
             "sha256": checksums[name],
         }
+        if schema == 2 and target in LINUX_TARGETS:
+            report_name = f"lazydb_{version}_{target}.runtime.json"
+            report_path = asset_dir_path / report_name
+            if not report_path.is_file():
+                fail(f"missing Linux runtime report: {report_name}")
+            if report_name not in checksums:
+                fail(f"checksum entry missing for {report_name}")
+            if hashlib.sha256(report_path.read_bytes()).hexdigest() != checksums[report_name]:
+                fail(f"checksum mismatch for {report_name}")
+            try:
+                report = runtime.verify_report(report_path, asset, target, version)
+            except (runtime.ScannerError, OSError, ValueError) as error:
+                fail(f"invalid Linux runtime report {report_name}: {error}")
+            requirements[target] = {
+                "family": "glibc",
+                "min_version": report["glibc"]["loader_min"],
+            }
+            assets[target]["requirements"] = {"libc": requirements[target]}
 
     manifest = {
-        "schema": 1,
+        "schema": schema,
         "product": "lazydb",
         "channel": channel,
         "version": version,

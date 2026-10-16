@@ -14,6 +14,9 @@ trap 'rm -rf "$TMP"' EXIT HUP INT TERM
 export HOME="$TMP/home" LAZYDB_CONFIG_HOME="$TMP/config"
 export LAZYDB_INSTALL_DIR="$TMP/bin" LAZYDB_CHANNEL="$channel"
 export LAZYDB_CHANNEL_BASE_URL=https://lazydb.yelog.org/channels
+if [ "$(uname -s)" = Linux ]; then
+    export LAZYDB_INSTALL_TEST_LOG="$TMP/downloads"
+fi
 unset LAZYDB_CHANNEL_LOCKED LAZYDB_VERSION
 mkdir -p "$HOME"
 # Pages/CDN propagation is asynchronous. Retry the normal public URL, not a

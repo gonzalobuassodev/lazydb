@@ -65,14 +65,34 @@ jobs:
           case "$version" in *-beta.*) channel=beta ;; *) channel=stable ;; esac
           echo "channel=$channel" >> "$GITHUB_OUTPUT"
           echo "version=$version" >> "$GITHUB_OUTPUT"
-          mkdir -p dist existing-pages
+          mkdir -p dist existing-pages/v2
           gh release download "$TAG" --dir dist --repo "$GITHUB_REPOSITORY"
           published_at=$(gh release view "$TAG" --repo "$GITHUB_REPOSITORY" --json publishedAt --jq .publishedAt)
           opposite=stable
           [ "$channel" = stable ] && opposite=beta
-          if curl --fail --location --proto '=https' --tlsv1.2 --max-time 30 -o "existing-pages/$opposite.json" "https://lazydb.yelog.org/channels/$opposite.json"; then
-            :
-          elif [ -f "pages/$opposite.json" ]; then
+          fetch_optional() {
+            url=$1
+            output=$2
+            status_file=$(mktemp)
+            http_code=$(curl --silent --show-error --location --proto '=https' --tlsv1.2 --max-time 30 \
+              --output "$output" --write-out '%{http_code}' "$url" 2>"$status_file") || {
+                cat "$status_file" >&2
+                rm -f "$status_file" "$output"
+                echo "failed to fetch existing Pages manifest: $url" >&2
+                exit 1
+              }
+            rm -f "$status_file"
+            case "$http_code" in
+              200) ;;
+              404) rm -f "$output" ;;
+              *) rm -f "$output"; echo "unexpected HTTP $http_code fetching $url" >&2; exit 1 ;;
+            esac
+          }
+          fetch_optional "https://lazydb.yelog.org/channels/$opposite.json" "existing-pages/$opposite.json"
+          fetch_optional "https://lazydb.yelog.org/channels/v2/$opposite.json" "existing-pages/v2/$opposite.json"
+          # For first migration deployments only, a checked-in legacy v1 manifest
+          # may be retained. There is no fabricated v2 document; its route remains 404.
+          if [ ! -f "existing-pages/$opposite.json" ] && [ -f "pages/$opposite.json" ]; then
             cp "pages/$opposite.json" "existing-pages/$opposite.json"
           fi
           sh scripts/release/assemble-pages.sh "$channel" "$version" "$published_at" dist pages existing-pages _site
@@ -101,7 +121,7 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        os: [ubuntu-24.04, macos-14]
+         os: [ubuntu-24.04, ubuntu-24.04-arm, macos-14]
     runs-on: ${{ matrix.os }}
     timeout-minutes: 15
     steps:

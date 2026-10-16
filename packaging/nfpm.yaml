@@ -17,8 +17,8 @@ contents:
     dst: /usr/share/doc/lazydb/README.md
 overrides:
   deb:
-    depends: []
+    depends: ["libc6 (>= __GLIBC_MIN__)", "libgcc-s1"]
   rpm:
-    depends: []
+    depends: ["glibc >= __GLIBC_MIN__", "libgcc"]
   archlinux:
-    depends: []
+    depends: ["glibc>=__GLIBC_MIN__"]

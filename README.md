@@ -75,6 +75,10 @@ Run the following on Mac or Linux to install LazyDB
 curl -fsSL https://lazydb.yelog.org/install.sh | sh
 ```
 
+Linux installers check the release's published glibc requirement before
+downloading its archive. See [Linux runtime compatibility](docs/linux-runtime-compatibility.md)
+for how to inspect your system and how the requirement is measured.
+
 Run the following on Windows to install LazyDB:
 
 ```powershell

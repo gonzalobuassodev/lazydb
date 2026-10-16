@@ -35,6 +35,7 @@ opposite=stable
 
 rm -rf "$output"
 mkdir -p "$output/channels"
+mkdir -p "$output/channels/v2"
 
 # The public entry points must work with `curl URL | sh`; do not make them
 # depend on a second script being present in the caller's working directory.
@@ -55,11 +56,39 @@ chmod 0755 "$output/install.sh" "$output/install-beta.sh" "$output/install-core.
 
 python3 "$ROOT/scripts/release/generate-channel-manifest.py" \
     "$channel" "$version" "$published_at" "$assets" "$output/channels/$channel.json"
+python3 "$ROOT/scripts/release/generate-channel-manifest.py" \
+    --schema 2 "$channel" "$version" "$published_at" "$assets" "$output/channels/v2/$channel.json"
 if [ -f "$existing_pages/$opposite.json" ]; then
     cp "$existing_pages/$opposite.json" "$output/channels/$opposite.json"
 fi
+if [ -f "$existing_pages/v2/$opposite.json" ]; then
+    cp "$existing_pages/v2/$opposite.json" "$output/channels/v2/$opposite.json"
+elif [ -f "$existing_pages/$opposite-v2.json" ]; then
+    cp "$existing_pages/$opposite-v2.json" "$output/channels/v2/$opposite.json"
+fi
+
+python3 - "$output/channels/$channel.json" "$output/channels/v2/$channel.json" \
+    "$output/channels/$opposite.json" "$output/channels/v2/$opposite.json" <<'PY'
+import json
+import sys
+from pathlib import Path
+
+current_v1 = json.load(open(sys.argv[1], encoding="utf-8"))
+current_v2 = json.load(open(sys.argv[2], encoding="utf-8"))
+if current_v1["version"] != current_v2["version"] or current_v1["tag"] != current_v2["tag"]:
+    raise SystemExit("Pages: current v1/v2 channel manifests do not describe the same release")
+for path in sys.argv[3:]:
+    if not Path(path).is_file():
+        continue
+    manifest = json.load(open(path, encoding="utf-8"))
+    expected_channel = "beta" if "beta" in Path(path).name else "stable"
+    if manifest.get("channel") != expected_channel:
+        raise SystemExit(f"Pages: retained manifest has the wrong channel: {path}")
+PY
 
 # The allow-list above is deliberate: release archives never become Pages files.
 unexpected=$(find "$output" -type f ! -name 'install.sh' ! -name 'install-beta.sh' \
-    ! -name 'install-core.sh' ! -name 'install.ps1' ! -name 'install.ps1.txt' ! -name 'CNAME' ! -name 'stable.json' ! -name 'beta.json' -print)
+    ! -name 'install-core.sh' ! -name 'install.ps1' ! -name 'install.ps1.txt' ! -name 'CNAME' \
+    ! -path "$output/channels/stable.json" ! -path "$output/channels/beta.json" \
+    ! -path "$output/channels/v2/stable.json" ! -path "$output/channels/v2/beta.json" -print)
 [ -z "$unexpected" ] || { printf 'pages: unexpected output file: %s\n' "$unexpected" >&2; exit 1; }

@@ -79,11 +79,21 @@ fn manifest(version: &str) -> String {
         let extension = if target.ends_with("msvc") { "zip" } else { "tar.xz" };
         (target.to_owned(), serde_json::json!({
             "url": format!("https://github.com/yelog/lazydb/releases/download/v{version}/lazydb_{version}_{target}.{extension}"),
-            "sha256": "a".repeat(64)
+            "sha256": "a".repeat(64),
+            "requirements": if target.ends_with("-linux-gnu") { serde_json::json!({"libc":{"family":"glibc","min_version":"2.34"}}) } else { serde_json::Value::Null }
         }))
     }).collect();
+    let assets: serde_json::Map<String, serde_json::Value> = assets
+        .into_iter()
+        .map(|(target, mut asset)| {
+            if asset["requirements"].is_null() {
+                asset.as_object_mut().unwrap().remove("requirements");
+            }
+            (target, asset)
+        })
+        .collect();
     serde_json::json!({
-        "schema": 1, "product": "lazydb", "channel": "stable", "version": version,
+        "schema": 2, "product": "lazydb", "channel": "stable", "version": version,
         "tag": format!("v{version}"), "prerelease": false, "published_at": "2026-09-09T00:00:00Z",
         "release_url": format!("https://github.com/yelog/lazydb/releases/tag/v{version}"), "assets": assets
     })
@@ -115,7 +125,8 @@ fn serve_manifest(
             .unwrap();
         let mut request = [0; 4096];
         let size = stream.read(&mut request).unwrap();
-        assert!(String::from_utf8_lossy(&request[..size]).starts_with("GET /stable.json "));
+        let request = String::from_utf8_lossy(&request[..size]);
+        assert!(request.starts_with("GET /v2/stable.json "), "{request}");
         if let Some(gate) = gate {
             gate.recv_timeout(Duration::from_secs(10))
                 .expect("release delayed response");

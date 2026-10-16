@@ -12,6 +12,12 @@ MODIFY_PATH=1
 
 usage() { printf '%s\n' 'Usage: install.sh [--channel stable|beta] [--version VERSION] [--install-dir PATH] [--mcp-setup auto|skip|ask] [--no-modify-path]'; }
 die() { printf 'lazydb installer: %s\n' "$*" >&2; exit 1; }
+download() {
+    request_url=
+    for request_arg do request_url=$request_arg; done
+    if [ -n "${LAZYDB_INSTALL_TEST_LOG:-}" ]; then printf '%s\n' "$request_url" >> "$LAZYDB_INSTALL_TEST_LOG"; fi
+    curl "$@"
+}
 while [ "$#" -gt 0 ]; do
     case "$1" in
         --channel) [ "$#" -gt 1 ] || die '--channel needs a value'; CHANNEL=$2; shift 2 ;;
@@ -74,14 +80,24 @@ trap 'release_lock; cleanup' EXIT HUP INT TERM
 acquire_lock
 
 MANIFEST="$TMP/manifest.json"
-curl --fail --location --proto '=https' --tlsv1.2 --max-time 60 -o "$MANIFEST" "$BASE_URL/$CHANNEL.json" || die 'manifest download failed'
-python3 - "$MANIFEST" "$CHANNEL" "$TARGET" "$VERSION" "$TMP/metadata" <<'PY'
+if download --location --proto '=https' --tlsv1.2 --max-time 60 -sS -w '%{http_code}' -o "$MANIFEST" "$BASE_URL/v2/$CHANNEL.json" > "$TMP/manifest-status"; then
+    MANIFEST_STATUS=$(cat "$TMP/manifest-status")
+else
+    die 'manifest download failed'
+fi
+if [ "$MANIFEST_STATUS" = 404 ]; then
+    download --fail --location --proto '=https' --tlsv1.2 --max-time 60 -o "$MANIFEST" "$BASE_URL/$CHANNEL.json" || die 'legacy manifest download failed'
+    MANIFEST_SCHEMA=1
+elif [ "$MANIFEST_STATUS" = 200 ]; then MANIFEST_SCHEMA=2
+else die "manifest request returned HTTP $MANIFEST_STATUS"
+fi
+python3 - "$MANIFEST" "$CHANNEL" "$TARGET" "$VERSION" "$MANIFEST_SCHEMA" "$TMP/metadata" <<'PY'
 import json, re, sys
 from urllib.parse import urlparse
-path, channel, target, requested, output = sys.argv[1:]
+path, channel, target, requested, expected_schema, output = sys.argv[1:]
 try:
     data = json.load(open(path, encoding='utf-8'))
-    if data.get('schema') != 1 or data.get('product') != 'lazydb' or data.get('channel') != channel:
+    if data.get('schema') != int(expected_schema) or data.get('product') != 'lazydb' or data.get('channel') != channel:
         raise ValueError('manifest identity mismatch')
     version = data['version']
     if not re.fullmatch(r'(?:0|[1-9][0-9]*)\.(?:0|[1-9][0-9]*)\.(?:0|[1-9][0-9]*)(?:-beta\.[1-9][0-9]*)?', version): raise ValueError('invalid version')
@@ -90,6 +106,22 @@ try:
     supported = {'x86_64-apple-darwin', 'aarch64-apple-darwin', 'x86_64-unknown-linux-gnu', 'aarch64-unknown-linux-gnu', 'x86_64-pc-windows-msvc'}
     if set(data.get('assets', {})) != supported: raise ValueError('manifest target set mismatch')
     asset = data['assets'][target]
+    if target.endswith('-linux-gnu'):
+        if expected_schema == '2':
+            libc = asset['requirements']['libc']
+            if libc.get('family') != 'glibc' or not re.fullmatch(r'[0-9]+\.[0-9]+', libc.get('min_version', '')):
+                raise ValueError('invalid Linux libc requirement')
+            import subprocess
+            version = subprocess.check_output(['getconf', 'GNU_LIBC_VERSION'], text=True).split()[-1]
+            try:
+                have = tuple(int(part) for part in version.split('.'))
+                need = tuple(int(part) for part in libc['min_version'].split('.'))
+            except ValueError as error: raise ValueError('invalid glibc version returned by getconf') from error
+            if have < need: raise ValueError('Linux runtime requires glibc %s, this system has %s' % (libc['min_version'], version))
+        elif 'requirements' in asset:
+            raise ValueError('unexpected asset requirements')
+    elif 'requirements' in asset:
+        raise ValueError('unexpected asset requirements')
     url = asset['url']; parsed = urlparse(url)
     if parsed.scheme != 'https' or parsed.netloc not in {'github.com', 'lazydb.yelog.org'} or not re.fullmatch(r'[0-9a-f]{64}', asset['sha256']): raise ValueError('invalid asset')
     name = url.rsplit('/', 1)[-1]
@@ -103,7 +135,7 @@ RELEASE_VERSION=$(awk 'NR == 1 { print; exit }' "$TMP/metadata")
 ARCHIVE_URL=$(awk 'NR == 2 { print; exit }' "$TMP/metadata")
 EXPECTED=$(awk 'NR == 3 { print; exit }' "$TMP/metadata")
 ARCHIVE_NAME="lazydb_${RELEASE_VERSION}_${TARGET}.tar.xz"
-curl --fail --location --proto '=https' --tlsv1.2 --max-time 60 -o "$TMP/archive.tar.xz" "$ARCHIVE_URL" || die 'archive download failed'
+download --fail --location --proto '=https' --tlsv1.2 --max-time 60 -o "$TMP/archive.tar.xz" "$ARCHIVE_URL" || die 'archive download failed'
 ACTUAL=$($HASH "$TMP/archive.tar.xz" | awk '{print $1}')
 [ "$ACTUAL" = "$EXPECTED" ] || die 'checksum mismatch'
 

@@ -1,0 +1,12 @@
+Version symbols section '.gnu.version' contains 5 entries:
+  000:   0 (*local*)       2 (GLIBC_2.17)   3 (GLIBC_2.28)    4 (GLIBC_2.39)
+
+Version needs section '.gnu.version_r' contains 2 entries:
+  000000: Version: 1  File: libc.so.6  Cnt: 2
+  0x0010:   Name: GLIBC_2.39  Flags: WEAK  Version: 4
+  0x0020:   Name: GLIBC_2.17  Flags: none  Version: 2
+  0x0030: Version: 1  File: libgcc_s.so.1  Cnt: 1
+  0x0040:   Name: GCC_4.2.0  Flags: none  Version: 3
+
+Version definition section '.gnu.version_d' contains 1 entries:
+  000000: Rev: 1  Flags: BASE  Index: 1  Cnt: 1  Name: lazydb

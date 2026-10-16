@@ -1,0 +1,7 @@
+Version needs section '.gnu.version_r' contains 1 entries:
+  000000: Version: 1  File: libc.so.6  Cnt: 1
+  0x0010:   Name: GLIBC_PRIVATE  Flags: none  Version: 2
+
+Version symbols section '.gnu.version' contains 2 entries:
+Version definition section '.gnu.version_d' contains 1 entries:
+  000000: Rev: 1  Flags: BASE  Index: 1  Cnt: 1  Name: fixture
