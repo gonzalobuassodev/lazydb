@@ -1439,7 +1439,7 @@ pub(crate) fn classify_column_type(
         | DatabaseKind::MariaDb
         | DatabaseKind::Oracle
         | DatabaseKind::Sqlite => None,
-        DatabaseKind::Redis => None,
+        DatabaseKind::Redis | DatabaseKind::MongoDb => None,
     }?;
 
     Some(ColumnEditorDescription { kind })

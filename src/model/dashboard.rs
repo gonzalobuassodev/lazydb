@@ -383,6 +383,40 @@ pub struct DashboardTab {
     pub grid: crate::model::tab::DataGridState,
 }
 
+#[derive(Clone, Debug, Default, PartialEq)]
+pub struct MongoDashboardTab {
+    pub id: Uuid,
+    pub profile_id: Uuid,
+    pub database: String,
+    pub generation: u64,
+    pub snapshot: Option<crate::db::mongodb::monitor::MongoMonitorSnapshot>,
+    pub loading: bool,
+    pub errors: Vec<String>,
+    pub users: Vec<crate::db::mongodb::principal::MongoPrincipalInfo>,
+    pub roles: Vec<mongodb::bson::Document>,
+    pub principal_mutation:
+        Option<Box<crate::model::mongodb_principal::MongoPrincipalMutationDraft>>,
+    pub principal_confirmation: Option<String>,
+    pub principal_confirmation_input: String,
+    pub principal_pending_target: Option<String>,
+    pub principal_pending_operation: Option<String>,
+    pub principal_pending_connection_generation: Option<u64>,
+    pub connection_generation: Option<u64>,
+}
+
+impl MongoDashboardTab {
+    pub fn new(profile_id: Uuid, database: impl Into<String>) -> Self {
+        let database = database.into();
+        Self {
+            id: Uuid::new_v4(),
+            profile_id,
+            connection_generation: Some(0),
+            database,
+            ..Self::default()
+        }
+    }
+}
+
 impl DashboardTab {
     pub fn new() -> Self {
         Self {

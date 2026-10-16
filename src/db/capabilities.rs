@@ -4,11 +4,13 @@ use crate::profile::DatabaseKind;
 pub enum InteractionModel {
     Relational,
     KeyValue,
+    Document,
 }
 
 pub const fn interaction_model(kind: DatabaseKind) -> InteractionModel {
     match kind {
         DatabaseKind::Redis => InteractionModel::KeyValue,
+        DatabaseKind::MongoDb => InteractionModel::Document,
         _ => InteractionModel::Relational,
     }
 }
@@ -81,6 +83,14 @@ impl DatabaseCapabilities {
                 relation_ddl: false,
                 relation_edit: false,
                 monitoring: false,
+                manual_transactions: false,
+                cancellation: false,
+            },
+            DatabaseKind::MongoDb => Self {
+                catalog: true,
+                relation_ddl: false,
+                relation_edit: false,
+                monitoring: true,
                 manual_transactions: false,
                 cancellation: false,
             },

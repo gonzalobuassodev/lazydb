@@ -23,6 +23,8 @@ fn history(id: Uuid, sql: &str) -> ExecutionHistory {
         profile_id: None,
         database: None,
         schema: None,
+        language: lazydb::model::sql_history::HistoryLanguage::Sql,
+        mongo_command: None,
     }
 }
 
@@ -66,6 +68,47 @@ async fn store_round_trips_full_sql_and_updates_completion_idempotently() {
     assert_eq!(detail.affected_rows, Some(0));
     assert_eq!(detail.returned_rows, Some(1));
     assert_eq!(detail.database, None);
+}
+
+#[tokio::test]
+async fn mongo_history_stores_only_command_summary_and_survives_sql_history_paging() {
+    let temp = TempDir::new().unwrap();
+    let store = HistoryStore::open(temp.path().join("history.sqlite3"))
+        .await
+        .unwrap();
+    let id = Uuid::new_v4();
+    store
+        .insert_mongo_summary(&lazydb::model::sql_history::MongoCommandHistory {
+            execution_id: id,
+            profile_id: Uuid::new_v4(),
+            database: "app".into(),
+            command_name: "find".into(),
+            status: HistoryExecutionStatus::Running,
+            certainty: HistoryResultCertainty::Confirmed,
+            returned_documents: None,
+            elapsed_millis: None,
+            redacted: false,
+        })
+        .await
+        .unwrap();
+    store
+        .finish_mongo_summary(
+            id,
+            HistoryExecutionStatus::Succeeded,
+            HistoryResultCertainty::Confirmed,
+            Some(3),
+            Some(9),
+        )
+        .await
+        .unwrap();
+    let detail = store.detail(id).await.unwrap().unwrap();
+    assert_eq!(
+        detail.language,
+        lazydb::model::sql_history::HistoryLanguage::Mongo
+    );
+    assert_eq!(detail.mongo_command.as_deref(), Some("find"));
+    assert!(!detail.sql.contains("filter"));
+    assert_eq!(detail.returned_rows, Some(3));
 }
 
 #[tokio::test]

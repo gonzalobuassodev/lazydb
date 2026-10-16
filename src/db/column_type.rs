@@ -33,7 +33,7 @@ impl ColumnTypePolicy {
             DatabaseKind::Postgres | DatabaseKind::Sqlite => "text",
             DatabaseKind::MySql | DatabaseKind::MariaDb => "text",
             DatabaseKind::SqlServer => "nvarchar(255)",
-            DatabaseKind::Redis => "text",
+            DatabaseKind::Redis | DatabaseKind::MongoDb => "text",
         }
     }
 

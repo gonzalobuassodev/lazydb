@@ -47,7 +47,7 @@ pub fn preview_sql_for_relation(
                 parts.push(schema);
             }
         }
-        DatabaseKind::Redis => {}
+        DatabaseKind::Redis | DatabaseKind::MongoDb => {}
     }
     parts.push(relation.object.as_str());
     preview_sql_for_parts(session, &parts, Some(kind), columns, primary_key_columns)

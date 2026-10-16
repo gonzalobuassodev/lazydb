@@ -23,6 +23,7 @@ fn profile(kind: DatabaseKind) -> ConnectionProfile {
         database: Some("app".into()),
         default_schema: Some("public".into()),
         sqlite_path: (kind == DatabaseKind::Sqlite).then(|| PathBuf::from("app.db")),
+        mongodb_options: None,
         ssl_mode: SslMode::Prefer,
         credential_policy: CredentialPolicy::None,
         read_only: false,

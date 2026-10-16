@@ -31,6 +31,7 @@ ratatui = { version = "0.30.2", features = ["crossterm_0_29"] }
 regex = "1"
 reqwest = { version = "0.12", default-features = false, features = ["rustls-tls", "system-proxy"] }
 redis = { version = "=1.5.0", default-features = false, features = ["connection-manager", "tokio-rustls-comp"] }
+mongodb = { version = "=3.8.2", default-features = false, features = ["rustls-tls", "dns-resolver", "compat-3-0-0"] }
 sha2 = "0.10"
 tar = "0.4"
 rmcp = { version = "3.1.4", default-features = false, features = ["client", "server", "macros", "transport-io", "transport-child-process"] }

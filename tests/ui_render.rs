@@ -7765,6 +7765,7 @@ fn driver_options_use_database_icons_in_each_icon_mode() {
                 DatabaseKind::SqlServer => "SQL Server",
                 DatabaseKind::Sqlite => "SQLite",
                 DatabaseKind::Redis => "Redis",
+                DatabaseKind::MongoDb => "MongoDB",
             };
             let label = format!("{} {display_name}", IconSet::new(mode).database(kind));
             assert!(

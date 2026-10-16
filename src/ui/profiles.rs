@@ -1434,6 +1434,7 @@ fn url_help(kind: DatabaseKind) -> &'static str {
         DatabaseKind::SqlServer => "Accepts sqlserver://, mssql://, and jdbc:sqlserver://",
         DatabaseKind::Sqlite => "Accepts sqlite://, file:, and jdbc:sqlite:",
         DatabaseKind::Redis => "Accepts redis:// and rediss://",
+        DatabaseKind::MongoDb => "Accepts mongodb:// and mongodb+srv://",
     }
 }
 

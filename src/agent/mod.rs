@@ -5,6 +5,7 @@ pub(crate) mod client_runtime;
 pub mod context;
 pub mod doctor;
 pub mod mcp;
+pub mod mongodb;
 pub(crate) mod opencode_config;
 pub use opencode_config::Format as OpenCodeFormat;
 pub mod policy;

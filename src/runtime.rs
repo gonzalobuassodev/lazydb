@@ -451,6 +451,7 @@ fn clipboard_write_failure_message() -> String {
 #[derive(Clone, Debug)]
 struct ActiveConnection {
     database: DatabaseConnection,
+    target: ExecutionTarget,
 }
 
 struct CatalogMutationConnection {
@@ -492,7 +493,12 @@ struct ManualTransactionEntry {
 struct WorkspaceSaveQueue {
     store: WorkspaceStore,
     pending: Option<(u64, crate::persistence::workspace::WorkspaceSnapshot)>,
-    failed: Option<(u64, crate::persistence::workspace::WorkspaceSnapshot)>,
+    pending_mongo: Option<crate::persistence::mongodb_workspace::PersistedMongoWorkspace>,
+    failed: Option<(
+        u64,
+        crate::persistence::workspace::WorkspaceSnapshot,
+        crate::persistence::mongodb_workspace::PersistedMongoWorkspace,
+    )>,
     active: Option<JoinHandle<()>>,
     next_revision: u64,
     acknowledged_revision: u64,
@@ -504,6 +510,7 @@ impl WorkspaceSaveQueue {
         Self {
             store,
             pending: None,
+            pending_mongo: None,
             failed: None,
             active: None,
             next_revision: 0,
@@ -512,9 +519,15 @@ impl WorkspaceSaveQueue {
         }
     }
 
-    fn offer(&mut self, revision: u64, snapshot: crate::persistence::workspace::WorkspaceSnapshot) {
+    fn offer(
+        &mut self,
+        revision: u64,
+        snapshot: crate::persistence::workspace::WorkspaceSnapshot,
+        mongo: crate::persistence::mongodb_workspace::PersistedMongoWorkspace,
+    ) {
         self.next_revision = self.next_revision.max(revision);
         self.pending = Some((revision, snapshot));
+        self.pending_mongo = Some(mongo);
     }
 
     fn flush(&mut self, revision: u64, sender: mpsc::UnboundedSender<Action>) {
@@ -542,16 +555,30 @@ impl WorkspaceSaveQueue {
             return;
         };
         let store = self.store.clone();
+        let mongo_store = store.mongodb_store();
+        let mongo_snapshot = self.pending_mongo.take().unwrap_or(
+            crate::persistence::mongodb_workspace::PersistedMongoWorkspace {
+                consoles: Vec::new(),
+                commands: Vec::new(),
+            },
+        );
         let retry_snapshot = snapshot.clone();
-        self.failed = Some((revision, retry_snapshot));
+        let retry_mongo = mongo_snapshot.clone();
+        self.failed = Some((revision, retry_snapshot, retry_mongo));
         self.active = Some(tokio::spawn(async move {
-            let result = tokio::task::spawn_blocking(move || store.save(&snapshot))
-                .await
-                .unwrap_or_else(|error| {
-                    Err(crate::persistence::workspace::WorkspaceError::Invalid(
-                        format!("workspace save worker failed: {error}"),
-                    ))
-                });
+            let result = tokio::task::spawn_blocking(move || {
+                store.save(&snapshot).and_then(|()| {
+                    mongo_store.save(&mongo_snapshot).map_err(|error| {
+                        crate::persistence::workspace::WorkspaceError::Invalid(error.to_string())
+                    })
+                })
+            })
+            .await
+            .unwrap_or_else(|error| {
+                Err(crate::persistence::workspace::WorkspaceError::Invalid(
+                    format!("workspace save worker failed: {error}"),
+                ))
+            });
             let action = match result {
                 Ok(()) => Action::WorkspaceSaveSucceeded { revision },
                 Err(error) => Action::WorkspaceSaveFailed {
@@ -576,7 +603,7 @@ impl WorkspaceSaveQueue {
             && self
                 .failed
                 .as_ref()
-                .is_some_and(|(failed_revision, _)| *failed_revision == revision)
+                .is_some_and(|(failed_revision, _, _)| *failed_revision == revision)
         {
             self.failed = None;
         }
@@ -587,8 +614,11 @@ impl WorkspaceSaveQueue {
     }
 
     fn retry(&mut self, sender: mpsc::UnboundedSender<Action>) {
-        if self.pending.is_none() {
-            self.pending = self.failed.take();
+        if self.pending.is_none()
+            && let Some((revision, snapshot, mongo)) = self.failed.take()
+        {
+            self.pending = Some((revision, snapshot));
+            self.pending_mongo = Some(mongo);
         }
         self.poll(sender);
     }
@@ -598,6 +628,7 @@ pub struct Runtime {
     registry: Arc<Mutex<ProfileRegistry>>,
     profile_store: ProfileStore,
     workspace_store: Option<WorkspaceStore>,
+    mongo_workspace_store: Option<crate::persistence::mongodb_workspace::MongoWorkspaceStore>,
     settings_store: Option<crate::persistence::settings::SettingsStore>,
     workspace_mutation: Arc<Mutex<()>>,
     workspace_save: Option<WorkspaceSaveQueue>,
@@ -654,6 +685,17 @@ pub struct Runtime {
     history_recorder: Option<crate::history::HistoryRecorder>,
     history_store: Option<crate::persistence::sql_history::HistoryStore>,
     history_executions: HashMap<(Uuid, u64), Uuid>,
+    mongo_transaction_workers: std::sync::Arc<
+        StdMutex<
+            HashMap<
+                Uuid,
+                (
+                    u64,
+                    crate::db::mongodb::transaction::MongoTransactionWorkerSender,
+                ),
+            >,
+        >,
+    >,
 }
 
 #[derive(Debug)]
@@ -693,6 +735,7 @@ impl Runtime {
         event_sender: mpsc::UnboundedSender<Action>,
     ) -> Self {
         let profiles = collection.profiles;
+        let mongo_transaction_workers = Arc::new(StdMutex::new(HashMap::new()));
         let local_credential_store = local_credential_store_for(&profile_store);
         let mut order = Vec::with_capacity(profiles.len());
         let mut profiles_by_id = HashMap::with_capacity(profiles.len());
@@ -724,6 +767,7 @@ impl Runtime {
             })),
             profile_store,
             workspace_store: None,
+            mongo_workspace_store: None,
             settings_store: None,
             workspace_mutation: Arc::new(Mutex::new(())),
             workspace_save: None,
@@ -765,6 +809,7 @@ impl Runtime {
             history_recorder: None,
             history_store: None,
             history_executions: HashMap::new(),
+            mongo_transaction_workers,
         }
     }
 
@@ -783,6 +828,13 @@ impl Runtime {
     pub fn set_workspace_store(&mut self, store: WorkspaceStore) {
         self.workspace_save = Some(WorkspaceSaveQueue::new(store.clone()));
         self.workspace_store = Some(store);
+    }
+
+    pub fn set_mongo_workspace_store(
+        &mut self,
+        store: crate::persistence::mongodb_workspace::MongoWorkspaceStore,
+    ) {
+        self.mongo_workspace_store = Some(store);
     }
 
     pub fn set_settings_store(&mut self, store: crate::persistence::settings::SettingsStore) {
@@ -861,6 +913,223 @@ impl Runtime {
                 profile_id,
                 generation,
             } => self.discover_redis_databases(profile_id, generation),
+            Command::DiscoverMongoDatabases {
+                profile_id,
+                generation,
+            } => self.discover_mongo_databases(profile_id, generation),
+            Command::DiscoverMongoCollections {
+                profile_id,
+                generation,
+                database,
+            } => self.discover_mongo_collections(profile_id, generation, database),
+            Command::DiscoverMongoIndexes {
+                profile_id,
+                generation,
+                namespace,
+            } => self.discover_mongo_indexes(profile_id, generation, namespace),
+            Command::LoadMongoPage {
+                tab_id,
+                profile_id,
+                generation,
+                connection_generation,
+                spec,
+            } => self.load_mongo_page(tab_id, profile_id, generation, connection_generation, spec),
+            Command::RunMongoConsole {
+                tab_id,
+                profile_id,
+                database,
+                generation,
+                connection_generation,
+                command,
+                transaction_generation,
+            } => {
+                if let Some(transaction_generation) = transaction_generation {
+                    match crate::mongodb_command::parse_command(&command, &database) {
+                        Ok(parsed)
+                            if parsed.risk
+                                == crate::mongodb_command::MongoCommandRisk::ReadOnly
+                                && parsed.kind
+                                    == crate::mongodb_command::MongoCommandKind::Find
+                                && parsed.validate_supported_fields().is_ok() =>
+                        {
+                            self.run_mongo_transaction_command(
+                                tab_id,
+                                database,
+                                transaction_generation,
+                                parsed.command,
+                            );
+                        }
+                        _ => {
+                            let _ = self.event_sender.send(Action::MongoConsoleFailed { tab_id, generation, message: "Only supported collection find commands can run in a transaction".into() });
+                        }
+                    }
+                } else {
+                    let active_transaction = self
+                        .mongo_transaction_workers
+                        .lock()
+                        .ok()
+                        .and_then(|workers| workers.get(&tab_id).map(|(active, _)| *active));
+                    if let Some(transaction_generation) = active_transaction {
+                        match crate::mongodb_command::parse_command(&command, &database) {
+                            Ok(parsed)
+                                if parsed.risk
+                                    == crate::mongodb_command::MongoCommandRisk::ReadOnly
+                                    && parsed.kind
+                                        == crate::mongodb_command::MongoCommandKind::Find
+                                    && parsed.validate_supported_fields().is_ok() =>
+                            {
+                                self.run_mongo_transaction_command(
+                                    tab_id,
+                                    database,
+                                    transaction_generation,
+                                    parsed.command,
+                                )
+                            }
+                            _ => {
+                                let _ = self.event_sender.send(Action::MongoConsoleFailed { tab_id, generation, message: "Only supported collection find commands can run in a transaction".into() });
+                            }
+                        }
+                    } else if transaction_generation.is_none() {
+                        self.run_mongo_console(
+                            tab_id,
+                            profile_id,
+                            database,
+                            connection_generation,
+                            generation,
+                            command,
+                        )
+                    } else {
+                        let _ = self.event_sender.send(Action::MongoConsoleFailed {
+                            tab_id,
+                            generation,
+                            message:
+                                "Only supported collection find commands can run in a transaction"
+                                    .into(),
+                        });
+                    }
+                }
+            }
+            Command::RunMongoManagement {
+                profile_id,
+                generation,
+                operation,
+                draft,
+            } => self.run_mongo_management(profile_id, generation, operation, draft),
+            Command::RefreshMongoMonitor {
+                profile_id,
+                database,
+                connection_generation,
+                generation,
+            } => {
+                self.refresh_mongo_monitor(profile_id, database, connection_generation, generation)
+            }
+            Command::LoadMongoPrincipals {
+                profile_id,
+                database,
+                connection_generation,
+                generation,
+            } => {
+                self.load_mongo_principals(profile_id, database, connection_generation, generation)
+            }
+            Command::ExecuteMongoPrincipalMutation {
+                profile_id,
+                connection_generation,
+                selected_database,
+                mutation,
+            } => self.execute_mongo_principal_mutation(
+                profile_id,
+                connection_generation,
+                selected_database,
+                mutation,
+            ),
+            Command::MongoTransactionBegin {
+                tab_id,
+                profile_id,
+                database,
+                connection_generation,
+                generation,
+            } => self.begin_mongo_transaction(
+                tab_id,
+                profile_id,
+                database,
+                connection_generation,
+                generation,
+            ),
+            Command::MongoTransactionCommand {
+                tab_id,
+                database,
+                generation,
+                command,
+            } => self.run_mongo_transaction_command(tab_id, database, generation, command),
+            Command::MongoTransactionCommit { tab_id, generation } => {
+                self.finish_mongo_transaction(tab_id, generation, true)
+            }
+            Command::MongoTransactionAbort { tab_id, generation } => {
+                self.finish_mongo_transaction(tab_id, generation, false)
+            }
+            Command::UnregisterMongoTransactionWorker { tab_id, generation } => {
+                let mut workers = self
+                    .mongo_transaction_workers
+                    .lock()
+                    .unwrap_or_else(|poisoned| poisoned.into_inner());
+                if workers
+                    .get(&tab_id)
+                    .is_some_and(|(active, _)| *active == generation)
+                {
+                    workers.remove(&tab_id);
+                }
+            }
+            Command::ReplaceMongoDocument {
+                tab_id,
+                profile_id,
+                connection_generation,
+                mutation_generation,
+                namespace,
+                id,
+                expected,
+                replacement,
+            } => self.replace_mongo_document(
+                tab_id,
+                profile_id,
+                connection_generation,
+                mutation_generation,
+                namespace,
+                id,
+                expected,
+                replacement,
+            ),
+            Command::InsertMongoDocuments {
+                tab_id,
+                profile_id,
+                generation,
+                mutation_generation,
+                namespace,
+                documents,
+            } => self.mutate_mongo_insert(
+                tab_id,
+                profile_id,
+                generation,
+                mutation_generation,
+                namespace,
+                documents,
+            ),
+            Command::DeleteMongoDocument {
+                tab_id,
+                profile_id,
+                generation,
+                mutation_generation,
+                namespace,
+                id,
+                expected,
+            } => self.mutate_mongo_delete(
+                tab_id,
+                profile_id,
+                generation,
+                mutation_generation,
+                namespace,
+                id,
+                expected,
+            ),
             Command::ScanRedisKeys(request) => self.scan_redis_keys(request),
             Command::DeleteRedisKey {
                 tab_id,
@@ -1315,10 +1584,28 @@ impl Runtime {
                     let _ = sender.send(Action::StartUpdateCheck { automatic: true });
                 }));
             }
-            Command::PersistWorkspace { revision, snapshot } => {
+            Command::PersistWorkspace {
+                revision,
+                snapshot,
+                mongo,
+            } => {
                 if let Some(queue) = self.workspace_save.as_mut() {
-                    queue.offer(revision, snapshot);
+                    queue.offer(revision, snapshot, mongo);
                     queue.poll(self.event_sender.clone());
+                }
+            }
+            Command::CloseMongoConsoleDocument(id) => {
+                if let Some(store) = self.mongo_workspace_store.clone() {
+                    self.background_tasks.push(tokio::spawn(async move {
+                        let _ = tokio::task::spawn_blocking(move || store.mark_closed(id)).await;
+                    }));
+                }
+            }
+            Command::DeleteMongoConsoleDocument(id) => {
+                if let Some(store) = self.mongo_workspace_store.clone() {
+                    self.background_tasks.push(tokio::spawn(async move {
+                        let _ = tokio::task::spawn_blocking(move || store.delete_console(id)).await;
+                    }));
                 }
             }
             Command::FlushWorkspace { revision } => {
@@ -1450,6 +1737,1108 @@ impl Runtime {
                     let _ = sender.send(Action::ProfileTestFailed {
                         request_id,
                         message: sanitize_terminal_text(&error.to_string()),
+                    });
+                }
+            }
+        }));
+    }
+
+    fn discover_mongo_databases(&mut self, profile_id: Uuid, generation: u64) {
+        let connection = Arc::clone(&self.connection);
+        let sender = self.event_sender.clone();
+        self.background_tasks.push(tokio::spawn(async move {
+            let database = connection
+                .lock()
+                .await
+                .iter()
+                .find(|(key, _)| {
+                    key.identity.profile_id == profile_id && key.identity.generation == generation
+                })
+                .map(|(_, active)| active.database.clone());
+            let result = match database {
+                Some(DatabaseConnection::MongoDb(adapter)) => {
+                    adapter
+                        .list_databases_with_authority(
+                            crate::db::mongodb::types::DatabaseListAuthority::AuthorizedOnly,
+                        )
+                        .await
+                }
+                _ => Err(DatabaseError::configuration(
+                    "MongoDB connection is not active",
+                )),
+            };
+            match result {
+                Ok(listing) => {
+                    let _ = sender.send(Action::MongoDatabasesLoaded {
+                        profile_id,
+                        generation,
+                        listing,
+                    });
+                }
+                Err(error) => {
+                    let _ = sender.send(Action::MongoDatabasesFailed {
+                        profile_id,
+                        generation,
+                        message: error.message,
+                    });
+                }
+            }
+        }));
+    }
+
+    fn discover_mongo_collections(
+        &mut self,
+        profile_id: Uuid,
+        generation: u64,
+        database_name: String,
+    ) {
+        let connection = Arc::clone(&self.connection);
+        let sender = self.event_sender.clone();
+        self.background_tasks.push(tokio::spawn(async move {
+            let database = connection
+                .lock()
+                .await
+                .iter()
+                .find(|(key, _)| {
+                    key.identity.profile_id == profile_id && key.identity.generation == generation
+                })
+                .map(|(_, active)| active.database.clone());
+            let result = match database {
+                Some(DatabaseConnection::MongoDb(adapter)) => {
+                    adapter.list_collections(&database_name).await
+                }
+                _ => Err(DatabaseError::configuration(
+                    "MongoDB connection is not active",
+                )),
+            };
+            match result {
+                Ok(collections) => {
+                    let _ = sender.send(Action::MongoCollectionsLoaded {
+                        profile_id,
+                        generation,
+                        database: database_name,
+                        collections,
+                    });
+                }
+                Err(error) => {
+                    let _ = sender.send(Action::MongoCollectionsFailed {
+                        profile_id,
+                        generation,
+                        database: database_name,
+                        message: error.message,
+                    });
+                }
+            }
+        }));
+    }
+
+    fn discover_mongo_indexes(
+        &mut self,
+        profile_id: Uuid,
+        generation: u64,
+        namespace: crate::db::mongodb::types::MongoNamespace,
+    ) {
+        let connection = Arc::clone(&self.connection);
+        let sender = self.event_sender.clone();
+        self.background_tasks.push(tokio::spawn(async move {
+            let database = connection
+                .lock()
+                .await
+                .iter()
+                .find(|(key, _)| {
+                    key.identity.profile_id == profile_id && key.identity.generation == generation
+                })
+                .map(|(_, active)| active.database.clone());
+            let result = match database {
+                Some(DatabaseConnection::MongoDb(adapter)) => {
+                    adapter.list_indexes(&namespace).await
+                }
+                _ => Err(DatabaseError::configuration(
+                    "MongoDB connection is not active",
+                )),
+            };
+            match result {
+                Ok(indexes) => {
+                    let _ = sender.send(Action::MongoIndexesLoaded {
+                        profile_id,
+                        generation,
+                        namespace,
+                        indexes,
+                    });
+                }
+                Err(error) => {
+                    let _ = sender.send(Action::MongoIndexesFailed {
+                        profile_id,
+                        generation,
+                        namespace,
+                        message: error.message,
+                    });
+                }
+            }
+        }));
+    }
+
+    fn load_mongo_page(
+        &mut self,
+        tab_id: Uuid,
+        profile_id: Uuid,
+        generation: u64,
+        connection_generation: u64,
+        spec: crate::db::mongodb::types::FindSpec,
+    ) {
+        let connection = Arc::clone(&self.connection);
+        let sender = self.event_sender.clone();
+        self.background_tasks.push(tokio::spawn(async move {
+            let database = connection
+                .lock()
+                .await
+                .iter()
+                .find(|(key, _)| {
+                    key.identity.profile_id == profile_id
+                        && key.identity.generation == connection_generation
+                })
+                .map(|(_, active)| active.database.clone());
+            let result = match database {
+                Some(DatabaseConnection::MongoDb(adapter)) => adapter.find_page(&spec).await,
+                _ => Err(DatabaseError::configuration(
+                    "MongoDB connection is not active",
+                )),
+            };
+            match result {
+                Ok(page) => {
+                    let _ = sender.send(Action::MongoPageLoaded {
+                        tab_id,
+                        profile_id,
+                        generation,
+                        connection_generation,
+                        page,
+                    });
+                }
+                Err(error) => {
+                    let _ = sender.send(Action::MongoPageFailed {
+                        tab_id,
+                        generation,
+                        message: error.message,
+                    });
+                }
+            }
+        }));
+    }
+
+    fn run_mongo_console(
+        &mut self,
+        tab_id: Uuid,
+        profile_id: Uuid,
+        database: String,
+        connection_generation: u64,
+        generation: u64,
+        command_text: String,
+    ) {
+        let execution_id = Uuid::new_v4();
+        let started = std::time::Instant::now();
+        let connection = Arc::clone(&self.connection);
+        let registry = Arc::clone(&self.registry);
+        let recorder = self.history_recorder.clone();
+        let sender = self.event_sender.clone();
+        self.background_tasks.push(tokio::spawn(async move {
+            let parsed_summary =
+                crate::mongodb_command::parse_command(&command_text, &database).ok();
+            if let (Some(recorder), Some(parsed)) = (&recorder, &parsed_summary) {
+                let _ = recorder
+                    .start_mongo(crate::model::sql_history::MongoCommandHistory {
+                        execution_id,
+                        profile_id,
+                        database: database.clone(),
+                        command_name: parsed.command_name.clone(),
+                        status: crate::model::sql_history::HistoryExecutionStatus::Running,
+                        certainty: crate::model::sql_history::HistoryResultCertainty::Confirmed,
+                        returned_documents: None,
+                        elapsed_millis: None,
+                        redacted: false,
+                    })
+                    .await;
+            }
+            let connections = connection.lock().await;
+            let Some(adapter) = connections
+                .iter()
+                .find(|(key, active)| {
+                    key.identity.profile_id == profile_id
+                        && key.identity.generation == connection_generation
+                        && active.target.database == database
+                        && matches!(active.database, DatabaseConnection::MongoDb(_))
+                })
+                .and_then(|(_, active)| match &active.database {
+                    DatabaseConnection::MongoDb(adapter) => Some(adapter.clone()),
+                    _ => None,
+                })
+            else {
+                let _ = sender.send(Action::MongoConsoleFailed {
+                    tab_id,
+                    generation,
+                    message: "MongoDB connection is not active".into(),
+                });
+                return;
+            };
+            let parsed = match crate::mongodb_command::parse_command(&command_text, &database) {
+                Ok(parsed) if parsed.risk == crate::mongodb_command::MongoCommandRisk::ReadOnly => {
+                    parsed
+                }
+                Ok(_) => {
+                    let _ = sender.send(Action::MongoConsoleFailed {
+                        tab_id,
+                        generation,
+                        message: "Mongo console accepts read-only commands".into(),
+                    });
+                    if let Some(recorder) = &recorder {
+                        let _ = recorder
+                            .finish_mongo(
+                                execution_id,
+                                crate::model::sql_history::HistoryExecutionStatus::NotExecuted,
+                                crate::model::sql_history::HistoryResultCertainty::Confirmed,
+                                None,
+                                Some(started.elapsed().as_millis()),
+                            )
+                            .await;
+                    }
+                    return;
+                }
+                Err(error) => {
+                    let _ = sender.send(Action::MongoConsoleFailed {
+                        tab_id,
+                        generation,
+                        message: error.to_string(),
+                    });
+                    if let Some(recorder) = &recorder {
+                        let _ = recorder
+                            .finish_mongo(
+                                execution_id,
+                                crate::model::sql_history::HistoryExecutionStatus::NotExecuted,
+                                crate::model::sql_history::HistoryResultCertainty::Confirmed,
+                                None,
+                                Some(started.elapsed().as_millis()),
+                            )
+                            .await;
+                    }
+                    return;
+                }
+            };
+            {
+                let profile = registry.lock().await.profiles.get(&profile_id).cloned();
+                let Some(profile) = profile else {
+                    let _ = sender.send(Action::MongoConsoleFailed {
+                        tab_id,
+                        generation,
+                        message: "MongoDB profile no longer exists".into(),
+                    });
+                    return;
+                };
+                if let Err(error) = crate::mongodb_command::authorize_command(
+                    &profile,
+                    &parsed,
+                    crate::mongodb_command::MongoWritePolicy::Deny,
+                ) {
+                    let _ = sender.send(Action::MongoConsoleFailed {
+                        tab_id,
+                        generation,
+                        message: error.to_string(),
+                    });
+                    return;
+                }
+            }
+            if parsed.kind == crate::mongodb_command::MongoCommandKind::Explain {
+                let inner = parsed.command.get_document("explain");
+                let explain_database =
+                    inner
+                        .ok()
+                        .and_then(|inner| inner.keys().next())
+                        .filter(|name| {
+                            *name == "dbStats" || *name == "serverStatus" || *name == "buildInfo"
+                        });
+                if explain_database.is_some() {
+                    let _ = sender.send(Action::MongoConsoleFailed {
+                        tab_id,
+                        generation,
+                        message:
+                            "Explain is available for find, count, distinct, and aggregate only"
+                                .into(),
+                    });
+                    return;
+                }
+            }
+            if parsed.validate_supported_fields().is_err() || parsed.capability().is_err() {
+                let _ = sender.send(Action::MongoConsoleFailed {
+                    tab_id,
+                    generation,
+                    message: "unsupported Mongo read command or field".into(),
+                });
+                if let Some(recorder) = &recorder {
+                    let _ = recorder
+                        .finish_mongo(
+                            execution_id,
+                            crate::model::sql_history::HistoryExecutionStatus::NotExecuted,
+                            crate::model::sql_history::HistoryResultCertainty::Confirmed,
+                            None,
+                            Some(started.elapsed().as_millis()),
+                        )
+                        .await;
+                }
+                return;
+            }
+            drop(connections);
+            let adapter_for_read = adapter.clone();
+            let parsed_for_read = parsed.clone();
+            let result = crate::agent::mongodb::execute_read(
+                &adapter_for_read,
+                &parsed_for_read,
+                500,
+                4 * 1024 * 1024,
+            )
+            .await
+            .map(|(documents_ejson, reply_ejson, count, truncated)| {
+                crate::model::mongodb_console::MongoConsoleResult {
+                    documents_ejson,
+                    reply_ejson,
+                    count,
+                    truncated,
+                }
+            })
+            .map_err(|error| error.message);
+            if let Ok(result) = &result {
+                let result_bytes = result
+                    .documents_ejson
+                    .iter()
+                    .map(String::len)
+                    .sum::<usize>()
+                    .saturating_add(result.reply_ejson.as_ref().map_or(0, String::len));
+                if result_bytes > 4 * 1024 * 1024 {
+                    let _ = sender.send(Action::MongoConsoleFailed {
+                        tab_id,
+                        generation,
+                        message: "Mongo console result exceeds its 4 MiB output budget".into(),
+                    });
+                    return;
+                }
+            }
+            match result {
+                Ok(result) => {
+                    if let Some(recorder) = &recorder {
+                        let _ = recorder
+                            .finish_mongo(
+                                execution_id,
+                                crate::model::sql_history::HistoryExecutionStatus::Succeeded,
+                                crate::model::sql_history::HistoryResultCertainty::Confirmed,
+                                Some(result.count.map_or(result.documents_ejson.len(), |count| {
+                                    count.min(usize::MAX as u64) as usize
+                                })),
+                                Some(started.elapsed().as_millis()),
+                            )
+                            .await;
+                    }
+                    let _ = sender.send(Action::MongoConsoleCompleted {
+                        tab_id,
+                        generation,
+                        result,
+                    });
+                }
+                Err(message) => {
+                    if let Some(recorder) = &recorder {
+                        let _ = recorder
+                            .finish_mongo(
+                                execution_id,
+                                crate::model::sql_history::HistoryExecutionStatus::Failed,
+                                crate::model::sql_history::HistoryResultCertainty::Confirmed,
+                                None,
+                                Some(started.elapsed().as_millis()),
+                            )
+                            .await;
+                    }
+                    let _ = sender.send(Action::MongoConsoleFailed {
+                        tab_id,
+                        generation,
+                        message,
+                    });
+                }
+            }
+        }));
+    }
+
+    fn begin_mongo_transaction(
+        &mut self,
+        tab_id: Uuid,
+        profile_id: Uuid,
+        database: String,
+        connection_generation: u64,
+        generation: u64,
+    ) {
+        if let Ok(mut workers) = self.mongo_transaction_workers.lock() {
+            workers.remove(&tab_id);
+        }
+        let connection = Arc::clone(&self.connection);
+        let worker_registry = Arc::clone(&self.mongo_transaction_workers);
+        let sender = self.event_sender.clone();
+        let profiles = Arc::clone(&self.registry);
+        self.background_tasks.push(tokio::spawn(async move {
+            let profile = profiles.lock().await.profiles.get(&profile_id).cloned();
+            let Some(profile) = profile else {
+                let _ = sender.send(Action::MongoTransactionFailed {
+                    tab_id,
+                    generation,
+                    message: "MongoDB profile no longer exists".into(),
+                });
+                return;
+            };
+            if !profile.catalog_scope.allows_database(&database) {
+                let _ = sender.send(Action::MongoTransactionFailed {
+                    tab_id,
+                    generation,
+                    message: "MongoDB transaction database is outside the profile scope".into(),
+                });
+                return;
+            }
+            let adapter = connection
+                .lock()
+                .await
+                .iter()
+                .find(|(key, active)| {
+                    key.identity.profile_id == profile_id
+                        && active.target.database == database
+                        && key.identity.generation == connection_generation
+                })
+                .and_then(|(_, active)| match &active.database {
+                    DatabaseConnection::MongoDb(adapter) => Some(adapter.clone()),
+                    _ => None,
+                });
+            let Some(adapter) = adapter else {
+                let _ = sender.send(Action::MongoTransactionFailed {
+                    tab_id,
+                    generation,
+                    message: "MongoDB connection is not active for this console database".into(),
+                });
+                return;
+            };
+            match adapter.begin_session_transaction().await {
+                Ok(transaction) => {
+                    // The worker owns the session and serializes every operation through one channel.
+                    let requests = crate::db::mongodb::transaction::spawn_transaction_worker(
+                        transaction,
+                        database,
+                        tab_id,
+                        generation,
+                        sender.clone(),
+                    );
+                    if let Ok(mut workers) = worker_registry.lock() {
+                        workers.insert(tab_id, (generation, requests));
+                    }
+                    let _ = sender.send(Action::MongoTransactionWorkerReady { tab_id, generation });
+                }
+                Err(error) => {
+                    let _ = sender.send(Action::MongoTransactionFailed {
+                        tab_id,
+                        generation,
+                        message: error.message,
+                    });
+                }
+            }
+        }));
+    }
+
+    fn run_mongo_transaction_command(
+        &mut self,
+        tab_id: Uuid,
+        database: String,
+        generation: u64,
+        command: mongodb::bson::Document,
+    ) {
+        let workers = Arc::clone(&self.mongo_transaction_workers);
+        let sender = self.event_sender.clone();
+        self.background_tasks.push(tokio::spawn(async move {
+            let worker = workers.lock().ok().and_then(|workers| {
+                workers
+                    .get(&tab_id)
+                    .filter(|(active, _)| *active == generation)
+                    .map(|(_, worker)| worker.clone())
+            });
+            if let Some(worker) = worker {
+                if worker
+                    .send(
+                        crate::db::mongodb::transaction::MongoTransactionRequest::Command {
+                            database,
+                            command,
+                        },
+                    )
+                    .is_err()
+                {
+                    let _ = sender.send(Action::MongoTransactionFailed {
+                        tab_id,
+                        generation,
+                        message: "Mongo transaction worker stopped".into(),
+                    });
+                }
+            } else {
+                let _ = sender.send(Action::MongoTransactionFailed {
+                    tab_id,
+                    generation,
+                    message: "Mongo transaction is no longer active".into(),
+                });
+            }
+        }));
+    }
+
+    fn finish_mongo_transaction(&mut self, tab_id: Uuid, generation: u64, commit: bool) {
+        let workers = Arc::clone(&self.mongo_transaction_workers);
+        let events = self.event_sender.clone();
+        self.background_tasks.push(tokio::spawn(async move {
+            let worker = workers.lock().ok().and_then(|workers| {
+                workers
+                    .get(&tab_id)
+                    .filter(|(active, _)| *active == generation)
+                    .map(|(_, worker)| worker.clone())
+            });
+            if let Some(sender) = worker {
+                let request = if commit {
+                    crate::db::mongodb::transaction::MongoTransactionRequest::Commit
+                } else {
+                    crate::db::mongodb::transaction::MongoTransactionRequest::Abort
+                };
+                if sender.send(request).is_err() {
+                    let _ = events.send(Action::MongoTransactionFailed {
+                        tab_id,
+                        generation,
+                        message: "Mongo transaction worker stopped".into(),
+                    });
+                }
+            } else {
+                let _ = events.send(Action::MongoTransactionFailed {
+                    tab_id,
+                    generation,
+                    message: "Mongo transaction is no longer active".into(),
+                });
+            }
+        }));
+    }
+
+    fn refresh_mongo_monitor(
+        &mut self,
+        profile_id: Uuid,
+        database: String,
+        connection_generation: u64,
+        generation: u64,
+    ) {
+        let connection = Arc::clone(&self.connection);
+        let registry = Arc::clone(&self.registry);
+        let sender = self.event_sender.clone();
+        self.background_tasks.push(tokio::spawn(async move {
+            let profile = registry.lock().await.profiles.get(&profile_id).cloned();
+            let Some(profile) = profile else {
+                let _ = sender.send(Action::MongoMonitorFailed {
+                    profile_id,
+                    generation,
+                    connection_generation,
+                    database,
+                    message: "MongoDB profile no longer exists".into(),
+                });
+                return;
+            };
+            if !profile.catalog_scope.allows_database(&database) {
+                let _ = sender.send(Action::MongoMonitorFailed {
+                    profile_id,
+                    generation,
+                    connection_generation,
+                    database,
+                    message: "MongoDB database is outside the profile scope".into(),
+                });
+                return;
+            }
+            let adapter = connection
+                .lock()
+                .await
+                .iter()
+                .find(|(key, active)| {
+                    key.identity.profile_id == profile_id
+                        && key.identity.generation == connection_generation
+                        && active.target.database == database
+                })
+                .and_then(|(_, active)| match &active.database {
+                    DatabaseConnection::MongoDb(adapter) => Some(adapter.clone()),
+                    _ => None,
+                });
+            let Some(adapter) = adapter else {
+                let _ = sender.send(Action::MongoMonitorFailed {
+                    profile_id,
+                    generation,
+                    connection_generation,
+                    database,
+                    message: "MongoDB connection is not active".into(),
+                });
+                return;
+            };
+            let snapshot =
+                crate::db::mongodb::monitor::sample_adapter(&adapter, &database, None).await;
+            let _ = sender.send(Action::MongoMonitorCompleted {
+                profile_id,
+                generation,
+                connection_generation,
+                database,
+                snapshot,
+            });
+        }));
+    }
+
+    fn load_mongo_principals(
+        &mut self,
+        profile_id: Uuid,
+        database: String,
+        connection_generation: u64,
+        generation: u64,
+    ) {
+        let connection = Arc::clone(&self.connection);
+        let registry = Arc::clone(&self.registry);
+        let sender = self.event_sender.clone();
+        self.background_tasks.push(tokio::spawn(async move {
+            let profile = registry.lock().await.profiles.get(&profile_id).cloned();
+            let Some(profile) = profile else {
+                let _ = sender.send(Action::MongoPrincipalsFailed {
+                    profile_id,
+                    generation,
+                    connection_generation,
+                    database,
+                    message: "MongoDB profile no longer exists".into(),
+                });
+                return;
+            };
+            if !profile.catalog_scope.allows_database(&database) {
+                let _ = sender.send(Action::MongoPrincipalsFailed {
+                    profile_id,
+                    generation,
+                    connection_generation,
+                    database,
+                    message: "MongoDB database is outside the profile scope".into(),
+                });
+                return;
+            }
+            let adapter = connection
+                .lock()
+                .await
+                .iter()
+                .find(|(key, active)| {
+                    key.identity.profile_id == profile_id
+                        && key.identity.generation == connection_generation
+                        && active.target.database == database
+                })
+                .and_then(|(_, active)| match &active.database {
+                    DatabaseConnection::MongoDb(adapter) => Some(adapter.clone()),
+                    _ => None,
+                });
+            let Some(adapter) = adapter else {
+                let _ = sender.send(Action::MongoPrincipalsFailed {
+                    profile_id,
+                    generation,
+                    connection_generation,
+                    database,
+                    message: "MongoDB connection is not active".into(),
+                });
+                return;
+            };
+            let users = crate::db::mongodb::principal::users_for_adapter(&adapter, &database).await;
+            let roles = crate::db::mongodb::principal::roles(&adapter, &database).await;
+            match (users, roles) {
+                (Ok(users), Ok(roles)) => {
+                    let _ = sender.send(Action::MongoPrincipalsLoaded {
+                        profile_id,
+                        generation,
+                        connection_generation,
+                        database,
+                        users,
+                        roles,
+                    });
+                }
+                (users, roles) => {
+                    let error = users.err().or_else(|| roles.err()).unwrap();
+                    let _ = sender.send(Action::MongoPrincipalsFailed {
+                        profile_id,
+                        generation,
+                        connection_generation,
+                        database,
+                        message: error.to_string(),
+                    });
+                }
+            }
+        }));
+    }
+
+    fn execute_mongo_principal_mutation(
+        &mut self,
+        profile_id: Uuid,
+        connection_generation: u64,
+        selected_database: String,
+        mutation: crate::db::mongodb::principal::MongoPrincipalMutation,
+    ) {
+        let connection = Arc::clone(&self.connection);
+        let registry = Arc::clone(&self.registry);
+        let sender = self.event_sender.clone();
+        self.background_tasks.push(tokio::spawn(async move {
+            let mutation_database = mutation.database.clone();
+            let mutation_command = mutation.command_name().unwrap_or("principal").to_owned();
+            let mutation_target = mutation.target_name().unwrap_or("principal").to_owned();
+            let confirmation_target = mutation.confirmation_target();
+            let Some(profile) = registry.lock().await.profiles.get(&profile_id).cloned() else {
+                let _ = sender.send(Action::MongoPrincipalMutationFailed {
+                    profile_id,
+                    connection_generation,
+                    database: mutation_database.clone(),
+                    command_name: mutation_command.clone(),
+                    target: mutation_target.clone(),
+                    confirmation_target: confirmation_target.clone(),
+                    message: "MongoDB profile no longer exists".into(),
+                });
+                return;
+            };
+            if !mutation.targets_database(&selected_database) {
+                let _ = sender.send(Action::MongoPrincipalMutationFailed {
+                    profile_id,
+                    connection_generation,
+                    database: mutation_database.clone(),
+                    command_name: mutation_command.clone(),
+                    target: mutation_target.clone(),
+                    confirmation_target: confirmation_target.clone(),
+                    message:
+                        "MongoDB principal database does not match the selected profile database"
+                            .into(),
+                });
+                return;
+            }
+            let adapter = connection
+                .lock()
+                .await
+                .iter()
+                .find(|(key, active)| {
+                    key.identity.profile_id == profile_id
+                        && key.identity.generation == connection_generation
+                        && active.target.database == selected_database
+                })
+                .and_then(|(_, active)| match &active.database {
+                    DatabaseConnection::MongoDb(adapter) => Some(adapter.clone()),
+                    _ => None,
+                });
+            let Some(adapter) = adapter else {
+                let _ = sender.send(Action::MongoPrincipalMutationFailed {
+                    profile_id,
+                    connection_generation,
+                    database: mutation_database.clone(),
+                    command_name: mutation_command.clone(),
+                    target: mutation_target.clone(),
+                    confirmation_target: confirmation_target.clone(),
+                    message: "MongoDB connection generation is no longer active".into(),
+                });
+                return;
+            };
+            if !profile.catalog_scope.allows_database(&mutation.database) {
+                let _ = sender.send(Action::MongoPrincipalMutationFailed {
+                    profile_id,
+                    connection_generation,
+                    database: mutation_database.clone(),
+                    command_name: mutation_command.clone(),
+                    target: mutation_target.clone(),
+                    confirmation_target: confirmation_target.clone(),
+                    message: "MongoDB principal target is outside the profile database scope"
+                        .into(),
+                });
+                return;
+            }
+            if profile.read_only {
+                let _ = sender.send(Action::MongoPrincipalMutationFailed {
+                    profile_id,
+                    connection_generation,
+                    database: mutation_database.clone(),
+                    command_name: mutation_command.clone(),
+                    target: mutation_target.clone(),
+                    confirmation_target: confirmation_target.clone(),
+                    message: "MongoDB principal writes are disabled for this read-only profile"
+                        .into(),
+                });
+                return;
+            }
+            let target = mutation.target_name().unwrap_or("principal").to_owned();
+            match mutation.execute(adapter.client()).await {
+                Ok(()) => {
+                    let _ = sender.send(Action::MongoPrincipalMutationSucceeded {
+                        profile_id,
+                        connection_generation,
+                        database: mutation.database.clone(),
+                        command_name: mutation.command_name().unwrap_or("principal").to_owned(),
+                        target,
+                        confirmation_target,
+                    });
+                }
+                Err(error) => {
+                    let _ = sender.send(Action::MongoPrincipalMutationFailed {
+                        profile_id,
+                        connection_generation,
+                        database: mutation_database.clone(),
+                        command_name: mutation_command.clone(),
+                        target: mutation_target.clone(),
+                        confirmation_target: confirmation_target.clone(),
+                        message: error.message,
+                    });
+                }
+            }
+        }));
+    }
+
+    fn run_mongo_management(
+        &mut self,
+        profile_id: Uuid,
+        generation: u64,
+        operation: crate::model::mongodb_management::MongoManagementOperation,
+        draft: mongodb::bson::Document,
+    ) {
+        let connection = Arc::clone(&self.connection);
+        let registry = Arc::clone(&self.registry);
+        let sender = self.event_sender.clone();
+        self.background_tasks.push(tokio::spawn(async move {
+            let Some(profile) = registry.lock().await.profiles.get(&profile_id).cloned() else {
+                let _ = sender.send(Action::MongoManagementFailed {
+                    profile_id,
+                    generation,
+                    message: "MongoDB profile no longer exists".into(),
+                });
+                return;
+            };
+            if profile.read_only {
+                let _ = sender.send(Action::MongoManagementFailed {
+                    profile_id,
+                    generation,
+                    message: "MongoDB profile is read-only".into(),
+                });
+                return;
+            }
+            if let Err(error) =
+                crate::db::mongodb::MongoAdapter::validate_management_request(&operation, &draft)
+            {
+                let _ = sender.send(Action::MongoManagementFailed {
+                    profile_id,
+                    generation,
+                    message: error.message,
+                });
+                return;
+            }
+            if !profile.catalog_scope.allows_database(operation.database()) {
+                let _ = sender.send(Action::MongoManagementFailed {
+                    profile_id,
+                    generation,
+                    message: "MongoDB namespace is outside the profile database scope".into(),
+                });
+                return;
+            }
+            let adapter = connection
+                .lock()
+                .await
+                .iter()
+                .find(|(key, _)| {
+                    key.identity.profile_id == profile_id && key.identity.generation == generation
+                })
+                .and_then(|(_, active)| match &active.database {
+                    DatabaseConnection::MongoDb(adapter) => Some(adapter.clone()),
+                    _ => None,
+                });
+            let Some(adapter) = adapter else {
+                let _ = sender.send(Action::MongoManagementFailed {
+                    profile_id,
+                    generation,
+                    message: "MongoDB connection generation is no longer active".into(),
+                });
+                return;
+            };
+            match adapter.manage(&operation, draft).await {
+                Ok((namespace, message)) => {
+                    let _ = sender.send(Action::MongoManagementCompleted {
+                        profile_id,
+                        generation,
+                        namespace,
+                        message,
+                    });
+                }
+                Err(error) => {
+                    let _ = sender.send(Action::MongoManagementFailed {
+                        profile_id,
+                        generation,
+                        message: error.message,
+                    });
+                }
+            }
+        }));
+    }
+
+    fn mutate_mongo_insert(
+        &mut self,
+        tab_id: Uuid,
+        profile_id: Uuid,
+        generation: u64,
+        mutation_generation: u64,
+        namespace: crate::db::mongodb::types::MongoNamespace,
+        documents: Vec<mongodb::bson::Document>,
+    ) {
+        let connection = Arc::clone(&self.connection);
+        let sender = self.event_sender.clone();
+        self.background_tasks.push(tokio::spawn(async move {
+            let database = connection
+                .lock()
+                .await
+                .iter()
+                .find(|(key, _)| {
+                    key.identity.profile_id == profile_id && key.identity.generation == generation
+                })
+                .map(|(_, active)| active.database.clone());
+            let result = match database {
+                Some(DatabaseConnection::MongoDb(adapter)) => adapter
+                    .insert_documents_detailed(&namespace, documents)
+                    .await
+                    .map_err(|e| e.message),
+                _ => Err("MongoDB connection is not active".to_owned()),
+            };
+            let action = match result {
+                Ok(outcome) => Action::MongoMutationOutcome {
+                    tab_id,
+                    generation,
+                    mutation_generation,
+                    operation: crate::model::mongodb_browser::MongoMutationKind::Insert,
+                    outcome,
+                },
+                Err(message) => Action::MongoMutationFailed {
+                    tab_id,
+                    generation,
+                    mutation_generation: Some(mutation_generation),
+                    message,
+                },
+            };
+            let _ = sender.send(action);
+        }));
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    fn mutate_mongo_delete(
+        &mut self,
+        tab_id: Uuid,
+        profile_id: Uuid,
+        generation: u64,
+        mutation_generation: u64,
+        namespace: crate::db::mongodb::types::MongoNamespace,
+        id: mongodb::bson::Bson,
+        expected: mongodb::bson::Document,
+    ) {
+        let connection = Arc::clone(&self.connection);
+        let sender = self.event_sender.clone();
+        self.background_tasks.push(tokio::spawn(async move {
+            let database = connection
+                .lock()
+                .await
+                .iter()
+                .find(|(key, _)| {
+                    key.identity.profile_id == profile_id && key.identity.generation == generation
+                })
+                .map(|(_, active)| active.database.clone());
+            let result = match database {
+                Some(DatabaseConnection::MongoDb(adapter)) => adapter
+                    .delete_document_detailed(&namespace, id, &expected)
+                    .await
+                    .map_err(|e| e.message),
+                _ => Err("MongoDB connection is not active".to_owned()),
+            };
+            let action = match result {
+                Ok(outcome) => Action::MongoMutationOutcome {
+                    tab_id,
+                    generation,
+                    mutation_generation,
+                    operation: crate::model::mongodb_browser::MongoMutationKind::Delete,
+                    outcome,
+                },
+                Err(message) => Action::MongoMutationFailed {
+                    tab_id,
+                    generation,
+                    mutation_generation: Some(mutation_generation),
+                    message,
+                },
+            };
+            let _ = sender.send(action);
+        }));
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    fn replace_mongo_document(
+        &mut self,
+        tab_id: Uuid,
+        profile_id: Uuid,
+        generation: u64,
+        mutation_generation: u64,
+        namespace: crate::db::mongodb::types::MongoNamespace,
+        id: mongodb::bson::Bson,
+        expected: mongodb::bson::Document,
+        replacement: mongodb::bson::Document,
+    ) {
+        let connection = Arc::clone(&self.connection);
+        let sender = self.event_sender.clone();
+        self.background_tasks.push(tokio::spawn(async move {
+            let database = connection
+                .lock()
+                .await
+                .iter()
+                .find(|(key, _)| {
+                    key.identity.profile_id == profile_id && key.identity.generation == generation
+                })
+                .map(|(_, active)| active.database.clone());
+            let result = match database {
+                Some(DatabaseConnection::MongoDb(adapter)) => {
+                    adapter
+                        .compare_and_replace_document_detailed(
+                            &namespace,
+                            id,
+                            &expected,
+                            replacement,
+                        )
+                        .await
+                }
+                _ => Err(DatabaseError::configuration(
+                    "MongoDB connection is not active",
+                )),
+            };
+            match result {
+                Ok(crate::db::mongodb::mutation::MongoMutationOutcome::Confirmed {
+                    affected: 1,
+                }) => {
+                    let _ = sender.send(Action::MongoDocumentReplaceOutcome {
+                        tab_id,
+                        profile_id,
+                        connection_generation: generation,
+                        mutation_generation,
+                        outcome: crate::db::mongodb::mutation::MongoMutationOutcome::Confirmed {
+                            affected: 1,
+                        },
+                    });
+                }
+                Ok(crate::db::mongodb::mutation::MongoMutationOutcome::Confirmed {
+                    affected: 0,
+                }) => {
+                    let _ = sender.send(Action::MongoMutationConflict {
+                        tab_id,
+                        generation,
+                        message: "document changed since it was loaded".into(),
+                    });
+                }
+                Ok(outcome) => {
+                    let _ = sender.send(Action::MongoDocumentReplaceOutcome {
+                        tab_id,
+                        profile_id,
+                        connection_generation: generation,
+                        mutation_generation,
+                        outcome,
+                    });
+                }
+                Err(error) => {
+                    let _ = sender.send(Action::MongoDocumentReplaceFailed {
+                        tab_id,
+                        generation,
+                        mutation_generation,
+                        message: error.message,
                     });
                 }
             }
@@ -2533,6 +3922,7 @@ impl Runtime {
                                         database: candidate
                                             .take()
                                             .expect("connection candidate exists"),
+                                        target: key.target.clone(),
                                     },
                                 ),
                             ))
@@ -3702,6 +5092,8 @@ impl Runtime {
                 profile_id: Some(target.profile_id),
                 database: Some(target.database.clone()),
                 schema: target.schema.clone(),
+                language: crate::model::sql_history::HistoryLanguage::Sql,
+                mongo_command: None,
             };
             if let Some(recorder) = &recorder {
                 let _ = recorder.start(history).await;
@@ -4000,6 +5392,8 @@ impl Runtime {
                             profile_id: Some(target.profile_id),
                             database: Some(target.database.clone()),
                             schema: target.schema.clone(),
+                            language: crate::model::sql_history::HistoryLanguage::Sql,
+                            mongo_command: None,
                         })
                         .await;
                 }
@@ -4102,6 +5496,8 @@ impl Runtime {
                         profile_id: Some(target.profile_id),
                         database: Some(target.database.clone()),
                         schema: target.schema.clone(),
+                        language: crate::model::sql_history::HistoryLanguage::Sql,
+                        mongo_command: None,
                     })
                     .await;
             }
@@ -4758,6 +6154,8 @@ impl Runtime {
                 profile_id: Some(history_target.profile_id),
                 database: Some(history_target.database.clone()),
                 schema: history_target.schema.clone(),
+                language: crate::model::sql_history::HistoryLanguage::Sql,
+                mongo_command: None,
             };
             if let Some(recorder) = &recorder {
                 let recorder = recorder.clone();
@@ -5199,7 +6597,8 @@ impl Runtime {
                 | DatabaseConnection::MariaDb(_)
                 | DatabaseConnection::Oracle(_)
                 | DatabaseConnection::SqlServer(_)
-                | DatabaseConnection::Redis(_) => false,
+                | DatabaseConnection::Redis(_)
+                | DatabaseConnection::MongoDb(_) => false,
             };
             let worker = match database
                 .start_transaction_worker_with_forced_close(worker_forced_close)
@@ -6417,6 +7816,10 @@ pub async fn run_tui(cli: Cli) -> Result<RunOutcome> {
     );
     let workspace_store = WorkspaceStore::new(paths.workspace_file(), paths.workspace_sql_dir());
     let workspace = workspace_store.load().context("failed to load workspace")?;
+    let mongo_workspace_store = workspace_store.mongodb_store();
+    let mongo_workspace = mongo_workspace_store
+        .load()
+        .context("failed to load Mongo workspace")?;
     let mut app = App::with_startup_project(
         startup.profiles.clone(),
         startup.persisted.clone(),
@@ -6446,6 +7849,9 @@ pub async fn run_tui(cli: Cli) -> Result<RunOutcome> {
     if let Some(workspace) = workspace {
         app.restore_workspace(workspace, startup.selected);
     }
+    if let Some(mongo_workspace) = mongo_workspace {
+        app.restore_mongo_workspace(mongo_workspace);
+    }
     app.set_dashboard_refresh_interval_millis(settings.dashboard_refresh_interval_millis());
     app.set_help_panel_view(settings.ui.help_panel);
     app.set_key_bindings(settings.keybindings.key_bindings()?);
@@ -6469,6 +7875,7 @@ pub async fn run_tui(cli: Cli) -> Result<RunOutcome> {
     ));
     runtime.set_history_store(history_store);
     runtime.set_workspace_store(workspace_store);
+    runtime.set_mongo_workspace_store(mongo_workspace_store);
     runtime.set_settings_store(crate::persistence::settings::SettingsStore::new(
         paths.settings_file(),
     ));
@@ -6989,8 +8396,12 @@ mod workspace_save_tests {
             temp.path().join("sql"),
         );
         let mut queue = WorkspaceSaveQueue::new(store);
-        queue.offer(1, snapshot());
-        queue.offer(2, snapshot());
+        let mongo = || crate::persistence::mongodb_workspace::PersistedMongoWorkspace {
+            consoles: Vec::new(),
+            commands: Vec::new(),
+        };
+        queue.offer(1, snapshot(), mongo());
+        queue.offer(2, snapshot(), mongo());
 
         assert_eq!(
             queue.pending.as_ref().map(|(revision, _)| *revision),
@@ -7009,7 +8420,14 @@ mod workspace_save_tests {
         let mut queue = WorkspaceSaveQueue::new(store);
         let (sender, mut receiver) = tokio::sync::mpsc::unbounded_channel();
         queue.next_revision = 1;
-        queue.failed = Some((1, snapshot()));
+        queue.failed = Some((
+            1,
+            snapshot(),
+            crate::persistence::mongodb_workspace::PersistedMongoWorkspace {
+                consoles: Vec::new(),
+                commands: Vec::new(),
+            },
+        ));
         queue.flushing = Some(1);
 
         assert!(receiver.try_recv().is_err());
@@ -7402,7 +8820,8 @@ mod tests {
             generation: 2,
         };
         let key = ConnectionKey::new(identity, ExecutionTarget::from_profile(&profile));
-        let mut active = HashMap::from([(key, ActiveConnection { database })]);
+        let target = key.target.clone();
+        let mut active = HashMap::from([(key, ActiveConnection { database, target })]);
 
         assert!(
             take_active_connection(

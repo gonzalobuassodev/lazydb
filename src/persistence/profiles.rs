@@ -116,6 +116,7 @@ impl From<ConnectionProfileV5> for ConnectionProfile {
             database: profile.database,
             default_schema: profile.default_schema,
             sqlite_path: profile.sqlite_path,
+            mongodb_options: None,
             ssl_mode: profile.ssl_mode,
             credential_policy: profile.credential_policy,
             read_only: profile.read_only,
@@ -170,6 +171,7 @@ impl From<ConnectionProfileV2> for ConnectionProfile {
             database: profile.database,
             default_schema: profile.default_schema,
             sqlite_path: profile.sqlite_path,
+            mongodb_options: None,
             ssl_mode: profile.ssl_mode,
             credential_policy: profile
                 .secret_ref

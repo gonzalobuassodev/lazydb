@@ -63,11 +63,13 @@ pub enum DeferredIntent {
     Disconnect { connection: ConnectionIdentity },
     Quit,
     Restart,
+    ActivateTab(usize),
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum DeferredTransactionTarget {
     Console(Uuid),
+    MongoConsole(Uuid),
     Relation(Uuid),
 }
 

@@ -166,6 +166,14 @@ search = ["f"]
 refresh = ["r"]
 # o toggles expansion of the selected entry.
 toggle = ["o"]
+# Create native Mongo collection/view/index drafts from Explorer.
+create = ["c"]
+# Edit collection options/validator or inspect an index management draft.
+edit = ["e"]
+# Drop a Mongo collection/view/index after exact-name confirmation.
+delete = ["d"]
+# Rename the selected Mongo collection after exact-name confirmation.
+rename = ["R"]
 
 [keybindings.results]
 # Ctrl-Home/Ctrl-End load the first/last database page.

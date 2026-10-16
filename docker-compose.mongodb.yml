@@ -1,0 +1,31 @@
+services:
+  mongodb-rs:
+    image: mongo:8.0
+    command: ["mongod", "--replSet", "lazydb-rs", "--bind_ip_all"]
+    healthcheck:
+      test: ["CMD", "mongosh", "--quiet", "--eval", "db.adminCommand({ping:1}).ok"]
+      interval: 5s
+      timeout: 3s
+      retries: 30
+    ports:
+      - "27017:27017"
+  mongodb-standalone:
+    image: mongo:8.0
+    command: ["mongod", "--bind_ip_all"]
+    ports:
+      - "27018:27017"
+    healthcheck:
+      test: ["CMD", "mongosh", "--quiet", "--eval", "db.adminCommand({ping:1}).ok"]
+      interval: 5s
+      timeout: 3s
+      retries: 30
+  mongodb-principals:
+    image: mongo:8.0
+    command: ["mongod", "--bind_ip_all", "--port", "27019"]
+    ports:
+      - "27019:27019"
+    healthcheck:
+      test: ["CMD", "mongosh", "--quiet", "--port", "27019", "--eval", "db.adminCommand({ping:1}).ok"]
+      interval: 5s
+      timeout: 3s
+      retries: 30

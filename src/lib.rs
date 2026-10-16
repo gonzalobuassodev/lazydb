@@ -16,6 +16,7 @@ pub mod installation;
 pub mod lsp;
 pub mod migration;
 pub mod model;
+pub mod mongodb_command;
 pub mod persistence;
 pub mod profile;
 pub mod profile_compatibility;

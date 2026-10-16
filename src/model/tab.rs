@@ -23,6 +23,8 @@ pub enum TabKind {
     Relation,
     Dashboard,
     RedisBrowser,
+    MongoBrowser,
+    MongoConsole,
     PrincipalDdl,
 }
 
@@ -83,6 +85,9 @@ pub enum WorkspaceTab {
     Relation(RelationTab),
     Dashboard(DashboardTab),
     RedisBrowser(RedisBrowserTab),
+    MongoBrowser(crate::model::mongodb_browser::MongoBrowserTab),
+    MongoConsole(crate::model::mongodb_console::MongoConsoleTab),
+    MongoDashboard(Box<crate::model::dashboard::MongoDashboardTab>),
     PrincipalDdl(crate::model::principal::PrincipalDdlTab),
 }
 
@@ -93,6 +98,9 @@ impl WorkspaceTab {
             Self::Relation(tab) => tab.id,
             Self::Dashboard(tab) => tab.id,
             Self::RedisBrowser(tab) => tab.id,
+            Self::MongoBrowser(tab) => tab.id,
+            Self::MongoConsole(tab) => tab.id,
+            Self::MongoDashboard(tab) => tab.id,
             Self::PrincipalDdl(tab) => tab.id,
         }
     }
@@ -103,6 +111,9 @@ impl WorkspaceTab {
             Self::Relation(tab) => tab.title(),
             Self::Dashboard(_) => "Dashboard",
             Self::RedisBrowser(_) => "Redis",
+            Self::MongoBrowser(tab) => &tab.title,
+            Self::MongoConsole(tab) => &tab.title,
+            Self::MongoDashboard(_) => "Mongo Monitor",
             Self::PrincipalDdl(tab) => tab.title(),
         }
     }
@@ -113,6 +124,9 @@ impl WorkspaceTab {
             Self::Relation(_) => TabKind::Relation,
             Self::Dashboard(_) => TabKind::Dashboard,
             Self::RedisBrowser(_) => TabKind::RedisBrowser,
+            Self::MongoBrowser(_) => TabKind::MongoBrowser,
+            Self::MongoConsole(_) => TabKind::MongoConsole,
+            Self::MongoDashboard(_) => TabKind::Dashboard,
             Self::PrincipalDdl(_) => TabKind::PrincipalDdl,
         }
     }
@@ -123,6 +137,9 @@ impl WorkspaceTab {
             Self::Relation(_) => None,
             Self::Dashboard(_) => None,
             Self::RedisBrowser(_) => None,
+            Self::MongoBrowser(_) => None,
+            Self::MongoConsole(_) => None,
+            Self::MongoDashboard(_) => None,
             Self::PrincipalDdl(_) => None,
         }
     }
@@ -133,6 +150,9 @@ impl WorkspaceTab {
             Self::Relation(_) => None,
             Self::Dashboard(_) => None,
             Self::RedisBrowser(_) => None,
+            Self::MongoBrowser(_) => None,
+            Self::MongoConsole(_) => None,
+            Self::MongoDashboard(_) => None,
             Self::PrincipalDdl(_) => None,
         }
     }

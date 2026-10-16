@@ -20,6 +20,8 @@ fn execution() -> ExecutionHistory {
         profile_id: None,
         database: None,
         schema: None,
+        language: lazydb::model::sql_history::HistoryLanguage::Sql,
+        mongo_command: None,
     }
 }
 

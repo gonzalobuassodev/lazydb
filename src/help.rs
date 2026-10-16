@@ -31,6 +31,7 @@ pub enum ShortcutContext {
     RedisPreviewVisual,
     RedisPreviewTable,
     Dashboard,
+    MongoDashboard,
     RelationDataBrowse,
     RelationDataEdit,
     RelationDataVisual,
@@ -92,6 +93,7 @@ const ALL_SHORTCUT_CONTEXTS: &[ShortcutContext] = &[
     ShortcutContext::RedisPreviewVisual,
     ShortcutContext::RedisPreviewTable,
     ShortcutContext::Dashboard,
+    ShortcutContext::MongoDashboard,
     ShortcutContext::RelationDataBrowse,
     ShortcutContext::RelationDataEdit,
     ShortcutContext::RelationDataVisual,
@@ -228,6 +230,10 @@ fn shortcut_context_with_overlay(app: &App, include_help: bool) -> ShortcutConte
                 Overlay::DeleteConsole { .. } => ShortcutContext::DeleteConsoleConfirmation,
                 Overlay::RedisDeleteConfirm { .. } => ShortcutContext::DeleteConsoleConfirmation,
                 Overlay::RedisDeletePreparing { .. } => ShortcutContext::DeleteConsoleConfirmation,
+                Overlay::MongoManagement(_) => ShortcutContext::CatalogEditorPreview,
+                Overlay::MongoPrincipalMutation(_) | Overlay::MongoPrincipalConfirmation { .. } => {
+                    ShortcutContext::ExecutionConfirmation
+                }
                 Overlay::PageSizeSelector { .. } => ShortcutContext::PageSizeSelector,
                 Overlay::RedisPreviewFormat { .. } => ShortcutContext::PageSizeSelector,
                 Overlay::CatalogDropConfirm { .. } => ShortcutContext::CatalogDropConfirmation,
@@ -312,6 +318,9 @@ fn shortcut_context_with_overlay(app: &App, include_help: bool) -> ShortcutConte
         Some(WorkspaceTab::Dashboard(_)) if app.focus == Focus::Results => {
             ShortcutContext::Dashboard
         }
+        Some(WorkspaceTab::MongoDashboard(_)) if app.focus == Focus::Results => {
+            ShortcutContext::MongoDashboard
+        }
         _ => match app.focus {
             Focus::Explorer => ShortcutContext::Explorer,
             Focus::Results => ShortcutContext::SqlResultsData,
@@ -359,6 +368,8 @@ pub enum HelpShortcutId {
     OpenSqlHistory,
     DashboardToggleView,
     DashboardRefresh,
+    MongoMonitorRefresh,
+    MongoPrincipalsRefresh,
     DashboardTogglePolling,
     RunSql,
     RunAllSql,
@@ -1268,6 +1279,18 @@ static SHORTCUT_CATALOG: &[Shortcut] = &[
         "toggle overview/process list"
     ),
     row!(DashboardRefresh, [Dashboard], "r", "refresh metrics"),
+    row!(
+        MongoMonitorRefresh,
+        [MongoDashboard],
+        "r",
+        "refresh MongoDB monitoring"
+    ),
+    row!(
+        MongoPrincipalsRefresh,
+        [MongoDashboard],
+        "u",
+        "list users and roles"
+    ),
     row!(
         DashboardTogglePolling,
         [Dashboard],
@@ -3915,6 +3938,7 @@ pub(crate) fn context_name(context: ShortcutContext) -> &'static str {
         ShortcutContext::RedisPreview | ShortcutContext::RedisPreviewVisual => "REDIS VALUE · TEXT",
         ShortcutContext::RedisPreviewTable => "REDIS VALUE · TABLE",
         ShortcutContext::Dashboard => "DASHBOARD",
+        ShortcutContext::MongoDashboard => "MONGODB MONITOR",
         ShortcutContext::RecordView => "RECORD VIEW",
         ShortcutContext::DataQueryInput => "DATA QUERY",
         ShortcutContext::ProfileManagerForm

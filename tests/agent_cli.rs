@@ -1,5 +1,5 @@
 use clap::Parser;
-use lazydb::cli::{AgentCommand, Cli, Command, ConnectionsCommand, McpCommand};
+use lazydb::cli::{AgentCommand, Cli, Command, ConnectionsCommand, McpCommand, MongoAgentCommand};
 
 #[test]
 fn parses_agent_query_inputs_and_defaults_to_read_only_server_policy() {
@@ -25,6 +25,21 @@ fn parses_agent_query_inputs_and_defaults_to_read_only_server_policy() {
             }
         })
     ));
+    assert!(
+        Cli::try_parse_from([
+            "lazydb",
+            "agent",
+            "mongo",
+            "execute",
+            "--database",
+            "app",
+            "--command",
+            "{}",
+            "--file",
+            "change.json"
+        ])
+        .is_err()
+    );
 }
 
 #[test]
@@ -35,6 +50,60 @@ fn rejects_both_sql_and_file_inputs() {
         ])
         .is_err()
     );
+}
+
+#[test]
+fn parses_native_mongo_query_arguments_and_rejects_conflicting_sources() {
+    let parsed = Cli::try_parse_from([
+        "lazydb",
+        "agent",
+        "mongo-query",
+        "--database",
+        "app",
+        "--command",
+        r#"{"find":"items"}"#,
+        "--connection",
+        "local",
+    ])
+    .unwrap();
+    assert!(
+        matches!(parsed.command, Some(Command::Agent { command: AgentCommand::MongoQuery { database, command: Some(_), .. } }) if database == "app")
+    );
+    assert!(
+        Cli::try_parse_from([
+            "lazydb",
+            "agent",
+            "mongo-query",
+            "--database",
+            "app",
+            "--command",
+            "{}",
+            "--file",
+            "query.json"
+        ])
+        .is_err()
+    );
+}
+
+#[test]
+fn parses_native_mongo_execute_arguments_and_write_policy() {
+    let parsed = Cli::try_parse_from([
+        "lazydb",
+        "agent",
+        "mongo",
+        "execute",
+        "--database",
+        "app",
+        "--command",
+        r#"{"insert":"items","documents":[{"x":1}]}"#,
+        "--write-policy",
+        "non-production",
+    ])
+    .unwrap();
+    assert!(matches!(
+        parsed.command,
+        Some(Command::Agent { command: AgentCommand::Mongo { command: MongoAgentCommand::Execute { database, write_policy: lazydb::agent::policy::WritePolicy::NonProduction, .. } } }) if database == "app"
+    ));
 }
 
 #[test]

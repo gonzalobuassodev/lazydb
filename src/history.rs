@@ -22,12 +22,20 @@ pub enum HistoryRecorderError {
 
 enum HistoryCommand {
     Start(ExecutionHistory),
+    StartMongo(crate::model::sql_history::MongoCommandHistory),
     Finish {
         execution_id: Uuid,
         status: HistoryExecutionStatus,
         certainty: HistoryResultCertainty,
         affected_rows: Option<u64>,
         returned_rows: Option<usize>,
+        elapsed_millis: Option<u128>,
+    },
+    FinishMongo {
+        execution_id: Uuid,
+        status: HistoryExecutionStatus,
+        certainty: HistoryResultCertainty,
+        returned_documents: Option<usize>,
         elapsed_millis: Option<u128>,
     },
     ResolveTransaction {
@@ -59,6 +67,11 @@ impl HistoryRecorder {
                             record_failure(&worker_failure, error).await;
                         }
                     }
+                    HistoryCommand::StartMongo(history) => {
+                        if let Err(error) = store.insert_mongo_summary(&history).await {
+                            record_failure(&worker_failure, error).await;
+                        }
+                    }
                     HistoryCommand::Finish {
                         execution_id,
                         status,
@@ -74,6 +87,26 @@ impl HistoryRecorder {
                                 certainty,
                                 affected_rows,
                                 returned_rows,
+                                elapsed_millis,
+                            )
+                            .await
+                        {
+                            record_failure(&worker_failure, error).await;
+                        }
+                    }
+                    HistoryCommand::FinishMongo {
+                        execution_id,
+                        status,
+                        certainty,
+                        returned_documents,
+                        elapsed_millis,
+                    } => {
+                        if let Err(error) = store
+                            .finish_mongo_summary(
+                                execution_id,
+                                status,
+                                certainty,
+                                returned_documents,
                                 elapsed_millis,
                             )
                             .await
@@ -120,6 +153,31 @@ impl HistoryRecorder {
 
     pub async fn start(&self, history: ExecutionHistory) -> Result<(), HistoryRecorderError> {
         self.send(HistoryCommand::Start(history)).await
+    }
+
+    pub async fn start_mongo(
+        &self,
+        history: crate::model::sql_history::MongoCommandHistory,
+    ) -> Result<(), HistoryRecorderError> {
+        self.send(HistoryCommand::StartMongo(history)).await
+    }
+
+    pub async fn finish_mongo(
+        &self,
+        execution_id: Uuid,
+        status: HistoryExecutionStatus,
+        certainty: HistoryResultCertainty,
+        returned_documents: Option<usize>,
+        elapsed_millis: Option<u128>,
+    ) -> Result<(), HistoryRecorderError> {
+        self.send(HistoryCommand::FinishMongo {
+            execution_id,
+            status,
+            certainty,
+            returned_documents,
+            elapsed_millis,
+        })
+        .await
     }
 
     pub async fn finish(

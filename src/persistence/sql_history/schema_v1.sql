@@ -12,7 +12,9 @@ CREATE TABLE IF NOT EXISTS history_executions (
     elapsed_millis INTEGER,
     profile_id TEXT,
     database_name TEXT,
-    schema_name TEXT
+    schema_name TEXT,
+    language TEXT NOT NULL DEFAULT 'sql',
+    mongo_command TEXT
 );
 
 CREATE INDEX IF NOT EXISTS history_executions_requested_at

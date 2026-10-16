@@ -41,7 +41,10 @@ impl<'a> ExplorerActionContext<'a> {
         if let ExplorerNodeId::Profile(profile_id) = selected {
             return self.resolve_profile(*profile_id, mode);
         }
-        if matches!(selected, ExplorerNodeId::RedisDatabase { .. }) {
+        if matches!(
+            selected,
+            ExplorerNodeId::RedisDatabase { .. } | ExplorerNodeId::Mongo { .. }
+        ) {
             return ExplorerActionAvailability::NotApplicable;
         }
         if !self.connected {
@@ -135,6 +138,7 @@ impl DatabaseKindLabel for DatabaseKind {
             DatabaseKind::Sqlite => "SQLite",
             DatabaseKind::SqlServer => "SQL Server",
             DatabaseKind::Redis => "Redis",
+            DatabaseKind::MongoDb => "MongoDB",
         }
     }
 }

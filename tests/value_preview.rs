@@ -191,7 +191,7 @@ fn pickle_parser_handles_protocol_four_scalars() {
 fn pickle_parser_preserves_binary_and_tuple_types() {
     assert_eq!(
         lazydb::value_preview::pickle::parse_pickle_to_json(b"\x80\x04C\x02\x00\xff.").unwrap(),
-        "{\n  \"__pickle_type\": \"bytes\",\n  \"hex\": \"00ff\",\n  \"length\": 2\n}"
+        "{\n  \"__pickle_type\": \"bytes\",\n  \"length\": 2,\n  \"hex\": \"00ff\"\n}"
     );
     assert!(lazydb::value_preview::pickle::is_pickle_serialization(
         b"N."

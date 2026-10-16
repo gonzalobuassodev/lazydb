@@ -70,6 +70,7 @@ mod tests {
             database: Some("app".into()),
             default_schema: Some("public".into()),
             sqlite_path: None,
+            mongodb_options: None,
             ssl_mode: Default::default(),
             credential_policy: Default::default(),
             read_only: false,
@@ -200,7 +201,7 @@ impl ExecutionTarget {
             DatabaseKind::Postgres | DatabaseKind::SqlServer | DatabaseKind::Oracle => {
                 profile.default_schema.clone()
             }
-            DatabaseKind::Redis => None,
+            DatabaseKind::Redis | DatabaseKind::MongoDb => None,
         };
         Self {
             profile_id: profile.id,
@@ -233,7 +234,7 @@ impl ExecutionTarget {
                 .schema
                 .as_deref()
                 .is_none_or(|schema| profile.catalog_scope.allows_schema(&self.database, schema)),
-            DatabaseKind::Redis => self.schema.is_none(),
+            DatabaseKind::Redis | DatabaseKind::MongoDb => self.schema.is_none(),
         }
     }
 
@@ -252,7 +253,7 @@ impl ExecutionTarget {
                 configured.default_schema = Some(self.database.clone());
             }
             DatabaseKind::Sqlite => {}
-            DatabaseKind::Redis => {
+            DatabaseKind::Redis | DatabaseKind::MongoDb => {
                 configured.database = Some(self.database.clone());
                 configured.default_schema = None;
             }

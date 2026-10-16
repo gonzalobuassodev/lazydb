@@ -97,6 +97,10 @@ const SUPPORTED_COMMANDS: &[&str] = &[
     "explorer-new-profile",
     "explorer-refresh",
     "explorer-toggle",
+    "explorer-create",
+    "explorer-edit",
+    "explorer-delete",
+    "explorer-rename",
 ];
 
 #[derive(Debug, Error)]

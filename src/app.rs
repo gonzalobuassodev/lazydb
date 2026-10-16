@@ -158,6 +158,27 @@ fn data_query_identifier(value: &str, cursor: usize) -> Option<(crate::sql::Text
     })
 }
 
+fn mongo_management_editor_id(
+    draft: &crate::model::mongodb_management::MongoManagementDraft,
+) -> Uuid {
+    Uuid::from_u128(draft.profile_id.as_u128() ^ draft.generation as u128 ^ 0x4d4f4e474f4d414e)
+}
+
+fn transaction_command_from_json(
+    command: &str,
+    database: &str,
+) -> Option<crate::mongodb_command::ParsedMongoCommand> {
+    let parsed = crate::mongodb_command::parse_command(command, database).ok()?;
+    if parsed.risk != crate::mongodb_command::MongoCommandRisk::ReadOnly
+        || parsed.kind != crate::mongodb_command::MongoCommandKind::Find
+    {
+        return None;
+    }
+    parsed.capability().ok()?;
+    parsed.validate_supported_fields().ok()?;
+    Some(parsed)
+}
+
 fn is_data_query_identifier_character(character: char) -> bool {
     character.is_alphanumeric() || matches!(character, '_' | '-')
 }
@@ -276,6 +297,10 @@ pub struct App {
     workspace_focus: HashMap<Uuid, Focus>,
     workspace_save: crate::model::workspace_save::SaveState,
     pending_sql_deletions: HashMap<u64, Vec<Uuid>>,
+    closed_mongo_consoles: Vec<(
+        crate::persistence::mongodb_workspace::PersistedMongoConsole,
+        String,
+    )>,
     workspace_save_closing: bool,
     workspace_quit_save: crate::model::workspace_save::QuitSaveState,
     pub notifications: NotificationCenter,
@@ -688,7 +713,7 @@ impl App {
             | DatabaseKind::MariaDb
             | DatabaseKind::SqlServer
             | DatabaseKind::Oracle => crate::db::principal::PrincipalCapability::DdlOnly,
-            DatabaseKind::Sqlite | DatabaseKind::Redis => {
+            DatabaseKind::Sqlite | DatabaseKind::Redis | DatabaseKind::MongoDb => {
                 crate::db::principal::PrincipalCapability::Unsupported
             }
         })
@@ -706,10 +731,24 @@ impl App {
         }
         let session_id = view.editor_session_id;
         let execution_id = item.execution_id;
-        let text = crate::security::sanitize_terminal_text(&item.sql);
+        let is_mongo = item.language == crate::model::sql_history::HistoryLanguage::Mongo;
+        let text = if is_mongo {
+            format!(
+                "MongoDB command: {}\nDatabase: {}\nStatus: {:?}\nReturned documents: {}\nElapsed: {} ms\n\nCommand payloads and results are not stored in history.",
+                item.mongo_command.as_deref().unwrap_or("command"),
+                item.database.as_deref().unwrap_or("—"),
+                item.status,
+                item.returned_rows.map_or("—".to_owned(), |v| v.to_string()),
+                item.elapsed_millis
+                    .map_or("—".to_owned(), |v| v.to_string())
+            )
+        } else {
+            crate::security::sanitize_terminal_text(&item.sql)
+        };
         self.editor.open_read_only(session_id, &text);
         if let Some(Overlay::SqlHistory(view)) = self.overlay.as_mut() {
             view.loaded_execution_id = Some(execution_id);
+            view.mongo_detail_text = is_mongo.then_some(text);
         }
     }
 
@@ -1044,6 +1083,7 @@ impl App {
             workspace_focus: HashMap::new(),
             workspace_save: Default::default(),
             pending_sql_deletions: HashMap::new(),
+            closed_mongo_consoles: Vec::new(),
             workspace_save_closing: false,
             workspace_quit_save: Default::default(),
             notifications: NotificationCenter::default(),
@@ -1852,6 +1892,9 @@ impl App {
             Some(WorkspaceTab::Dashboard(tab)) => tab.grid.selected_column,
             Some(WorkspaceTab::RedisBrowser(tab)) => tab.preview_grid.selected_column,
             Some(WorkspaceTab::PrincipalDdl(_)) => 0,
+            Some(WorkspaceTab::MongoBrowser(tab)) => tab.selected_document,
+            Some(WorkspaceTab::MongoConsole(_)) => 0,
+            Some(WorkspaceTab::MongoDashboard(_)) => 0,
             None => 0,
         }
     }
@@ -2008,6 +2051,20 @@ impl App {
         )
     }
 
+    pub fn active_mongo_console_editor_snapshot(
+        &self,
+        viewport: EditorViewport,
+    ) -> Result<EditorRenderSnapshot, EditorError> {
+        let Some(WorkspaceTab::MongoConsole(tab)) = self.tabs.get(self.active_tab) else {
+            return Err(EditorError::MissingSession(Uuid::nil()));
+        };
+        self.editor.render_preview_snapshot(
+            tab.id,
+            viewport,
+            crate::model::editor_language::EditorLanguage::Json,
+        )
+    }
+
     pub fn active_output_editor_viewport(&self) -> Result<EditorViewport, EditorError> {
         self.active_console_opt().map_or_else(
             || Err(EditorError::MissingSession(Uuid::nil())),
@@ -2032,7 +2089,7 @@ impl App {
                 DatabaseKind::Oracle => SqlDialect::Generic,
                 DatabaseKind::Sqlite => SqlDialect::Sqlite,
                 DatabaseKind::SqlServer => SqlDialect::SqlServer,
-                DatabaseKind::Redis => SqlDialect::Generic,
+                DatabaseKind::Redis | DatabaseKind::MongoDb => SqlDialect::Generic,
             })
             .unwrap_or_else(|| self.sql_dialect());
         self.editor.render_snapshot_with_dialect_and_statement(
@@ -2200,6 +2257,9 @@ impl App {
                         WorkspaceTab::Dashboard(tab) => tab.profile_id == Some(profile_id),
                         WorkspaceTab::RedisBrowser(tab) => tab.target.profile_id == profile_id,
                         WorkspaceTab::PrincipalDdl(tab) => tab.entry.id.profile_id == profile_id,
+                        WorkspaceTab::MongoBrowser(tab) => tab.profile_id == profile_id,
+                        WorkspaceTab::MongoConsole(tab) => tab.profile_id == profile_id,
+                        WorkspaceTab::MongoDashboard(tab) => tab.profile_id == profile_id,
                     })
                     .cloned()
                     .collect::<Vec<_>>();
@@ -2439,6 +2499,9 @@ impl App {
             WorkspaceTab::Dashboard(tab) => tab.profile_id == Some(profile_id),
             WorkspaceTab::RedisBrowser(tab) => tab.target.profile_id == profile_id,
             WorkspaceTab::PrincipalDdl(tab) => tab.entry.id.profile_id == profile_id,
+            WorkspaceTab::MongoBrowser(tab) => tab.profile_id == profile_id,
+            WorkspaceTab::MongoConsole(tab) => tab.profile_id == profile_id,
+            WorkspaceTab::MongoDashboard(tab) => tab.profile_id == profile_id,
         }
     }
 
@@ -2468,42 +2531,46 @@ impl App {
             .collect();
         let tabs = tabs
             .iter()
-            .map(|tab| match tab {
-                WorkspaceTab::Sql(tab) => PersistedTab::Console { console_id: tab.id },
-                WorkspaceTab::Relation(tab) => {
-                    PersistedTab::Relation(crate::persistence::workspace::PersistedRelationTab {
-                        id: tab.id,
-                        object_id: tab.descriptor.key.object_id.clone(),
-                        qualified_name: tab.descriptor.qualified_name.clone(),
-                        catalog_kind: tab.descriptor.kind,
-                        title: tab.descriptor.title.clone(),
-                        view: tab.view,
-                    })
-                }
-                WorkspaceTab::Dashboard(tab) => PersistedTab::Dashboard {
-                    dashboard_id: tab.id,
-                    page: tab.page,
-                    refresh_enabled: tab.refresh_enabled,
-                    redis_database: tab.redis_database,
-                },
-                WorkspaceTab::RedisBrowser(tab) => PersistedTab::RedisBrowser {
-                    tab_id: tab.id,
-                    profile_id: tab.target.profile_id,
-                    database: tab.target.database,
-                    pattern: tab.keyspace.pattern.clone(),
-                },
-                WorkspaceTab::PrincipalDdl(tab) => PersistedTab::PrincipalDdl(
-                    crate::persistence::workspace::PersistedPrincipalTab {
-                        id: tab.id,
-                        profile_id: tab.entry.id.profile_id,
-                        scope: tab.entry.id.scope.clone(),
-                        native_id: tab.entry.id.native_id.clone(),
-                        kind: tab.entry.kind,
-                        display_name: tab.entry.name.clone(),
-                        native_kind: tab.entry.native_kind.clone(),
-                        system: tab.entry.system,
+            .filter_map(|tab| {
+                Some(match tab {
+                    WorkspaceTab::Sql(tab) => PersistedTab::Console { console_id: tab.id },
+                    WorkspaceTab::Relation(tab) => PersistedTab::Relation(
+                        crate::persistence::workspace::PersistedRelationTab {
+                            id: tab.id,
+                            object_id: tab.descriptor.key.object_id.clone(),
+                            qualified_name: tab.descriptor.qualified_name.clone(),
+                            catalog_kind: tab.descriptor.kind,
+                            title: tab.descriptor.title.clone(),
+                            view: tab.view,
+                        },
+                    ),
+                    WorkspaceTab::Dashboard(tab) => PersistedTab::Dashboard {
+                        dashboard_id: tab.id,
+                        page: tab.page,
+                        refresh_enabled: tab.refresh_enabled,
+                        redis_database: tab.redis_database,
                     },
-                ),
+                    WorkspaceTab::RedisBrowser(tab) => PersistedTab::RedisBrowser {
+                        tab_id: tab.id,
+                        profile_id: tab.target.profile_id,
+                        database: tab.target.database,
+                        pattern: tab.keyspace.pattern.clone(),
+                    },
+                    WorkspaceTab::MongoBrowser(_) => return None,
+                    WorkspaceTab::MongoConsole(_) | WorkspaceTab::MongoDashboard(_) => return None,
+                    WorkspaceTab::PrincipalDdl(tab) => PersistedTab::PrincipalDdl(
+                        crate::persistence::workspace::PersistedPrincipalTab {
+                            id: tab.id,
+                            profile_id: tab.entry.id.profile_id,
+                            scope: tab.entry.id.scope.clone(),
+                            native_id: tab.entry.id.native_id.clone(),
+                            kind: tab.entry.kind,
+                            display_name: tab.entry.name.clone(),
+                            native_kind: tab.entry.native_kind.clone(),
+                            system: tab.entry.system,
+                        },
+                    ),
+                })
             })
             .collect();
         PersistedProfileWorkspace {
@@ -2654,6 +2721,43 @@ impl App {
             .position(|tab| Some(tab.id()) == active_tab)
             .unwrap_or(0);
         self.focus = Focus::Editor;
+    }
+
+    pub fn restore_mongo_workspace(
+        &mut self,
+        snapshot: crate::persistence::mongodb_workspace::PersistedMongoWorkspace,
+    ) {
+        for console in snapshot.consoles {
+            if !self.profiles.iter().any(|profile| {
+                profile.id == console.profile_id && profile.kind == DatabaseKind::MongoDb
+            }) {
+                continue;
+            }
+            let command = snapshot
+                .commands
+                .iter()
+                .find(|(id, _)| *id == console.id)
+                .map_or_else(|| "{}".to_owned(), |(_, text)| text.clone());
+            if !console.open {
+                self.closed_mongo_consoles.push((console, command));
+                continue;
+            }
+            let mut tab = crate::model::mongodb_console::MongoConsoleTab::new(
+                console.profile_id,
+                console.database,
+            );
+            tab.id = console.id;
+            tab.command_text = command.clone();
+            let id = tab.id;
+            self.editor.open_console(id, &command);
+            self.tabs.retain(|existing| existing.id() != id);
+            if console.open {
+                self.tabs.push(WorkspaceTab::MongoConsole(tab));
+            }
+        }
+        if self.active_tab >= self.tabs.len() {
+            self.active_tab = self.tabs.len().saturating_sub(1);
+        }
     }
 
     pub fn reveal_startup_profile(&mut self, profile_id: Option<Uuid>) {
@@ -2859,6 +2963,48 @@ impl App {
         Command::PersistWorkspace {
             revision,
             snapshot: self.workspace_snapshot(),
+            mongo: crate::persistence::mongodb_workspace::PersistedMongoWorkspace {
+                consoles: self
+                    .tabs
+                    .iter()
+                    .filter_map(|tab| match tab {
+                        WorkspaceTab::MongoConsole(console) => Some(
+                            crate::persistence::mongodb_workspace::PersistedMongoConsole {
+                                id: console.id,
+                                profile_id: console.profile_id,
+                                database: console.database.clone(),
+                                command_file: format!("{}.mongodb.json", console.id).into(),
+                                open: true,
+                            },
+                        ),
+                        _ => None,
+                    })
+                    .chain(self.closed_mongo_consoles.iter().map(|(console, _)| {
+                        crate::persistence::mongodb_workspace::PersistedMongoConsole {
+                            open: false,
+                            ..console.clone()
+                        }
+                    }))
+                    .collect(),
+                commands: self
+                    .tabs
+                    .iter()
+                    .filter_map(|tab| match tab {
+                        WorkspaceTab::MongoConsole(console) => Some((
+                            console.id,
+                            self.editor
+                                .text(console.id)
+                                .unwrap_or_else(|_| console.command_text.clone()),
+                        )),
+                        _ => None,
+                    })
+                    .chain(
+                        self.closed_mongo_consoles
+                            .iter()
+                            .map(|(console, command)| (console.id, command.clone())),
+                    )
+                    .collect(),
+            },
         }
     }
 
@@ -5992,9 +6138,11 @@ impl App {
                 }]
             }
             Action::SqlHistoryOpenDetail => {
-                if let Some(Overlay::SqlHistory(view)) = self.overlay.as_mut() {
-                    view.mode = crate::model::sql_history_view::SqlHistoryMode::Sql;
+                if matches!(self.overlay, Some(Overlay::SqlHistory(_))) {
                     self.sync_sql_history_editor();
+                    if let Some(Overlay::SqlHistory(view)) = self.overlay.as_mut() {
+                        view.mode = crate::model::sql_history_view::SqlHistoryMode::Sql;
+                    }
                     return Vec::new();
                 }
                 Vec::new()
@@ -6010,8 +6158,23 @@ impl App {
                     && let Some(item) = view.selected_item()
                 {
                     return vec![Command::WriteClipboard(ClipboardPayload {
-                        description: "SQL History: complete SQL".into(),
-                        text: item.sql.clone(),
+                        description: if item.language
+                            == crate::model::sql_history::HistoryLanguage::Mongo
+                        {
+                            "Mongo history: safe summary".into()
+                        } else {
+                            "SQL History: complete SQL".into()
+                        },
+                        text: if item.language == crate::model::sql_history::HistoryLanguage::Mongo
+                        {
+                            format!(
+                                "{} · {}",
+                                item.database.as_deref().unwrap_or("?"),
+                                item.mongo_command.as_deref().unwrap_or("command")
+                            )
+                        } else {
+                            item.sql.clone()
+                        },
                         sensitive: false,
                     })];
                 }
@@ -6883,6 +7046,16 @@ impl App {
             }
             Action::ActivateTab(index) => {
                 if index < self.tabs.len() {
+                    if index != self.active_tab
+                        && let Some(WorkspaceTab::MongoConsole(console)) =
+                            self.tabs.get(self.active_tab)
+                        && Self::mongo_transaction_needs_exit(console)
+                    {
+                        return self.defer_mongo_transaction(
+                            DeferredIntent::ActivateTab(index),
+                            console.id,
+                        );
+                    }
                     self.record_active_location();
                     self.clear_active_data_query_focus();
                     self.active_tab = index;
@@ -10821,6 +10994,27 @@ impl App {
                 if self.editor.key(id, key).is_err() {
                     return Vec::new();
                 }
+                if let Some(WorkspaceTab::MongoConsole(tab)) = self.tabs.get_mut(self.active_tab)
+                    && let Ok(text) = self.editor.text(tab.id)
+                {
+                    tab.set_command(text);
+                    if let Ok(Some(control)) =
+                        crate::model::mongodb_console::parse_transaction_control(&tab.command_text)
+                    {
+                        let action = match control {
+                            crate::model::mongodb_console::MongoTransactionControl::Begin => {
+                                Action::MongoTransactionBegin
+                            }
+                            crate::model::mongodb_console::MongoTransactionControl::Commit => {
+                                Action::MongoTransactionCommit
+                            }
+                            crate::model::mongodb_console::MongoTransactionControl::Abort => {
+                                Action::MongoTransactionAbort
+                            }
+                        };
+                        return self.update(action);
+                    }
+                }
                 if self.active_console_opt().is_some()
                     && self.active_editor_mode() != EditorMode::Insert
                 {
@@ -10884,6 +11078,11 @@ impl App {
                 };
                 if self.editor.paste(id, &text).is_err() {
                     return Vec::new();
+                }
+                if let Some(WorkspaceTab::MongoConsole(tab)) = self.tabs.get_mut(self.active_tab)
+                    && let Ok(text) = self.editor.text(tab.id)
+                {
+                    tab.set_command(text);
                 }
                 if self.active_console_opt().is_some()
                     && self.active_editor_mode() != EditorMode::Insert
@@ -11321,7 +11520,18 @@ impl App {
                 if self.review_preview_session_id().is_some() {
                     self.resolve_relation_review(choice)
                 } else {
-                    self.resolve_transaction_exit(choice)
+                    let selected = match self.overlay.as_ref() {
+                        Some(Overlay::TransactionExitConfirm { prompt, choice })
+                            if matches!(
+                                prompt.target,
+                                DeferredTransactionTarget::MongoConsole(_)
+                            ) =>
+                        {
+                            *choice
+                        }
+                        _ => choice,
+                    };
+                    self.resolve_transaction_exit(selected)
                 }
             }
             Action::CancelTransactionExit => {
@@ -11338,26 +11548,46 @@ impl App {
                 self.resolve_transaction_exit(TransactionExitChoice::Cancel)
             }
             Action::ToggleTransactionExitChoice => {
-                if let Some(Overlay::TransactionExitConfirm { choice, .. }) = self.overlay.as_mut()
+                if let Some(Overlay::TransactionExitConfirm { prompt, choice }) =
+                    self.overlay.as_mut()
                 {
-                    *choice = match choice {
-                        TransactionExitChoice::Commit => TransactionExitChoice::Rollback,
-                        TransactionExitChoice::Rollback => TransactionExitChoice::Cancel,
-                        TransactionExitChoice::Abandon | TransactionExitChoice::Cancel => {
-                            TransactionExitChoice::Commit
+                    *choice = if matches!(prompt.target, DeferredTransactionTarget::MongoConsole(_))
+                    {
+                        match choice {
+                            TransactionExitChoice::Commit => TransactionExitChoice::Rollback,
+                            TransactionExitChoice::Rollback => TransactionExitChoice::Cancel,
+                            _ => TransactionExitChoice::Commit,
+                        }
+                    } else {
+                        match choice {
+                            TransactionExitChoice::Commit => TransactionExitChoice::Rollback,
+                            TransactionExitChoice::Rollback => TransactionExitChoice::Cancel,
+                            TransactionExitChoice::Abandon | TransactionExitChoice::Cancel => {
+                                TransactionExitChoice::Commit
+                            }
                         }
                     };
                 }
                 Vec::new()
             }
             Action::TogglePreviousTransactionExitChoice => {
-                if let Some(Overlay::TransactionExitConfirm { choice, .. }) = self.overlay.as_mut()
+                if let Some(Overlay::TransactionExitConfirm { prompt, choice }) =
+                    self.overlay.as_mut()
                 {
-                    *choice = match choice {
-                        TransactionExitChoice::Commit => TransactionExitChoice::Cancel,
-                        TransactionExitChoice::Rollback => TransactionExitChoice::Commit,
-                        TransactionExitChoice::Abandon | TransactionExitChoice::Cancel => {
-                            TransactionExitChoice::Rollback
+                    *choice = if matches!(prompt.target, DeferredTransactionTarget::MongoConsole(_))
+                    {
+                        match choice {
+                            TransactionExitChoice::Rollback => TransactionExitChoice::Commit,
+                            TransactionExitChoice::Commit => TransactionExitChoice::Cancel,
+                            _ => TransactionExitChoice::Rollback,
+                        }
+                    } else {
+                        match choice {
+                            TransactionExitChoice::Commit => TransactionExitChoice::Cancel,
+                            TransactionExitChoice::Rollback => TransactionExitChoice::Commit,
+                            TransactionExitChoice::Abandon | TransactionExitChoice::Cancel => {
+                                TransactionExitChoice::Rollback
+                            }
                         }
                     };
                 }
@@ -11537,6 +11767,20 @@ impl App {
                         return Vec::new();
                     }
                     WorkspaceExitCheck::ConsoleTransactions(ids) => {
+                        if let Some(id) = ids.iter().find(|id| {
+                            matches!(
+                                self.tabs.iter().find(|tab| tab.id() == **id),
+                                Some(WorkspaceTab::MongoConsole(_))
+                            )
+                        }) {
+                            if let Some(WorkspaceTab::MongoConsole(console)) =
+                                self.tabs.iter().find(|tab| tab.id() == *id)
+                            {
+                                self.defer_mongo_transaction(DeferredIntent::Stay, console.id);
+                            }
+                            self.overlay = Some(Overlay::DatabaseSelector(selector));
+                            return Vec::new();
+                        }
                         self.notify_warning(
                             "Connection",
                             format!(
@@ -13030,6 +13274,12 @@ impl App {
                 let mut commands_for_redis = Vec::new();
                 if profile_kind == DatabaseKind::Redis && editor_target_switch.is_none() {
                     commands_for_redis.push(Command::DiscoverRedisDatabases {
+                        profile_id,
+                        generation,
+                    });
+                }
+                if profile_kind == DatabaseKind::MongoDb && editor_target_switch.is_none() {
+                    commands_for_redis.push(Command::DiscoverMongoDatabases {
                         profile_id,
                         generation,
                     });
@@ -14663,6 +14913,1401 @@ impl App {
                 }
                 Vec::new()
             }
+            Action::MongoDatabasesLoaded {
+                profile_id,
+                generation,
+                listing,
+            } => {
+                let identity = ConnectionIdentity {
+                    profile_id,
+                    generation,
+                };
+                if self.sessions.get_by_identity(identity).is_none() {
+                    return Vec::new();
+                }
+                if let Some(profile) = self.explorer.normalized.profiles.get_mut(&profile_id) {
+                    profile.mongodb_databases = listing.databases;
+                    profile.mongodb_error = listing.warning;
+                    profile.mongodb_collection_errors.clear();
+                    profile.status = ExplorerConnectionStatus::Online;
+                }
+                Vec::new()
+            }
+            Action::MongoDatabasesFailed {
+                profile_id,
+                generation,
+                message,
+            } => {
+                if self
+                    .sessions
+                    .get_by_identity(ConnectionIdentity {
+                        profile_id,
+                        generation,
+                    })
+                    .is_some()
+                    && let Some(profile) = self.explorer.normalized.profiles.get_mut(&profile_id)
+                {
+                    profile.mongodb_error = Some(message);
+                }
+                Vec::new()
+            }
+            Action::MongoCollectionsLoaded {
+                profile_id,
+                generation,
+                database,
+                collections,
+            } => {
+                if self
+                    .sessions
+                    .get_by_identity(ConnectionIdentity {
+                        profile_id,
+                        generation,
+                    })
+                    .is_some()
+                    && let Some(profile) = self.explorer.normalized.profiles.get_mut(&profile_id)
+                {
+                    profile.mongodb_collection_errors.remove(&database);
+                    profile.mongodb_collections.insert(database, collections);
+                }
+                Vec::new()
+            }
+            Action::MongoCollectionsFailed {
+                profile_id,
+                generation,
+                database,
+                message,
+            } => {
+                if self
+                    .sessions
+                    .get_by_identity(ConnectionIdentity {
+                        profile_id,
+                        generation,
+                    })
+                    .is_some()
+                    && let Some(profile) = self.explorer.normalized.profiles.get_mut(&profile_id)
+                {
+                    profile.mongodb_collection_errors.insert(database, message);
+                }
+                Vec::new()
+            }
+            Action::MongoIndexesLoaded {
+                profile_id,
+                generation,
+                namespace,
+                indexes,
+            } => {
+                if self
+                    .sessions
+                    .get_by_identity(ConnectionIdentity {
+                        profile_id,
+                        generation,
+                    })
+                    .is_some()
+                    && let Some(profile) = self.explorer.normalized.profiles.get_mut(&profile_id)
+                {
+                    profile.mongodb_index_errors.remove(&namespace);
+                    profile.mongodb_indexes.insert(namespace, indexes);
+                }
+                Vec::new()
+            }
+            Action::MongoIndexesFailed {
+                profile_id,
+                generation,
+                namespace,
+                message,
+            } => {
+                if self
+                    .sessions
+                    .get_by_identity(ConnectionIdentity {
+                        profile_id,
+                        generation,
+                    })
+                    .is_some()
+                    && let Some(profile) = self.explorer.normalized.profiles.get_mut(&profile_id)
+                {
+                    profile.mongodb_index_errors.insert(namespace, message);
+                }
+                Vec::new()
+            }
+            Action::MongoPageLoaded {
+                tab_id,
+                profile_id,
+                generation,
+                connection_generation,
+                page,
+            } => {
+                if self
+                    .sessions
+                    .get_by_identity(ConnectionIdentity {
+                        profile_id,
+                        generation: connection_generation,
+                    })
+                    .is_none()
+                {
+                    return Vec::new();
+                }
+                if let Some(WorkspaceTab::MongoBrowser(tab)) =
+                    self.tabs.iter_mut().find(|tab| tab.id() == tab_id && matches!(tab, WorkspaceTab::MongoBrowser(mongo) if mongo.connection_generation == Some(connection_generation)))
+                {
+                    tab.accept_page(generation, page);
+                }
+                Vec::new()
+            }
+            Action::MongoPageFailed {
+                tab_id,
+                generation,
+                message,
+            } => {
+                if let Some(WorkspaceTab::MongoBrowser(tab)) =
+                    self.tabs.iter_mut().find(|tab| tab.id() == tab_id && matches!(tab, WorkspaceTab::MongoBrowser(mongo) if mongo.generation == generation))
+                {
+                    tab.page = crate::model::mongodb_browser::MongoPageState::Failed(message);
+                }
+                Vec::new()
+            }
+            Action::MongoPageNext => {
+                if let Some(WorkspaceTab::MongoBrowser(tab)) = self.tabs.get_mut(self.active_tab)
+                    && let crate::model::mongodb_browser::MongoPageState::Ready(page) = &tab.page
+                    && let Some(offset) = page.next_offset
+                {
+                    tab.spec.skip = offset;
+                    return self.load_mongodb_page(self.active_tab);
+                }
+                Vec::new()
+            }
+            Action::MongoPageRetry => self.load_mongodb_page(self.active_tab),
+            Action::OpenMongoConsole {
+                profile_id,
+                database,
+            } => {
+                let tab = crate::model::mongodb_console::MongoConsoleTab::new(profile_id, database);
+                let id = tab.id;
+                self.editor.open_console(id, &tab.command_text);
+                self.tabs.push(WorkspaceTab::MongoConsole(tab));
+                self.active_tab = self.tabs.len().saturating_sub(1);
+                self.focus = Focus::Editor;
+                Vec::new()
+            }
+            Action::MongoMonitorRefresh => {
+                let Some(WorkspaceTab::MongoDashboard(tab)) = self.tabs.get_mut(self.active_tab)
+                else {
+                    return Vec::new();
+                };
+                tab.generation = tab.generation.wrapping_add(1);
+                tab.loading = true;
+                let connection_generation = self
+                    .sessions
+                    .identities_for_profile(tab.profile_id)
+                    .first()
+                    .map_or(0, |identity| identity.generation);
+                vec![Command::RefreshMongoMonitor {
+                    profile_id: tab.profile_id,
+                    database: tab.database.clone(),
+                    connection_generation,
+                    generation: tab.generation,
+                }]
+            }
+            Action::MongoPrincipalsRefresh => {
+                let Some(WorkspaceTab::MongoDashboard(tab)) = self.tabs.get(self.active_tab) else {
+                    return Vec::new();
+                };
+                let profile_id = tab.profile_id;
+                let database = tab.database.clone();
+                let tab_id = tab.id;
+                let Some(connection_generation) = tab.connection_generation else {
+                    return Vec::new();
+                };
+                if self
+                    .sessions
+                    .get_by_identity(crate::identity::ConnectionIdentity {
+                        profile_id,
+                        generation: connection_generation,
+                    })
+                    .is_none_or(|session| session.target.database != database)
+                {
+                    return Vec::new();
+                }
+                let Some(WorkspaceTab::MongoDashboard(tab)) =
+                    self.tabs.iter_mut().find(|tab| tab.id() == tab_id)
+                else {
+                    return Vec::new();
+                };
+                tab.generation = tab.generation.wrapping_add(1);
+                tab.loading = true;
+                vec![Command::LoadMongoPrincipals {
+                    profile_id,
+                    database,
+                    connection_generation,
+                    generation: tab.generation,
+                }]
+            }
+            Action::MongoPrincipalNewUser | Action::MongoPrincipalNewRole => {
+                let is_role = matches!(action, Action::MongoPrincipalNewRole);
+                let Some(WorkspaceTab::MongoDashboard(tab)) = self.tabs.get(self.active_tab) else {
+                    return Vec::new();
+                };
+                let profile_id = tab.profile_id;
+                let database = tab.database.clone();
+                let dashboard_id = tab.id;
+                let connection_generation = tab.connection_generation.unwrap_or(0);
+                let read_only = self
+                    .profiles
+                    .iter()
+                    .any(|profile| profile.id == profile_id && profile.read_only);
+                if read_only {
+                    self.notify_warning("MongoDB principals", "The profile is read-only");
+                    return Vec::new();
+                }
+                if self
+                    .sessions
+                    .get_by_identity(crate::identity::ConnectionIdentity {
+                        profile_id,
+                        generation: connection_generation,
+                    })
+                    .is_none()
+                {
+                    return Vec::new();
+                }
+                let active_database = self
+                    .sessions
+                    .get_by_identity(crate::identity::ConnectionIdentity {
+                        profile_id,
+                        generation: connection_generation,
+                    })
+                    .map(|session| session.target.database.as_str())
+                    .unwrap_or("");
+                if database != active_database {
+                    return Vec::new();
+                }
+                let draft =
+                    crate::model::mongodb_principal::MongoPrincipalMutationDraft::new_operation(
+                        profile_id,
+                        connection_generation,
+                        database,
+                        if is_role { "createRole" } else { "createUser" },
+                    );
+                let Some(WorkspaceTab::MongoDashboard(tab)) =
+                    self.tabs.iter_mut().find(|item| item.id() == dashboard_id)
+                else {
+                    return Vec::new();
+                };
+                tab.principal_mutation = Some(Box::new(draft.clone()));
+                self.overlay = Some(Overlay::MongoPrincipalMutation(Box::new(draft)));
+                Vec::new()
+            }
+            Action::MongoPrincipalMutationCancel => {
+                if let Some(WorkspaceTab::MongoDashboard(tab)) = self.tabs.get_mut(self.active_tab)
+                {
+                    tab.principal_mutation = None;
+                }
+                self.overlay = None;
+                Vec::new()
+            }
+            Action::MongoPrincipalMutationMoveField(direction) => {
+                if let Some(Overlay::MongoPrincipalMutation(draft)) = self.overlay.as_mut() {
+                    if direction < 0 {
+                        draft.previous_field();
+                    } else {
+                        draft.next_field();
+                    }
+                }
+                Vec::new()
+            }
+            Action::MongoPrincipalMutationOperation(operation) => {
+                if let Some(Overlay::MongoPrincipalMutation(draft)) = self.overlay.as_mut() {
+                    match operation.as_str() {
+                        "prev" | "next" => {
+                            const OPERATIONS: &[&str] = &[
+                                "createUser",
+                                "updateUser",
+                                "dropUser",
+                                "grantRolesToUser",
+                                "revokeRolesFromUser",
+                                "createRole",
+                                "updateRole",
+                                "dropRole",
+                                "grantPrivilegesToRole",
+                                "revokePrivilegesFromRole",
+                            ];
+                            let current = OPERATIONS
+                                .iter()
+                                .position(|value| *value == draft.display_operation())
+                                .unwrap_or(0);
+                            let next = if operation == "prev" {
+                                (current + OPERATIONS.len() - 1) % OPERATIONS.len()
+                            } else {
+                                (current + 1) % OPERATIONS.len()
+                            };
+                            draft.set_operation_with_defaults(OPERATIONS[next]);
+                        }
+                        value => draft.set_operation(value),
+                    }
+                }
+                Vec::new()
+            }
+            Action::MongoPrincipalMutationEdit(edit) => {
+                if let Some(Overlay::MongoPrincipalMutation(draft)) = self.overlay.as_mut() {
+                    match draft.selected_field {
+                        crate::model::mongodb_principal::MongoPrincipalField::Target => {
+                            draft.target.apply(edit);
+                        }
+                        crate::model::mongodb_principal::MongoPrincipalField::Roles => {
+                            draft.roles_json.apply(edit);
+                        }
+                        crate::model::mongodb_principal::MongoPrincipalField::Privileges => {
+                            draft.privileges_json.apply(edit);
+                        }
+                        _ => {}
+                    }
+                }
+                Vec::new()
+            }
+            Action::MongoPrincipalMutationPaste(text) => {
+                if let Some(Overlay::MongoPrincipalMutation(draft)) = self.overlay.as_mut() {
+                    match draft.selected_field {
+                        crate::model::mongodb_principal::MongoPrincipalField::Target => {
+                            draft.target.paste(text)
+                        }
+                        crate::model::mongodb_principal::MongoPrincipalField::Roles => {
+                            draft.roles_json.paste(text)
+                        }
+                        crate::model::mongodb_principal::MongoPrincipalField::Privileges => {
+                            draft.privileges_json.paste(text)
+                        }
+                        _ => {}
+                    }
+                }
+                Vec::new()
+            }
+            Action::MongoPrincipalMutationPasswordInsert(ch) => {
+                if let Some(Overlay::MongoPrincipalMutation(draft)) = self.overlay.as_mut() {
+                    draft.insert_password(ch);
+                }
+                Vec::new()
+            }
+            Action::MongoPrincipalMutationPasswordPaste(text) => {
+                if let Some(Overlay::MongoPrincipalMutation(draft)) = self.overlay.as_mut() {
+                    draft.paste_password(&text);
+                }
+                Vec::new()
+            }
+            Action::MongoPrincipalMutationPasswordBackspace => {
+                if let Some(Overlay::MongoPrincipalMutation(draft)) = self.overlay.as_mut() {
+                    draft.backspace_password();
+                }
+                Vec::new()
+            }
+            Action::MongoPrincipalMutationPasswordDelete => {
+                if let Some(Overlay::MongoPrincipalMutation(draft)) = self.overlay.as_mut() {
+                    draft.delete_password();
+                }
+                Vec::new()
+            }
+            Action::MongoPrincipalMutationPasswordMove(direction) => {
+                if let Some(Overlay::MongoPrincipalMutation(draft)) = self.overlay.as_mut() {
+                    match direction {
+                        isize::MIN => draft.move_password_home(),
+                        isize::MAX => draft.move_password_end(),
+                        value if value < 0 => draft.move_password_left(),
+                        _ => draft.move_password_right(),
+                    }
+                }
+                Vec::new()
+            }
+            Action::MongoPrincipalMutationConfirm => {
+                let Some(Overlay::MongoPrincipalMutation(draft)) = self.overlay.take() else {
+                    return Vec::new();
+                };
+                let mutation = match draft.validate() {
+                    Ok(mutation) => mutation,
+                    Err(error) => {
+                        self.notify_error("MongoDB principal", error);
+                        self.overlay = Some(Overlay::MongoPrincipalMutation(draft));
+                        return Vec::new();
+                    }
+                };
+                let expected = draft.confirmation_target();
+                let mut input = crate::model::text_input::TextInput::default();
+                input.set(String::new());
+                self.overlay = Some(Overlay::MongoPrincipalConfirmation {
+                    mutation,
+                    expected,
+                    input,
+                });
+                Vec::new()
+            }
+            Action::MongoPrincipalConfirmationConfirm => {
+                let Some(Overlay::MongoPrincipalConfirmation {
+                    mutation,
+                    expected,
+                    input,
+                }) = self.overlay.take()
+                else {
+                    return Vec::new();
+                };
+                if input.value() != expected {
+                    self.notify_warning(
+                        "MongoDB principal",
+                        "Confirmation must exactly match database:target",
+                    );
+                    self.overlay = Some(Overlay::MongoPrincipalConfirmation {
+                        mutation,
+                        expected,
+                        input,
+                    });
+                    return Vec::new();
+                }
+                let Some(WorkspaceTab::MongoDashboard(tab)) = self.tabs.get(self.active_tab) else {
+                    return Vec::new();
+                };
+                if tab.principal_pending_target.is_some() {
+                    return Vec::new();
+                }
+                let profile_id = tab.profile_id;
+                let dashboard_id = tab.id;
+                let Some(connection_generation) = tab.connection_generation else {
+                    return Vec::new();
+                };
+                let Some(session) =
+                    self.sessions
+                        .get_by_identity(crate::identity::ConnectionIdentity {
+                            profile_id,
+                            generation: connection_generation,
+                        })
+                else {
+                    return Vec::new();
+                };
+                let selected_database = session.target.database.clone();
+                if !mutation.targets_database(&selected_database) {
+                    return Vec::new();
+                }
+                let confirmation_target = mutation.confirmation_target();
+                let Some(WorkspaceTab::MongoDashboard(tab)) = self.tabs.get_mut(self.active_tab)
+                else {
+                    return Vec::new();
+                };
+                if tab.id != dashboard_id {
+                    return Vec::new();
+                }
+                tab.principal_pending_target = Some(confirmation_target);
+                tab.principal_pending_operation = mutation.command_name().map(str::to_owned);
+                tab.principal_pending_connection_generation = Some(connection_generation);
+                vec![Command::ExecuteMongoPrincipalMutation {
+                    profile_id,
+                    connection_generation,
+                    selected_database,
+                    mutation,
+                }]
+            }
+            Action::MongoPrincipalConfirmationBackspace => {
+                if let Some(Overlay::MongoPrincipalConfirmation { input, .. }) =
+                    self.overlay.as_mut()
+                {
+                    input.apply(crate::model::text_input::TextInputEdit::Backspace);
+                }
+                Vec::new()
+            }
+            Action::MongoPrincipalConfirmationEdit(edit) => {
+                if let Some(Overlay::MongoPrincipalConfirmation { input, .. }) =
+                    self.overlay.as_mut()
+                {
+                    input.apply(edit);
+                }
+                Vec::new()
+            }
+            Action::MongoPrincipalConfirmationInsert(ch) => {
+                if let Some(Overlay::MongoPrincipalConfirmation { input, .. }) =
+                    self.overlay.as_mut()
+                {
+                    input.apply(crate::model::text_input::TextInputEdit::Insert(ch));
+                }
+                Vec::new()
+            }
+            Action::MongoPrincipalConfirmationPaste(text) => {
+                if let Some(Overlay::MongoPrincipalConfirmation { input, .. }) =
+                    self.overlay.as_mut()
+                {
+                    input.paste(text);
+                }
+                Vec::new()
+            }
+            Action::MongoPrincipalConfirmationCancel => {
+                self.overlay = None;
+                Vec::new()
+            }
+            Action::MongoPrincipalMutationSucceeded {
+                profile_id,
+                connection_generation,
+                database,
+                command_name,
+                target: _,
+                confirmation_target,
+            } => {
+                if !self
+                    .sessions
+                    .identities_for_profile(profile_id)
+                    .iter()
+                    .any(|identity| {
+                        identity.generation == connection_generation
+                            && self
+                                .sessions
+                                .get_by_identity(*identity)
+                                .is_some_and(|session| session.target.database == database)
+                    })
+                {
+                    return Vec::new();
+                }
+                let expected = self.tabs.iter().find_map(|tab| match tab {
+                    WorkspaceTab::MongoDashboard(mongo)
+                        if mongo.profile_id == profile_id
+                            && mongo.database == database
+                            && mongo.principal_pending_connection_generation
+                                == Some(connection_generation)
+                            && mongo.principal_pending_operation.as_deref()
+                                == Some(command_name.as_str()) =>
+                    {
+                        mongo.principal_pending_target.clone()
+                    }
+                    _ => None,
+                });
+                if expected.as_deref() != Some(confirmation_target.as_str()) {
+                    return Vec::new();
+                }
+                if self
+                    .sessions
+                    .identities_for_profile(profile_id)
+                    .iter()
+                    .any(|identity| {
+                        identity.generation == connection_generation
+                            && self
+                                .sessions
+                                .get_by_identity(*identity)
+                                .is_some_and(|session| session.target.database == database)
+                    })
+                {
+                    self.notify_success(
+                        "MongoDB principal",
+                        format!("{command_name} applied to {confirmation_target}"),
+                    );
+                    if let Some(WorkspaceTab::MongoDashboard(tab)) = self.tabs.iter_mut().find(|tab| matches!(tab, WorkspaceTab::MongoDashboard(mongo) if mongo.profile_id == profile_id && mongo.database == database && mongo.principal_pending_connection_generation == Some(connection_generation) && mongo.principal_pending_operation.as_deref() == Some(command_name.as_str()) && mongo.principal_pending_target.as_deref() == Some(confirmation_target.as_str()))) { tab.principal_mutation = None; tab.principal_pending_target = None; tab.principal_pending_operation = None; tab.principal_pending_connection_generation = None; }
+                    if let Some(WorkspaceTab::MongoDashboard(tab)) = self.tabs.iter().find(|tab| matches!(tab, WorkspaceTab::MongoDashboard(mongo) if mongo.profile_id == profile_id && mongo.database == database && mongo.connection_generation == Some(connection_generation))) {
+                        let tab_id = tab.id;
+                        let generation = tab.generation.wrapping_add(1);
+                        if let Some(WorkspaceTab::MongoDashboard(tab)) = self.tabs.iter_mut().find(|tab| tab.id() == tab_id) { tab.generation = generation; tab.loading = true; }
+                        return vec![Command::LoadMongoPrincipals { profile_id, database, connection_generation, generation }];
+                    }
+                }
+                Vec::new()
+            }
+            Action::MongoPrincipalMutationFailed {
+                profile_id,
+                connection_generation,
+                database,
+                command_name,
+                target: _,
+                confirmation_target,
+                message,
+            } => {
+                let pending = self.tabs.iter().any(|tab| matches!(tab,
+                    WorkspaceTab::MongoDashboard(mongo)
+                        if mongo.profile_id == profile_id
+                            && mongo.database == database
+                            && mongo.connection_generation == Some(connection_generation)
+                            && mongo.principal_pending_connection_generation == Some(connection_generation)
+                            && mongo.principal_pending_operation.as_deref() == Some(command_name.as_str())
+                            && mongo.principal_pending_target.as_deref() == Some(confirmation_target.as_str())
+                ));
+                let active =
+                    self.sessions
+                        .identities_for_profile(profile_id)
+                        .iter()
+                        .any(|identity| {
+                            identity.generation == connection_generation
+                                && self
+                                    .sessions
+                                    .get_by_identity(*identity)
+                                    .is_some_and(|session| session.target.database == database)
+                        });
+                if pending && active {
+                    self.notify_error("MongoDB principal", message);
+                    if let Some(WorkspaceTab::MongoDashboard(tab)) = self.tabs.iter_mut().find(|tab| matches!(tab, WorkspaceTab::MongoDashboard(mongo) if mongo.profile_id == profile_id && mongo.database == database && mongo.principal_pending_connection_generation == Some(connection_generation) && mongo.principal_pending_operation.as_deref() == Some(command_name.as_str()) && mongo.principal_pending_target.as_deref() == Some(confirmation_target.as_str()))) { tab.principal_pending_target = None; tab.principal_pending_operation = None; tab.principal_pending_connection_generation = None; }
+                }
+                Vec::new()
+            }
+            Action::MongoMonitorCompleted {
+                profile_id,
+                generation,
+                connection_generation,
+                database,
+                snapshot,
+            } => {
+                if let Some(WorkspaceTab::MongoDashboard(tab)) = self.tabs.iter_mut().find(|tab| matches!(tab, WorkspaceTab::MongoDashboard(mongo) if mongo.profile_id == profile_id && mongo.database == database && mongo.generation == generation && self.sessions.identities_for_profile(profile_id).iter().any(|identity| identity.generation == connection_generation))) {
+                    tab.snapshot = Some(snapshot.clone()); tab.errors = snapshot.errors.iter().map(|error| format!("{}: {}", error.command, error.message)).collect(); tab.loading = false;
+                }
+                Vec::new()
+            }
+            Action::MongoMonitorFailed {
+                profile_id,
+                generation,
+                connection_generation,
+                database,
+                message,
+            } => {
+                if let Some(WorkspaceTab::MongoDashboard(tab)) = self.tabs.iter_mut().find(|tab| matches!(tab, WorkspaceTab::MongoDashboard(mongo) if mongo.profile_id == profile_id && mongo.database == database && mongo.generation == generation && self.sessions.identities_for_profile(profile_id).iter().any(|identity| identity.generation == connection_generation))) { tab.errors.push(message); tab.loading = false; }
+                Vec::new()
+            }
+            Action::MongoPrincipalsLoaded {
+                profile_id,
+                generation,
+                connection_generation,
+                database,
+                users,
+                roles,
+            } => {
+                if let Some(WorkspaceTab::MongoDashboard(tab)) = self.tabs.iter_mut().find(|tab| matches!(tab, WorkspaceTab::MongoDashboard(mongo) if mongo.profile_id == profile_id && mongo.generation == generation && mongo.database == database && self.sessions.identities_for_profile(profile_id).iter().any(|identity| identity.generation == connection_generation))) { tab.users = users; tab.roles = roles; tab.loading = false; }
+                Vec::new()
+            }
+            Action::MongoPrincipalsFailed {
+                profile_id,
+                generation,
+                connection_generation,
+                database,
+                message,
+            } => {
+                if let Some(WorkspaceTab::MongoDashboard(tab)) = self.tabs.iter_mut().find(|tab| matches!(tab, WorkspaceTab::MongoDashboard(mongo) if mongo.profile_id == profile_id && mongo.generation == generation && mongo.database == database && self.sessions.identities_for_profile(profile_id).iter().any(|identity| identity.generation == connection_generation))) { tab.errors.push(message); tab.loading = false; }
+                Vec::new()
+            }
+            Action::MongoConsoleEdit(text) => {
+                if let Some(WorkspaceTab::MongoConsole(tab)) = self.tabs.get_mut(self.active_tab) {
+                    tab.set_command(text.clone());
+                    let _ = self.editor.set_text(tab.id, &text);
+                }
+                Vec::new()
+            }
+            Action::MongoConsoleRun => {
+                let Some(WorkspaceTab::MongoConsole(active_tab)) = self.tabs.get(self.active_tab)
+                else {
+                    return Vec::new();
+                };
+                let tab_id = active_tab.id;
+                let command_text = self
+                    .editor
+                    .text(tab_id)
+                    .unwrap_or_else(|_| active_tab.command_text.clone());
+                let Some(WorkspaceTab::MongoConsole(tab)) = self.tabs.get_mut(self.active_tab)
+                else {
+                    return Vec::new();
+                };
+                let generation = match tab.begin_with_command(command_text.clone()) {
+                    Ok(generation) => generation,
+                    Err(error) => {
+                        tab.status =
+                            crate::model::mongodb_console::MongoConsoleStatus::Failed(error);
+                        return Vec::new();
+                    }
+                };
+                vec![Command::RunMongoConsole {
+                    tab_id: tab.id,
+                    profile_id: tab.profile_id,
+                    database: tab.database.clone(),
+                    connection_generation: self
+                        .sessions
+                        .identities_for_profile(tab.profile_id)
+                        .first()
+                        .map_or(0, |identity| identity.generation),
+                    generation,
+                    command: command_text,
+                    transaction_generation: self.tabs.get(self.active_tab).and_then(|tab| match tab {
+                        WorkspaceTab::MongoConsole(tab) if tab.transaction == crate::model::mongodb_console::MongoConsoleTransactionState::Active => Some(tab.transaction_generation),
+                        _ => None,
+                    }),
+                }]
+            }
+            Action::MongoTransactionBegin => {
+                let command_text = self
+                    .tabs
+                    .get(self.active_tab)
+                    .and_then(|tab| match tab {
+                        WorkspaceTab::MongoConsole(console) => self
+                            .editor
+                            .text(console.id)
+                            .ok()
+                            .or_else(|| Some(console.command_text.clone())),
+                        _ => None,
+                    })
+                    .unwrap_or_default();
+                let Some(WorkspaceTab::MongoConsole(tab)) = self.tabs.get_mut(self.active_tab)
+                else {
+                    return Vec::new();
+                };
+                let generation = match tab.begin_transaction_command(command_text.clone()) {
+                    Ok(generation) => generation,
+                    Err(message) => {
+                        self.notify_warning("Mongo transaction", message);
+                        return Vec::new();
+                    }
+                };
+                let Some(connection_generation) = self
+                    .sessions
+                    .identities_for_profile(tab.profile_id)
+                    .first()
+                    .map(|identity| identity.generation)
+                else {
+                    tab.transaction =
+                        crate::model::mongodb_console::MongoConsoleTransactionState::Idle;
+                    return Vec::new();
+                };
+                let profile = self
+                    .profiles
+                    .iter()
+                    .find(|profile| profile.id == tab.profile_id);
+                let Some(profile) = profile else {
+                    tab.transaction =
+                        crate::model::mongodb_console::MongoConsoleTransactionState::Idle;
+                    self.notify_warning("Mongo transaction", "MongoDB profile no longer exists");
+                    return Vec::new();
+                };
+                if !profile.catalog_scope.allows_database(&tab.database) {
+                    tab.transaction =
+                        crate::model::mongodb_console::MongoConsoleTransactionState::Idle;
+                    self.notify_warning(
+                        "Mongo transaction",
+                        "Database is outside the MongoDB profile scope",
+                    );
+                    return Vec::new();
+                }
+                tab.transaction_connection_generation = Some(connection_generation);
+                vec![Command::MongoTransactionBegin {
+                    tab_id: tab.id,
+                    profile_id: tab.profile_id,
+                    database: tab.database.clone(),
+                    connection_generation,
+                    generation,
+                }]
+            }
+            Action::MongoTransactionCommand(command) => {
+                let Some(WorkspaceTab::MongoConsole(tab)) = self.tabs.get_mut(self.active_tab)
+                else {
+                    return Vec::new();
+                };
+                if tab.transaction
+                    != crate::model::mongodb_console::MongoConsoleTransactionState::Active
+                {
+                    return Vec::new();
+                }
+                let Some(command) = transaction_command_from_json(&command, &tab.database) else {
+                    self.notify_error(
+                        "Mongo transaction",
+                        "Only collection find commands are allowed in a transaction",
+                    );
+                    return Vec::new();
+                };
+                vec![Command::MongoTransactionCommand {
+                    tab_id: tab.id,
+                    database: tab.database.clone(),
+                    generation: tab.transaction_generation,
+                    command: command.command,
+                }]
+            }
+            Action::MongoTransactionCommit => {
+                let Some(WorkspaceTab::MongoConsole(tab)) = self.tabs.get_mut(self.active_tab)
+                else {
+                    return Vec::new();
+                };
+                if tab.transaction
+                    != crate::model::mongodb_console::MongoConsoleTransactionState::Active
+                {
+                    return Vec::new();
+                }
+                tab.transaction =
+                    crate::model::mongodb_console::MongoConsoleTransactionState::Committing;
+                vec![Command::MongoTransactionCommit {
+                    tab_id: tab.id,
+                    generation: tab.transaction_generation,
+                }]
+            }
+            Action::MongoTransactionAbort => {
+                let Some(WorkspaceTab::MongoConsole(tab)) = self.tabs.get_mut(self.active_tab)
+                else {
+                    return Vec::new();
+                };
+                if tab.transaction
+                    != crate::model::mongodb_console::MongoConsoleTransactionState::Active
+                {
+                    return Vec::new();
+                }
+                tab.transaction =
+                    crate::model::mongodb_console::MongoConsoleTransactionState::Aborting;
+                vec![Command::MongoTransactionAbort {
+                    tab_id: tab.id,
+                    generation: tab.transaction_generation,
+                }]
+            }
+            Action::MongoTransactionWorkerReady { tab_id, generation } => {
+                if let Some(WorkspaceTab::MongoConsole(tab)) =
+                    self.tabs.iter_mut().find(|tab| tab.id() == tab_id)
+                {
+                    if tab.transaction_generation == generation
+                        && tab.transaction
+                            == crate::model::mongodb_console::MongoConsoleTransactionState::Starting
+                    {
+                        tab.set_transaction_result(
+                            generation,
+                            crate::model::mongodb_console::MongoConsoleTransactionState::Active,
+                        );
+                        return vec![self.persist_workspace_command()];
+                    }
+                }
+                Vec::new()
+            }
+            Action::MongoTransactionCommandCompleted {
+                tab_id,
+                generation,
+                reply_ejson,
+            } => {
+                if let Some(WorkspaceTab::MongoConsole(tab)) =
+                    self.tabs.iter_mut().find(|tab| tab.id() == tab_id)
+                {
+                    if tab.transaction_generation == generation {
+                        tab.result = Some(crate::model::mongodb_console::MongoConsoleResult {
+                            documents_ejson: Vec::new(),
+                            reply_ejson: Some(reply_ejson),
+                            count: None,
+                            truncated: false,
+                        });
+                        return vec![self.persist_workspace_command()];
+                    }
+                }
+                Vec::new()
+            }
+            Action::MongoTransactionFinished {
+                tab_id,
+                generation,
+                outcome,
+            } => {
+                if let Some(WorkspaceTab::MongoConsole(tab)) =
+                    self.tabs.iter_mut().find(|tab| tab.id() == tab_id)
+                {
+                    let state = match outcome { crate::db::mongodb::transaction::MongoTransactionOutcome::Committed => crate::model::mongodb_console::MongoConsoleTransactionState::Committed, crate::db::mongodb::transaction::MongoTransactionOutcome::Aborted => crate::model::mongodb_console::MongoConsoleTransactionState::Aborted, crate::db::mongodb::transaction::MongoTransactionOutcome::Unknown => crate::model::mongodb_console::MongoConsoleTransactionState::OutcomeUnknown };
+                    if tab.set_transaction_result(generation, state) {
+                        let mut commands = vec![
+                            Command::UnregisterMongoTransactionWorker { tab_id, generation },
+                            self.persist_workspace_command(),
+                        ];
+                        if self.resolving_deferred.is_some_and(|prompt| {
+                            prompt.target == DeferredTransactionTarget::MongoConsole(tab_id)
+                        }) {
+                            commands.extend(self.finish_deferred(tab_id));
+                        }
+                        return commands;
+                    }
+                }
+                Vec::new()
+            }
+            Action::MongoTransactionFailed {
+                tab_id,
+                generation,
+                message,
+            } => {
+                if let Some(WorkspaceTab::MongoConsole(tab)) =
+                    self.tabs.iter_mut().find(|tab| tab.id() == tab_id)
+                {
+                    if tab.transaction_generation == generation {
+                        tab.transaction = crate::model::mongodb_console::MongoConsoleTransactionState::OutcomeUnknown;
+                        self.notify_error("Mongo transaction", message);
+                        let mut commands = vec![
+                            Command::UnregisterMongoTransactionWorker { tab_id, generation },
+                            self.persist_workspace_command(),
+                        ];
+                        if self.resolving_deferred.is_some_and(|prompt| {
+                            prompt.target == DeferredTransactionTarget::MongoConsole(tab_id)
+                        }) {
+                            commands.extend(self.finish_deferred(tab_id));
+                        }
+                        return commands;
+                    }
+                }
+                Vec::new()
+            }
+            Action::MongoConsoleCompleted {
+                tab_id,
+                generation,
+                result,
+            } => {
+                if let Some(WorkspaceTab::MongoConsole(tab)) =
+                    self.tabs.iter_mut().find(|tab| tab.id() == tab_id)
+                {
+                    tab.complete(generation, result);
+                    return vec![self.persist_workspace_command()];
+                }
+                Vec::new()
+            }
+            Action::MongoConsoleFailed {
+                tab_id,
+                generation,
+                message,
+            } => {
+                if let Some(WorkspaceTab::MongoConsole(tab)) =
+                    self.tabs.iter_mut().find(|tab| tab.id() == tab_id)
+                {
+                    tab.fail(generation, message);
+                    return vec![self.persist_workspace_command()];
+                }
+                Vec::new()
+            }
+            Action::MongoQueryField(field) => {
+                if let Some(WorkspaceTab::MongoBrowser(tab)) = self.tabs.get_mut(self.active_tab) {
+                    tab.begin_query_edit(field);
+                }
+                Vec::new()
+            }
+            Action::MongoQueryEdit(edit) => {
+                if let Some(WorkspaceTab::MongoBrowser(tab)) = self.tabs.get_mut(self.active_tab)
+                    && tab.query_field.is_some()
+                {
+                    let mut input = crate::model::text_input::TextInput::default();
+                    input.set(tab.query_text.clone());
+                    input.apply(edit);
+                    tab.query_text = input.value().to_owned();
+                }
+                Vec::new()
+            }
+            Action::MongoQueryPaste(text) => {
+                if let Some(WorkspaceTab::MongoBrowser(tab)) = self.tabs.get_mut(self.active_tab)
+                    && tab.query_field.is_some()
+                {
+                    tab.query_text.push_str(&text);
+                }
+                Vec::new()
+            }
+            Action::MongoQuerySubmit => {
+                let Some(WorkspaceTab::MongoBrowser(tab)) = self.tabs.get_mut(self.active_tab)
+                else {
+                    return Vec::new();
+                };
+                if let Err(error) = tab.submit_query_edit() {
+                    tab.query_error = Some(error);
+                    return Vec::new();
+                }
+                tab.query_error = None;
+                self.load_mongodb_page(self.active_tab)
+            }
+            Action::MongoQueryCancel => {
+                if let Some(WorkspaceTab::MongoBrowser(tab)) = self.tabs.get_mut(self.active_tab) {
+                    tab.query_field = None;
+                    tab.query_error = None;
+                }
+                Vec::new()
+            }
+            Action::MongoCopyDocument | Action::MongoExportEjson => {
+                let Some(WorkspaceTab::MongoBrowser(tab)) = self.tabs.get(self.active_tab) else {
+                    return Vec::new();
+                };
+                let (ejson, description) = if matches!(action, Action::MongoExportEjson) {
+                    match tab.loaded_page_ejson() {
+                        Ok((ejson, count, partial)) => (
+                            ejson,
+                            format!(
+                                "MongoDB EJSON export · {count} loaded document(s){}",
+                                if partial {
+                                    " · partial page, not a collection backup"
+                                } else {
+                                    " · current page only"
+                                }
+                            ),
+                        ),
+                        Err(error) => {
+                            if let Some(WorkspaceTab::MongoBrowser(tab)) =
+                                self.tabs.get_mut(self.active_tab)
+                            {
+                                tab.mutation_message = Some(error);
+                            }
+                            return Vec::new();
+                        }
+                    }
+                } else {
+                    let Some((ejson, _raw_only)) = tab.selected_document_inspector() else {
+                        return Vec::new();
+                    };
+                    (ejson, "MongoDB Canonical EJSON document".to_owned())
+                };
+                vec![Command::WriteClipboard(ClipboardPayload {
+                    text: ejson,
+                    description,
+                    sensitive: false,
+                })]
+            }
+            Action::MongoImportDraft(input) => {
+                if let Some(WorkspaceTab::MongoBrowser(tab)) = self.tabs.get_mut(self.active_tab) {
+                    if let Err(error) = tab.set_import_draft(&input) {
+                        tab.edit_error = Some(error);
+                    } else {
+                        tab.edit_error = None;
+                    }
+                }
+                Vec::new()
+            }
+            Action::MongoImportAccept => {
+                let Some(WorkspaceTab::MongoBrowser(tab)) = self.tabs.get_mut(self.active_tab)
+                else {
+                    return Vec::new();
+                };
+                let Some(draft) = tab.import_draft.as_mut() else {
+                    return Vec::new();
+                };
+                draft.accepted = true;
+                let documents = draft
+                    .documents
+                    .iter()
+                    .map(|text| {
+                        let value: serde_json::Value =
+                            serde_json::from_str(text).map_err(|error| error.to_string())?;
+                        let bson = mongodb::bson::Bson::try_from(value)
+                            .map_err(|error| error.to_string())?;
+                        match bson {
+                            mongodb::bson::Bson::Document(document) => Ok(document),
+                            _ => Err("import entry must be a document".to_owned()),
+                        }
+                    })
+                    .collect::<Result<Vec<_>, _>>();
+                let Ok(documents) = documents else {
+                    tab.edit_error = Some("Import draft contains invalid Canonical EJSON".into());
+                    return Vec::new();
+                };
+                let Some(generation) = self
+                    .sessions
+                    .identities_for_profile(tab.profile_id)
+                    .first()
+                    .map(|identity| identity.generation)
+                else {
+                    tab.edit_error = Some("MongoDB connection is not active".into());
+                    return Vec::new();
+                };
+                let mutation_generation = tab.begin_mutation();
+                vec![Command::InsertMongoDocuments {
+                    tab_id: tab.id,
+                    profile_id: tab.profile_id,
+                    generation,
+                    mutation_generation,
+                    namespace: tab.namespace.clone(),
+                    documents,
+                }]
+            }
+            Action::MongoDeleteSelected => {
+                let Some(WorkspaceTab::MongoBrowser(tab)) = self.tabs.get(self.active_tab) else {
+                    return Vec::new();
+                };
+                let crate::model::mongodb_browser::MongoPageState::Ready(page) = &tab.page else {
+                    return Vec::new();
+                };
+                let Some(document) = page
+                    .documents
+                    .get(tab.selected_document)
+                    .filter(|doc| doc.editable)
+                else {
+                    return Vec::new();
+                };
+                let Some(id) = document.bson.get("_id").cloned() else {
+                    return Vec::new();
+                };
+                let Some(generation) = self
+                    .sessions
+                    .identities_for_profile(tab.profile_id)
+                    .first()
+                    .map(|identity| identity.generation)
+                else {
+                    return Vec::new();
+                };
+                let tab_id = tab.id;
+                let profile_id = tab.profile_id;
+                let namespace = tab.namespace.clone();
+                let expected = document.bson.clone();
+                let mutation_generation = tab.mutation_generation.wrapping_add(1);
+                if let Some(WorkspaceTab::MongoBrowser(tab)) = self.tabs.get_mut(self.active_tab) {
+                    tab.begin_mutation();
+                }
+                vec![Command::DeleteMongoDocument {
+                    tab_id,
+                    profile_id,
+                    generation,
+                    mutation_generation,
+                    namespace,
+                    id,
+                    expected,
+                }]
+            }
+            Action::MongoMutationFinished {
+                tab_id,
+                generation,
+                operation,
+                affected,
+            } => {
+                let index = self.tabs.iter().position(|item| item.id() == tab_id);
+                let profile_id =
+                    self.tabs
+                        .iter()
+                        .find(|item| item.id() == tab_id)
+                        .and_then(|item| match item {
+                            WorkspaceTab::MongoBrowser(tab) => Some(tab.profile_id),
+                            _ => None,
+                        });
+                if profile_id.is_none_or(|profile_id| {
+                    !self
+                        .sessions
+                        .identities_for_profile(profile_id)
+                        .iter()
+                        .any(|identity| identity.generation == generation)
+                }) {
+                    return Vec::new();
+                }
+                if let Some(WorkspaceTab::MongoBrowser(tab)) =
+                    self.tabs.iter_mut().find(|tab| tab.id() == tab_id)
+                {
+                    if tab
+                        .connection_generation
+                        .is_some_and(|current| current != generation)
+                    {
+                        return Vec::new();
+                    }
+                    tab.import_draft = None;
+                    tab.mutation_message = Some(format!("{operation:?}: {affected} document(s)"));
+                    tab.spec.skip = 0;
+                    let index = index.unwrap_or(self.active_tab);
+                    return self.load_mongodb_page(index);
+                }
+                Vec::new()
+            }
+            Action::MongoMutationOutcome {
+                tab_id,
+                generation,
+                mutation_generation,
+                operation: _,
+                outcome,
+            } => {
+                let Some(index) = self.tabs.iter().position(|item| item.id() == tab_id) else {
+                    return Vec::new();
+                };
+                let valid = match &self.tabs[index] {
+                    WorkspaceTab::MongoBrowser(tab) => {
+                        tab.mutation_generation == mutation_generation
+                            && tab
+                                .connection_generation
+                                .is_none_or(|current| current == generation)
+                    }
+                    _ => false,
+                };
+                if !valid {
+                    return Vec::new();
+                }
+                let should_refresh = outcome.is_fully_confirmed();
+                if let Some(WorkspaceTab::MongoBrowser(tab)) = self.tabs.get_mut(index) {
+                    tab.editing = false;
+                    tab.import_draft = None;
+                    tab.accept_mutation_outcome(mutation_generation, &outcome);
+                    if should_refresh {
+                        tab.spec.skip = 0;
+                    }
+                }
+                if should_refresh {
+                    self.load_mongodb_page(index)
+                } else {
+                    Vec::new()
+                }
+            }
+            Action::MongoMutationConflict {
+                tab_id,
+                generation,
+                message,
+            } => {
+                if let Some(WorkspaceTab::MongoBrowser(tab)) =
+                    self.tabs.iter_mut().find(|tab| tab.id() == tab_id)
+                    && tab
+                        .connection_generation
+                        .is_none_or(|current| current == generation)
+                {
+                    tab.mutation_message = Some(format!("Conflict: {message}"));
+                    tab.edit_error = Some(message);
+                }
+                Vec::new()
+            }
+            Action::MongoMutationFailed {
+                tab_id,
+                generation,
+                mutation_generation,
+                message,
+            } => {
+                if let Some(WorkspaceTab::MongoBrowser(tab)) =
+                    self.tabs.iter_mut().find(|tab| tab.id() == tab_id)
+                    && tab
+                        .connection_generation
+                        .is_none_or(|current| current == generation)
+                    && mutation_generation.is_none_or(|current| current == tab.mutation_generation)
+                {
+                    tab.mutation_message = Some(format!("Mutation failed: {message}"));
+                    tab.edit_error = Some(message);
+                }
+                Vec::new()
+            }
+            Action::MongoDocumentPrevious => {
+                if let Some(WorkspaceTab::MongoBrowser(tab)) = self.tabs.get_mut(self.active_tab) {
+                    tab.selected_document = tab.selected_document.saturating_sub(1);
+                }
+                Vec::new()
+            }
+            Action::MongoDocumentNext => {
+                if let Some(WorkspaceTab::MongoBrowser(tab)) = self.tabs.get_mut(self.active_tab)
+                    && let crate::model::mongodb_browser::MongoPageState::Ready(page) = &tab.page
+                {
+                    tab.selected_document =
+                        (tab.selected_document + 1).min(page.documents.len().saturating_sub(1));
+                }
+                Vec::new()
+            }
+            Action::MongoDocumentEdit => {
+                if let Some(WorkspaceTab::MongoBrowser(tab)) = self.tabs.get_mut(self.active_tab) {
+                    tab.begin_edit();
+                }
+                Vec::new()
+            }
+            Action::MongoDocumentCancelEdit => {
+                if let Some(WorkspaceTab::MongoBrowser(tab)) = self.tabs.get_mut(self.active_tab) {
+                    tab.cancel_edit();
+                }
+                Vec::new()
+            }
+            Action::MongoDocumentEditText(edit) => {
+                if let Some(WorkspaceTab::MongoBrowser(tab)) = self.tabs.get_mut(self.active_tab)
+                    && tab.editing
+                {
+                    use crate::model::text_input::TextInputEdit;
+                    match edit {
+                        TextInputEdit::Insert(ch) => tab.edit_text.push(ch),
+                        TextInputEdit::Backspace => {
+                            tab.edit_text.pop();
+                        }
+                        _ => {}
+                    }
+                }
+                Vec::new()
+            }
+            Action::MongoDocumentEditPaste(text) => {
+                if let Some(WorkspaceTab::MongoBrowser(tab)) = self.tabs.get_mut(self.active_tab)
+                    && tab.editing
+                {
+                    tab.edit_text.push_str(&text);
+                }
+                Vec::new()
+            }
+            Action::MongoDocumentSave => {
+                let Some(WorkspaceTab::MongoBrowser(tab)) = self.tabs.get_mut(self.active_tab)
+                else {
+                    return Vec::new();
+                };
+                let replacement = match tab.edited_document_preserves_id() {
+                    Ok(replacement) => replacement,
+                    Err(error) => {
+                        tab.edit_error = Some(error);
+                        return Vec::new();
+                    }
+                };
+                let crate::model::mongodb_browser::MongoPageState::Ready(page) = &tab.page else {
+                    return Vec::new();
+                };
+                let Some(expected) = page
+                    .documents
+                    .get(tab.selected_document)
+                    .map(|document| document.bson.clone())
+                else {
+                    return Vec::new();
+                };
+                let Some(id) = replacement.get("_id").cloned() else {
+                    tab.edit_error =
+                        Some("Document must contain _id for a safe replacement".to_owned());
+                    return Vec::new();
+                };
+                let Some(connection_generation) = self
+                    .sessions
+                    .identities_for_profile(tab.profile_id)
+                    .first()
+                    .map(|identity| identity.generation)
+                else {
+                    tab.edit_error = Some("MongoDB connection is not active".to_owned());
+                    return Vec::new();
+                };
+                let tab_id = tab.id;
+                let profile_id = tab.profile_id;
+                let namespace = tab.namespace.clone();
+                let mutation_generation = tab.mutation_generation.wrapping_add(1);
+                tab.begin_mutation();
+                vec![Command::ReplaceMongoDocument {
+                    tab_id,
+                    profile_id,
+                    connection_generation,
+                    mutation_generation,
+                    namespace,
+                    id,
+                    expected,
+                    replacement,
+                }]
+            }
+            Action::MongoDocumentReplaceOutcome {
+                tab_id,
+                profile_id,
+                connection_generation,
+                mutation_generation,
+                outcome,
+            } => {
+                let Some(index) = self.tabs.iter().position(|item| item.id() == tab_id) else {
+                    return Vec::new();
+                };
+                let current_connection = self
+                    .sessions
+                    .identities_for_profile(profile_id)
+                    .iter()
+                    .any(|identity| identity.generation == connection_generation);
+                let valid = current_connection
+                    && matches!(&self.tabs[index], WorkspaceTab::MongoBrowser(tab) if tab.mutation_generation == mutation_generation && tab.profile_id == profile_id);
+                if !valid {
+                    return Vec::new();
+                }
+                if matches!(
+                    outcome,
+                    crate::db::mongodb::mutation::MongoMutationOutcome::Confirmed { affected: 0 }
+                ) {
+                    if let Some(WorkspaceTab::MongoBrowser(tab)) = self.tabs.get_mut(index) {
+                        tab.mutation_message = Some("Conflict: the document changed or no longer matches the loaded version".into());
+                        tab.edit_error = Some("document changed since it was loaded".into());
+                    }
+                    return Vec::new();
+                }
+                if let Some(WorkspaceTab::MongoBrowser(tab)) = self.tabs.get_mut(index) {
+                    tab.editing = false;
+                    tab.edit_error = None;
+                    tab.accept_mutation_outcome(mutation_generation, &outcome);
+                }
+                if outcome.is_fully_confirmed() {
+                    self.load_mongodb_page(index)
+                } else {
+                    Vec::new()
+                }
+            }
+            Action::MongoDocumentReplaceFailed {
+                tab_id,
+                generation,
+                mutation_generation,
+                message,
+            } => {
+                if let Some(WorkspaceTab::MongoBrowser(tab)) =
+                    self.tabs.iter_mut().find(|tab| tab.id() == tab_id)
+                    && tab
+                        .connection_generation
+                        .is_none_or(|current| current == generation)
+                    && tab.mutation_generation == mutation_generation
+                {
+                    tab.edit_error = Some(message);
+                }
+                Vec::new()
+            }
             Action::RedisDatabasesFailed {
                 profile_id,
                 generation,
@@ -15668,6 +17313,281 @@ impl App {
                 profile_id,
                 database,
             } => self.open_redis_browser(profile_id, database),
+            Action::OpenMongoNode(node) => {
+                let Some(profile_id) = self
+                    .explorer
+                    .selected_id()
+                    .and_then(|node| node.profile_id())
+                else {
+                    return Vec::new();
+                };
+                match node {
+                    crate::db::mongodb::types::MongoExplorerNodeId::Collection(namespace) => {
+                        self.open_mongodb_browser(profile_id, namespace)
+                    }
+                    crate::db::mongodb::types::MongoExplorerNodeId::Monitor(database) => {
+                        let mut tab =
+                            crate::model::dashboard::MongoDashboardTab::new(profile_id, database);
+                        tab.generation = 1;
+                        tab.connection_generation = self
+                            .sessions
+                            .iter()
+                            .find(|session| {
+                                session.identity.profile_id == profile_id
+                                    && session.target.database == tab.database
+                            })
+                            .map(|session| session.identity.generation);
+                        let command = Command::RefreshMongoMonitor {
+                            profile_id,
+                            database: tab.database.clone(),
+                            connection_generation: self
+                                .sessions
+                                .identities_for_profile(profile_id)
+                                .first()
+                                .map_or(0, |identity| identity.generation),
+                            generation: tab.generation,
+                        };
+                        self.tabs.push(WorkspaceTab::MongoDashboard(Box::new(tab)));
+                        self.active_tab = self.tabs.len() - 1;
+                        self.focus = Focus::Results;
+                        vec![command]
+                    }
+                    crate::db::mongodb::types::MongoExplorerNodeId::Users(database) => {
+                        let mut tab =
+                            crate::model::dashboard::MongoDashboardTab::new(profile_id, database);
+                        tab.generation = 1;
+                        tab.connection_generation = self
+                            .sessions
+                            .iter()
+                            .find(|session| {
+                                session.identity.profile_id == profile_id
+                                    && session.target.database == tab.database
+                            })
+                            .map(|session| session.identity.generation);
+                        let command = Command::LoadMongoPrincipals {
+                            profile_id,
+                            database: tab.database.clone(),
+                            connection_generation: self
+                                .sessions
+                                .identities_for_profile(profile_id)
+                                .first()
+                                .map_or(0, |identity| identity.generation),
+                            generation: tab.generation,
+                        };
+                        self.tabs.push(WorkspaceTab::MongoDashboard(Box::new(tab)));
+                        self.active_tab = self.tabs.len() - 1;
+                        self.focus = Focus::Results;
+                        vec![command]
+                    }
+                    crate::db::mongodb::types::MongoExplorerNodeId::RetryCollections(database) => {
+                        let generation = self
+                            .sessions
+                            .identities_for_profile(profile_id)
+                            .first()
+                            .map(|identity| identity.generation);
+                        generation
+                            .map(|generation| {
+                                vec![Command::DiscoverMongoCollections {
+                                    profile_id,
+                                    generation,
+                                    database,
+                                }]
+                            })
+                            .unwrap_or_default()
+                    }
+                    crate::db::mongodb::types::MongoExplorerNodeId::RetryIndexes(namespace) => {
+                        let generation = self
+                            .sessions
+                            .identities_for_profile(profile_id)
+                            .first()
+                            .map(|identity| identity.generation);
+                        generation
+                            .map(|generation| {
+                                vec![Command::DiscoverMongoIndexes {
+                                    profile_id,
+                                    generation,
+                                    namespace,
+                                }]
+                            })
+                            .unwrap_or_default()
+                    }
+                    crate::db::mongodb::types::MongoExplorerNodeId::Database(_)
+                    | crate::db::mongodb::types::MongoExplorerNodeId::Index { .. } => Vec::new(),
+                }
+            }
+            Action::MongoManagementOpen(operation) => {
+                let Some(profile_id) = self
+                    .explorer
+                    .selected_id()
+                    .and_then(|node| node.profile_id())
+                else {
+                    return Vec::new();
+                };
+                if !matches!(
+                    self.explorer.selected_id(),
+                    Some(crate::model::explorer::ExplorerNodeId::Mongo { .. })
+                ) {
+                    return Vec::new();
+                }
+                let Some(generation) = self
+                    .sessions
+                    .identities_for_profile(profile_id)
+                    .first()
+                    .map(|identity| identity.generation)
+                else {
+                    return Vec::new();
+                };
+                if self
+                    .profiles
+                    .iter()
+                    .any(|profile| profile.id == profile_id && profile.read_only)
+                {
+                    self.notify_warning("MongoDB management", "The profile is read-only");
+                    return Vec::new();
+                }
+                let draft = crate::model::mongodb_management::MongoManagementDraft::new(
+                    profile_id, generation, operation,
+                );
+                let editor_id = mongo_management_editor_id(&draft);
+                self.editor.open_console(editor_id, &draft.json);
+                self.overlay = Some(Overlay::MongoManagement(Box::new(draft)));
+                Vec::new()
+            }
+            Action::MongoManagementEdit(text) => {
+                if let Some(Overlay::MongoManagement(draft)) = self.overlay.as_mut() {
+                    draft.json = text.clone();
+                    draft.input.set(text.clone());
+                    draft.error = None;
+                    let _ = self
+                        .editor
+                        .set_text(mongo_management_editor_id(draft), &text);
+                }
+                Vec::new()
+            }
+            Action::MongoManagementEditText(edit) => {
+                if let Some(Overlay::MongoManagement(draft)) = self.overlay.as_mut() {
+                    draft.input.apply(edit);
+                    draft.json = draft.input.value().to_owned();
+                    draft.error = None;
+                    let _ = self
+                        .editor
+                        .set_text(mongo_management_editor_id(draft), &draft.json);
+                }
+                Vec::new()
+            }
+            Action::MongoManagementPaste(text) => {
+                if let Some(Overlay::MongoManagement(draft)) = self.overlay.as_mut() {
+                    draft.input.paste(text);
+                    draft.json = draft.input.value().to_owned();
+                    let _ = self
+                        .editor
+                        .set_text(mongo_management_editor_id(draft), &draft.json);
+                }
+                Vec::new()
+            }
+            Action::MongoManagementChar(ch) => {
+                if let Some(Overlay::MongoManagement(draft)) = self.overlay.as_mut() {
+                    draft.confirmation_input.push(ch);
+                }
+                Vec::new()
+            }
+            Action::MongoManagementBackspace => {
+                if let Some(Overlay::MongoManagement(draft)) = self.overlay.as_mut() {
+                    draft.confirmation_input.pop();
+                }
+                Vec::new()
+            }
+            Action::MongoManagementCancel => {
+                if let Some(Overlay::MongoManagement(draft)) = self.overlay.as_ref() {
+                    self.editor.close_console(mongo_management_editor_id(draft));
+                }
+                self.overlay = None;
+                Vec::new()
+            }
+            Action::MongoManagementConfirm => {
+                let Some(Overlay::MongoManagement(draft)) = self.overlay.as_mut() else {
+                    return Vec::new();
+                };
+                if draft.confirmation_text.is_none() {
+                    if let Ok(text) = self.editor.text(mongo_management_editor_id(draft)) {
+                        draft.json = text;
+                        draft.input.set(draft.json.clone());
+                    }
+                }
+                if draft.confirmation_text.is_some() && !draft.confirmation_valid() {
+                    draft.error = Some("Type the requested object name exactly to confirm".into());
+                    return Vec::new();
+                }
+                let parsed = match draft.validate() {
+                    Ok(document) => document,
+                    Err(error) => {
+                        draft.error = Some(error);
+                        return Vec::new();
+                    }
+                };
+                let profile_id = draft.profile_id;
+                let generation = draft.generation;
+                let operation = draft.operation.clone();
+                if !self
+                    .sessions
+                    .identities_for_profile(profile_id)
+                    .iter()
+                    .any(|identity| identity.generation == generation)
+                {
+                    draft.error = Some("MongoDB connection changed; reopen this draft".into());
+                    return Vec::new();
+                }
+                self.overlay = None;
+                vec![Command::RunMongoManagement {
+                    profile_id,
+                    generation,
+                    operation,
+                    draft: parsed,
+                }]
+            }
+            Action::MongoManagementCompleted {
+                profile_id,
+                generation,
+                namespace,
+                message,
+            } => {
+                if self
+                    .sessions
+                    .identities_for_profile(profile_id)
+                    .iter()
+                    .any(|identity| identity.generation == generation)
+                {
+                    self.notify_success("MongoDB management", message);
+                    return vec![
+                        Command::DiscoverMongoCollections {
+                            profile_id,
+                            generation,
+                            database: namespace.database.clone(),
+                        },
+                        Command::DiscoverMongoIndexes {
+                            profile_id,
+                            generation,
+                            namespace,
+                        },
+                    ];
+                }
+                Vec::new()
+            }
+            Action::MongoManagementFailed {
+                profile_id,
+                generation,
+                message,
+            } => {
+                if self
+                    .sessions
+                    .identities_for_profile(profile_id)
+                    .iter()
+                    .any(|identity| identity.generation == generation)
+                {
+                    self.notify_error("MongoDB management", message);
+                }
+                Vec::new()
+            }
             Action::SelectRedisNode { tab_id, node } => {
                 self.select_redis_key(tab_id, node);
                 Vec::new()
@@ -16282,6 +18202,16 @@ impl App {
                         {
                             Some(DeferredTransactionTarget::Console(console.id))
                         }
+                        WorkspaceTab::MongoConsole(console)
+                            if matches!(console.transaction,
+                                crate::model::mongodb_console::MongoConsoleTransactionState::Starting
+                                    | crate::model::mongodb_console::MongoConsoleTransactionState::Active
+                                    | crate::model::mongodb_console::MongoConsoleTransactionState::Committing
+                                    | crate::model::mongodb_console::MongoConsoleTransactionState::Aborting
+                                    | crate::model::mongodb_console::MongoConsoleTransactionState::OutcomeUnknown) =>
+                        {
+                            Some(DeferredTransactionTarget::MongoConsole(console.id))
+                        }
                         _ => None,
                     }
                 }) {
@@ -16295,6 +18225,9 @@ impl App {
                         }
                         DeferredTransactionTarget::Console(console_id) => {
                             self.defer_intent(DeferredIntent::Quit, [console_id]);
+                        }
+                        DeferredTransactionTarget::MongoConsole(console_id) => {
+                            self.defer_mongo_transaction(DeferredIntent::Quit, console_id);
                         }
                     }
                     return Vec::new();
@@ -16530,6 +18463,7 @@ impl App {
                     crate::db::mssql::MsSqlAdapter::catalog_mutation_capabilities()
                 }
                 DatabaseKind::Redis => Default::default(),
+                DatabaseKind::MongoDb => Default::default(),
             };
             let namespace_model = match profile.kind {
                 DatabaseKind::MySql | DatabaseKind::MariaDb => {
@@ -16638,6 +18572,17 @@ impl App {
             .find(|tab| tab.id() == console_id)
             .and_then(WorkspaceTab::as_console)
             .is_some_and(|tab| tab.transaction_state != TransactionState::Idle)
+    }
+
+    fn mongo_transaction_needs_exit(tab: &crate::model::mongodb_console::MongoConsoleTab) -> bool {
+        matches!(
+            tab.transaction,
+            crate::model::mongodb_console::MongoConsoleTransactionState::Starting
+                | crate::model::mongodb_console::MongoConsoleTransactionState::Active
+                | crate::model::mongodb_console::MongoConsoleTransactionState::Committing
+                | crate::model::mongodb_console::MongoConsoleTransactionState::Aborting
+                | crate::model::mongodb_console::MongoConsoleTransactionState::OutcomeUnknown
+        )
     }
 
     fn profile_exit_check(&self, profile_id: Uuid) -> WorkspaceExitCheck {
@@ -16794,7 +18739,10 @@ impl App {
         let ids = self
             .tabs
             .iter()
-            .filter(|tab| self.transaction_needs_exit(tab.id()))
+            .filter(|tab| {
+                self.transaction_needs_exit(tab.id())
+                    || matches!(tab, WorkspaceTab::MongoConsole(console) if Self::mongo_transaction_needs_exit(console))
+            })
             .map(WorkspaceTab::id)
             .collect::<Vec<_>>();
         if ids.is_empty() {
@@ -16824,6 +18772,38 @@ impl App {
             });
         }
         self.show_next_deferred();
+        Vec::new()
+    }
+
+    fn defer_mongo_transaction(
+        &mut self,
+        intent: DeferredIntent,
+        console_id: Uuid,
+    ) -> Vec<Command> {
+        let Some(WorkspaceTab::MongoConsole(tab)) =
+            self.tabs.iter().find(|tab| tab.id() == console_id)
+        else {
+            return Vec::new();
+        };
+        let prompt = DeferredTransactionPrompt {
+            target: DeferredTransactionTarget::MongoConsole(console_id),
+            transaction_generation: tab.transaction_generation,
+            intent,
+        };
+        if self.overlay.is_some() || self.resolving_deferred.is_some() {
+            self.deferred.push(prompt);
+        } else {
+            self.overlay = Some(Overlay::TransactionExitConfirm {
+                prompt,
+                choice: if tab.transaction
+                    == crate::model::mongodb_console::MongoConsoleTransactionState::OutcomeUnknown
+                {
+                    TransactionExitChoice::Abandon
+                } else {
+                    TransactionExitChoice::Commit
+                },
+            });
+        }
         Vec::new()
     }
 
@@ -17073,6 +19053,15 @@ impl App {
                 .map_or(TransactionExitChoice::Rollback, |_| {
                     TransactionExitChoice::Abandon
                 }),
+                DeferredTransactionTarget::MongoConsole(console_id) => {
+                    if self.tabs.iter().find(|tab| tab.id() == console_id).is_some_and(
+                        |tab| matches!(tab, WorkspaceTab::MongoConsole(tab) if tab.transaction == crate::model::mongodb_console::MongoConsoleTransactionState::OutcomeUnknown),
+                    ) {
+                        TransactionExitChoice::Abandon
+                    } else {
+                        TransactionExitChoice::Commit
+                    }
+                }
             DeferredTransactionTarget::Relation(_) => TransactionExitChoice::Cancel,
         };
         self.overlay = Some(Overlay::TransactionExitConfirm { prompt, choice });
@@ -17082,6 +19071,9 @@ impl App {
         let Some(Overlay::TransactionExitConfirm { prompt, .. }) = self.overlay.take() else {
             return Vec::new();
         };
+        if let DeferredTransactionTarget::MongoConsole(console_id) = prompt.target {
+            return self.resolve_mongo_transaction_exit(prompt, console_id, choice);
+        }
         let DeferredTransactionTarget::Console(console_id) = prompt.target else {
             self.overlay = Some(Overlay::TransactionExitConfirm { prompt, choice });
             return Vec::new();
@@ -17213,11 +19205,143 @@ impl App {
         }
     }
 
+    fn resolve_mongo_transaction_exit(
+        &mut self,
+        prompt: DeferredTransactionPrompt,
+        console_id: Uuid,
+        choice: TransactionExitChoice,
+    ) -> Vec<Command> {
+        let Some(WorkspaceTab::MongoConsole(tab)) =
+            self.tabs.iter().find(|tab| tab.id() == console_id)
+        else {
+            self.show_next_deferred();
+            return self.replay_deferred(prompt.intent);
+        };
+        if tab.transaction_generation != prompt.transaction_generation {
+            self.notify_info(
+                "Mongo transaction",
+                "Stale transaction exit prompt discarded",
+            );
+            self.show_next_deferred();
+            return Vec::new();
+        }
+        if choice == TransactionExitChoice::Cancel {
+            self.overlay = None;
+            return Vec::new();
+        }
+        let choice = if choice == TransactionExitChoice::Commit {
+            TransactionExitChoice::Rollback
+        } else {
+            choice
+        };
+        if choice == TransactionExitChoice::Commit {
+            let state = tab.transaction;
+            if matches!(
+                state,
+                crate::model::mongodb_console::MongoConsoleTransactionState::Active
+                    | crate::model::mongodb_console::MongoConsoleTransactionState::Aborted
+            ) {
+                let generation = prompt.transaction_generation;
+                if let Some(WorkspaceTab::MongoConsole(tab)) =
+                    self.tabs.iter_mut().find(|tab| tab.id() == console_id)
+                {
+                    tab.transaction =
+                        crate::model::mongodb_console::MongoConsoleTransactionState::Aborting;
+                }
+                self.resolving_deferred = Some(prompt);
+                return vec![Command::MongoTransactionAbort {
+                    tab_id: console_id,
+                    generation,
+                }];
+            }
+        }
+        if choice == TransactionExitChoice::Abandon
+            && tab.transaction
+                != crate::model::mongodb_console::MongoConsoleTransactionState::OutcomeUnknown
+        {
+            self.overlay = Some(Overlay::TransactionExitConfirm {
+                prompt,
+                choice: TransactionExitChoice::Rollback,
+            });
+            return Vec::new();
+        }
+        let state = tab.transaction;
+        if state == crate::model::mongodb_console::MongoConsoleTransactionState::OutcomeUnknown {
+            if choice != TransactionExitChoice::Abandon {
+                self.overlay = Some(Overlay::TransactionExitConfirm {
+                    prompt,
+                    choice: TransactionExitChoice::Abandon,
+                });
+                return Vec::new();
+            }
+            if let Some(WorkspaceTab::MongoConsole(tab)) =
+                self.tabs.iter_mut().find(|tab| tab.id() == console_id)
+            {
+                tab.transaction = crate::model::mongodb_console::MongoConsoleTransactionState::Idle;
+                tab.transaction_generation = tab.transaction_generation.saturating_add(1);
+            }
+            return self.replay_deferred(prompt.intent);
+        }
+        if matches!(
+            state,
+            crate::model::mongodb_console::MongoConsoleTransactionState::Starting
+                | crate::model::mongodb_console::MongoConsoleTransactionState::Committing
+                | crate::model::mongodb_console::MongoConsoleTransactionState::Aborting
+        ) {
+            self.overlay = Some(Overlay::TransactionExitConfirm {
+                prompt,
+                choice: TransactionExitChoice::Rollback,
+            });
+            self.notify_warning(
+                "Mongo transaction",
+                "Wait for the in-flight transaction action to finish",
+            );
+            return Vec::new();
+        }
+        if !matches!(
+            choice,
+            TransactionExitChoice::Commit | TransactionExitChoice::Rollback
+        ) {
+            self.overlay = Some(Overlay::TransactionExitConfirm {
+                prompt,
+                choice: TransactionExitChoice::Rollback,
+            });
+            return Vec::new();
+        }
+        let generation = prompt.transaction_generation;
+        let commit = choice == TransactionExitChoice::Commit
+            && state != crate::model::mongodb_console::MongoConsoleTransactionState::Aborted;
+        let Some(WorkspaceTab::MongoConsole(tab)) =
+            self.tabs.iter_mut().find(|tab| tab.id() == console_id)
+        else {
+            return Vec::new();
+        };
+        tab.transaction = if commit {
+            crate::model::mongodb_console::MongoConsoleTransactionState::Committing
+        } else {
+            crate::model::mongodb_console::MongoConsoleTransactionState::Aborting
+        };
+        self.resolving_deferred = Some(prompt);
+        if commit {
+            vec![Command::MongoTransactionCommit {
+                tab_id: console_id,
+                generation,
+            }]
+        } else {
+            vec![Command::MongoTransactionAbort {
+                tab_id: console_id,
+                generation,
+            }]
+        }
+    }
+
     fn finish_deferred(&mut self, console_id: Uuid) -> Vec<Command> {
         let Some(prompt) = self.resolving_deferred else {
             return Vec::new();
         };
-        if prompt.target != DeferredTransactionTarget::Console(console_id) {
+        if prompt.target != DeferredTransactionTarget::Console(console_id)
+            && prompt.target != DeferredTransactionTarget::MongoConsole(console_id)
+        {
             return Vec::new();
         }
         let prompt = self.resolving_deferred.take().expect("checked above");
@@ -17285,6 +19409,7 @@ impl App {
     fn continue_deferred(&mut self, intent: DeferredIntent) -> Vec<Command> {
         match intent {
             DeferredIntent::Quit => self.update(Action::Quit),
+            DeferredIntent::ActivateTab(index) => self.update(Action::ActivateTab(index)),
             DeferredIntent::Stay => Vec::new(),
             _ => self.replay_deferred(intent),
         }
@@ -17328,7 +19453,7 @@ impl App {
                 };
                 self.close_console(id)
             }
-            DeferredIntent::CloseTab(id) => self.close_console(id),
+            DeferredIntent::CloseTab(id) => self.close_tab(id),
             DeferredIntent::CloseOtherTabs(active_id) => {
                 let ids = self
                     .tabs
@@ -17369,6 +19494,7 @@ impl App {
             DeferredIntent::SetMode(TransactionMode::Manual) => {
                 self.set_transaction_mode(TransactionMode::Manual)
             }
+            DeferredIntent::ActivateTab(index) => self.update(Action::ActivateTab(index)),
         }
     }
 
@@ -17382,6 +19508,10 @@ impl App {
         }
         if self.transaction_needs_exit(id) {
             return self.defer_intent(DeferredIntent::CloseTab(id), [id]);
+        }
+        if matches!(self.tabs.iter().find(|tab| tab.id() == id), Some(WorkspaceTab::MongoConsole(tab)) if Self::mongo_transaction_needs_exit(tab))
+        {
+            return self.defer_mongo_transaction(DeferredIntent::CloseTab(id), id);
         }
         if let Some(WorkspaceTab::RedisBrowser(tab)) = self.tabs.iter().find(|tab| tab.id() == id)
             && tab.opened_key.is_some()
@@ -17407,7 +19537,26 @@ impl App {
             return Vec::new();
         };
         let was_console = self.tabs[index].as_console().is_some();
+        if let WorkspaceTab::MongoConsole(console) = &self.tabs[index] {
+            let command = self
+                .editor
+                .text(console.id)
+                .unwrap_or_else(|_| console.command_text.clone());
+            self.closed_mongo_consoles
+                .retain(|(record, _)| record.id != id);
+            self.closed_mongo_consoles.push((
+                crate::persistence::mongodb_workspace::PersistedMongoConsole {
+                    id,
+                    profile_id: console.profile_id,
+                    database: console.database.clone(),
+                    command_file: format!("{id}.mongodb.json").into(),
+                    open: false,
+                },
+                command,
+            ));
+        }
         self.pending_executions.remove(&id);
+        let closed_mongo = matches!(self.tabs.get(index), Some(WorkspaceTab::MongoConsole(_)));
         if let Some(tab) = self.tabs[index].as_console()
             && let Some(record) = self.sql_editors.iter_mut().find(|record| record.id == id)
         {
@@ -17475,6 +19624,9 @@ impl App {
             self.focus = Focus::Explorer;
         }
         commands.push(self.persist_workspace_command());
+        if closed_mongo {
+            commands.push(Command::CloseMongoConsoleDocument(id));
+        }
         commands
     }
 
@@ -18279,6 +20431,9 @@ impl App {
                 WorkspaceTab::Relation(tab) => tab.descriptor.key.profile_id != profile_id,
                 WorkspaceTab::Dashboard(tab) => tab.profile_id != Some(profile_id),
                 WorkspaceTab::RedisBrowser(tab) => tab.target.profile_id != profile_id,
+                WorkspaceTab::MongoBrowser(tab) => tab.profile_id != profile_id,
+                WorkspaceTab::MongoConsole(tab) => tab.profile_id != profile_id,
+                WorkspaceTab::MongoDashboard(tab) => tab.profile_id != profile_id,
                 WorkspaceTab::PrincipalDdl(tab) => tab.entry.id.profile_id != profile_id,
             });
             self.active_workspace_profile = self.sql_editors.iter().find_map(|record| {
@@ -18552,7 +20707,7 @@ impl App {
                     DatabaseKind::Postgres | DatabaseKind::SqlServer | DatabaseKind::Sqlite => {
                         entry.qualified_name.schema.clone()
                     }
-                    DatabaseKind::Redis => None,
+                    DatabaseKind::Redis | DatabaseKind::MongoDb => None,
                 };
                 let candidate = ExecutionTarget {
                     profile_id: profile.id,
@@ -18749,7 +20904,7 @@ impl App {
                     DatabaseKind::MySql | DatabaseKind::MariaDb => Some(database.clone()),
                     DatabaseKind::Sqlite => Some("main".to_owned()),
                     DatabaseKind::Postgres | DatabaseKind::SqlServer | DatabaseKind::Oracle => None,
-                    DatabaseKind::Redis => None,
+                    DatabaseKind::Redis | DatabaseKind::MongoDb => None,
                 },
                 database,
             })
@@ -19700,7 +21855,7 @@ impl App {
             DatabaseKind::Oracle => SqlDialect::Oracle,
             DatabaseKind::Sqlite => SqlDialect::Sqlite,
             DatabaseKind::SqlServer => SqlDialect::SqlServer,
-            DatabaseKind::Redis => SqlDialect::Generic,
+            DatabaseKind::Redis | DatabaseKind::MongoDb => SqlDialect::Generic,
         }
     }
 
@@ -19711,7 +21866,7 @@ impl App {
             Some(DatabaseKind::Oracle) => SqlDialect::Oracle,
             Some(DatabaseKind::Sqlite) => SqlDialect::Sqlite,
             Some(DatabaseKind::SqlServer) => SqlDialect::SqlServer,
-            Some(DatabaseKind::Redis) => SqlDialect::Generic,
+            Some(DatabaseKind::Redis | DatabaseKind::MongoDb) => SqlDialect::Generic,
             None => SqlDialect::Generic,
         }
     }
@@ -19731,7 +21886,7 @@ impl App {
             Some(DatabaseKind::Oracle) => SqlDialect::Oracle,
             Some(DatabaseKind::Sqlite) => SqlDialect::Sqlite,
             Some(DatabaseKind::SqlServer) => SqlDialect::SqlServer,
-            Some(DatabaseKind::Redis) | None => SqlDialect::Generic,
+            Some(DatabaseKind::Redis | DatabaseKind::MongoDb) | None => SqlDialect::Generic,
         }
     }
 
@@ -21667,7 +23822,7 @@ impl App {
         {
             let text = view
                 .selected_item()
-                .map_or_else(String::new, |item| item.sql.clone());
+                .map_or_else(String::new, |item| if item.language == crate::model::sql_history::HistoryLanguage::Mongo { format!("MongoDB command: {}\nDatabase: {}\nStatus: {:?}\nReturned documents: {}\nElapsed: {} ms\n\nCommand payloads and results are not stored in history.", item.mongo_command.as_deref().unwrap_or("command"), item.database.as_deref().unwrap_or("—"), item.status, item.returned_rows.map_or("—".to_owned(), |v| v.to_string()), item.elapsed_millis.map_or("—".to_owned(), |v| v.to_string())) } else { item.sql.clone() });
             self.editor.open_read_only(session_id, &text);
             return;
         }
@@ -22308,6 +24463,7 @@ impl App {
             ExplorerNodeId::RedisDatabase { .. } => None,
             ExplorerNodeId::PrincipalGroup { .. } | ExplorerNodeId::Principal { .. } => None,
             ExplorerNodeId::PrincipalNotice { .. } => None,
+            ExplorerNodeId::Mongo { .. } => None,
         }
     }
 
@@ -22455,6 +24611,142 @@ impl App {
                     Vec::new()
                 }
             }
+            ExplorerNodeId::Mongo { profile_id, node } => match node {
+                crate::db::mongodb::types::MongoExplorerNodeId::Database(database) => {
+                    let expanded = self.explorer.normalized.expanded.contains(&selected);
+                    self.explorer.toggle_selected();
+                    if expanded {
+                        return Vec::new();
+                    }
+                    let generation = self
+                        .sessions
+                        .identities_for_profile(*profile_id)
+                        .first()
+                        .map(|identity| identity.generation);
+                    generation
+                        .map(|generation| {
+                            vec![Command::DiscoverMongoCollections {
+                                profile_id: *profile_id,
+                                generation,
+                                database: database.clone(),
+                            }]
+                        })
+                        .unwrap_or_default()
+                }
+                crate::db::mongodb::types::MongoExplorerNodeId::Monitor(database) => {
+                    self.explorer.toggle_selected();
+                    let mut tab = crate::model::dashboard::MongoDashboardTab::new(
+                        *profile_id,
+                        database.clone(),
+                    );
+                    tab.generation = 1;
+                    tab.connection_generation = self
+                        .sessions
+                        .iter()
+                        .find(|session| {
+                            session.identity.profile_id == *profile_id
+                                && session.target.database == *database
+                        })
+                        .map(|session| session.identity.generation);
+                    self.tabs.push(WorkspaceTab::MongoDashboard(Box::new(tab)));
+                    self.active_tab = self.tabs.len() - 1;
+                    self.focus = Focus::Results;
+                    vec![Command::RefreshMongoMonitor {
+                        profile_id: *profile_id,
+                        database: database.clone(),
+                        connection_generation: self
+                            .sessions
+                            .identities_for_profile(*profile_id)
+                            .first()
+                            .map_or(0, |identity| identity.generation),
+                        generation: 1,
+                    }]
+                }
+                crate::db::mongodb::types::MongoExplorerNodeId::Users(database) => {
+                    self.explorer.toggle_selected();
+                    let mut tab = crate::model::dashboard::MongoDashboardTab::new(
+                        *profile_id,
+                        database.clone(),
+                    );
+                    tab.generation = 1;
+                    tab.connection_generation = self
+                        .sessions
+                        .iter()
+                        .find(|session| {
+                            session.identity.profile_id == *profile_id
+                                && session.target.database == *database
+                        })
+                        .map(|session| session.identity.generation);
+                    self.tabs.push(WorkspaceTab::MongoDashboard(Box::new(tab)));
+                    self.active_tab = self.tabs.len() - 1;
+                    self.focus = Focus::Results;
+                    vec![Command::LoadMongoPrincipals {
+                        profile_id: *profile_id,
+                        database: database.clone(),
+                        connection_generation: self
+                            .sessions
+                            .identities_for_profile(*profile_id)
+                            .first()
+                            .map_or(0, |identity| identity.generation),
+                        generation: 1,
+                    }]
+                }
+                crate::db::mongodb::types::MongoExplorerNodeId::Collection(namespace) => {
+                    let expanded = self.explorer.normalized.expanded.contains(&selected);
+                    self.explorer.toggle_selected();
+                    if expanded {
+                        self.open_mongodb_browser(*profile_id, namespace.clone())
+                    } else {
+                        let generation = self
+                            .sessions
+                            .identities_for_profile(*profile_id)
+                            .first()
+                            .map(|identity| identity.generation);
+                        generation
+                            .map(|generation| {
+                                vec![Command::DiscoverMongoIndexes {
+                                    profile_id: *profile_id,
+                                    generation,
+                                    namespace: namespace.clone(),
+                                }]
+                            })
+                            .unwrap_or_default()
+                    }
+                }
+                crate::db::mongodb::types::MongoExplorerNodeId::Index { .. } => Vec::new(),
+                crate::db::mongodb::types::MongoExplorerNodeId::RetryCollections(database) => {
+                    let generation = self
+                        .sessions
+                        .identities_for_profile(*profile_id)
+                        .first()
+                        .map(|identity| identity.generation);
+                    generation
+                        .map(|generation| {
+                            vec![Command::DiscoverMongoCollections {
+                                profile_id: *profile_id,
+                                generation,
+                                database: database.clone(),
+                            }]
+                        })
+                        .unwrap_or_default()
+                }
+                crate::db::mongodb::types::MongoExplorerNodeId::RetryIndexes(namespace) => {
+                    let generation = self
+                        .sessions
+                        .identities_for_profile(*profile_id)
+                        .first()
+                        .map(|identity| identity.generation);
+                    generation
+                        .map(|generation| {
+                            vec![Command::DiscoverMongoIndexes {
+                                profile_id: *profile_id,
+                                generation,
+                                namespace: namespace.clone(),
+                            }]
+                        })
+                        .unwrap_or_default()
+                }
+            },
         }
     }
 
@@ -22507,6 +24799,43 @@ impl App {
             self.pending_redis_browser_target = None;
         }
         self.ensure_redis_browser_loaded(index, true)
+    }
+
+    fn open_mongodb_browser(
+        &mut self,
+        profile_id: Uuid,
+        namespace: crate::db::mongodb::types::MongoNamespace,
+    ) -> Vec<Command> {
+        let index = self.tabs.iter().position(|tab| matches!(tab, WorkspaceTab::MongoBrowser(tab) if tab.profile_id == profile_id && tab.namespace == namespace)).unwrap_or_else(|| {
+            self.tabs.push(WorkspaceTab::MongoBrowser(crate::model::mongodb_browser::MongoBrowserTab::new(profile_id, namespace)));
+            self.tabs.len() - 1
+        });
+        self.active_tab = index;
+        self.load_mongodb_page(index)
+    }
+
+    fn load_mongodb_page(&mut self, index: usize) -> Vec<Command> {
+        let Some(WorkspaceTab::MongoBrowser(tab)) = self.tabs.get_mut(index) else {
+            return Vec::new();
+        };
+        let profile_id = tab.profile_id;
+        let identity = self
+            .sessions
+            .identities_for_profile(profile_id)
+            .into_iter()
+            .next();
+        let Some(identity) = identity else {
+            return Vec::new();
+        };
+        tab.connection_generation = Some(identity.generation);
+        let generation = tab.begin_load();
+        vec![Command::LoadMongoPage {
+            tab_id: tab.id,
+            profile_id,
+            generation,
+            connection_generation: identity.generation,
+            spec: tab.spec.clone(),
+        }]
     }
 
     fn prepare_active_tab(&mut self) -> Vec<Command> {
@@ -26649,6 +28978,7 @@ fn add_explorer_profile(
                 .port
                 .map_or_else(|| host.to_owned(), |port| format!("{host}:{port}"))
         }
+        DatabaseKind::MongoDb => profile.host.clone().unwrap_or_default(),
     };
     explorer.normalized.add_profile_with_placement(
         profile.id,
@@ -29747,6 +32077,9 @@ mod tests {
             WorkspaceTab::Dashboard(_) => unreachable!(),
             WorkspaceTab::RedisBrowser(_) => unreachable!(),
             WorkspaceTab::PrincipalDdl(_) => unreachable!(),
+            WorkspaceTab::MongoBrowser(_) => unreachable!(),
+            WorkspaceTab::MongoConsole(_) => unreachable!(),
+            WorkspaceTab::MongoDashboard(_) => unreachable!(),
         };
         let scope = app.profiles[0].catalog_scope.clone();
         let request = RelationRequest {

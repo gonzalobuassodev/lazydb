@@ -23,9 +23,9 @@ pub const DEFAULT_MAX_RESULT_BYTES: usize = 1024 * 1024;
 pub struct AgentService {
     project: AgentProjectContext,
     profiles: Vec<ConnectionProfile>,
-    credential_resolver: CredentialResolver,
-    max_rows: usize,
-    max_result_bytes: usize,
+    pub(super) credential_resolver: CredentialResolver,
+    pub(super) max_rows: usize,
+    pub(super) max_result_bytes: usize,
 }
 
 impl AgentService {
@@ -157,6 +157,42 @@ impl AgentService {
             },
             outcome: json,
         })
+    }
+
+    pub async fn mongo_query(
+        &self,
+        selector: Option<&str>,
+        database: &str,
+        command_text: &str,
+    ) -> Result<super::mongodb::MongoAgentResult, AgentError> {
+        super::mongodb::execute(self, selector, database, command_text).await
+    }
+
+    pub async fn mongo_execute_change(
+        &self,
+        selector: Option<&str>,
+        database: &str,
+        command_text: &str,
+        write_policy: super::policy::WritePolicy,
+    ) -> Result<super::mongodb::MongoAgentChangeResult, AgentError> {
+        super::mongodb::execute_change(self, selector, database, command_text, write_policy).await
+    }
+
+    pub async fn mongo_list_collections(
+        &self,
+        selector: Option<&str>,
+        database: &str,
+    ) -> Result<Vec<crate::db::mongodb::types::MongoCollectionInfo>, AgentError> {
+        super::mongodb::collections(self, selector, database).await
+    }
+
+    pub async fn mongo_describe_collection(
+        &self,
+        selector: Option<&str>,
+        database: &str,
+        collection: &str,
+    ) -> Result<serde_json::Value, AgentError> {
+        super::mongodb::describe_collection(self, selector, database, collection).await
     }
 
     pub async fn search_schema(

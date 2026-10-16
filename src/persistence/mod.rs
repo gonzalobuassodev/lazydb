@@ -1,5 +1,6 @@
 pub mod credentials;
 pub mod local_credentials;
+pub mod mongodb_workspace;
 pub mod paths;
 pub mod profile_transaction;
 pub mod profiles;

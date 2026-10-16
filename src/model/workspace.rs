@@ -150,6 +150,13 @@ pub enum Overlay {
     RedisObjectEditor(Box<crate::model::redis_object_editor::RedisObjectEditorState>),
     RedisTableEditor(Box<crate::model::redis_table_editor::RedisTableEditorState>),
     RedisTableDeleteConfirm(crate::model::redis_table_editor::RedisTableDeleteConfirmation),
+    MongoManagement(Box<crate::model::mongodb_management::MongoManagementDraft>),
+    MongoPrincipalMutation(Box<crate::model::mongodb_principal::MongoPrincipalMutationDraft>),
+    MongoPrincipalConfirmation {
+        mutation: crate::db::mongodb::principal::MongoPrincipalMutation,
+        expected: String,
+        input: crate::model::text_input::TextInput,
+    },
     RedisValueSaveConfirm {
         tab_id: Uuid,
         revision: u64,
@@ -1306,6 +1313,18 @@ impl ExplorerState {
                         false,
                         None,
                     ),
+                    ExplorerNodeId::Mongo { node, .. } => {
+                        let label = match node {
+                            crate::db::mongodb::types::MongoExplorerNodeId::Database(name) => name.clone(),
+                            crate::db::mongodb::types::MongoExplorerNodeId::Collection(namespace) => namespace.collection.clone().unwrap_or_default(),
+                            crate::db::mongodb::types::MongoExplorerNodeId::Index { name, .. } => name.clone(),
+                            crate::db::mongodb::types::MongoExplorerNodeId::RetryCollections(database) => format!("Retry collections for {database}"),
+                            crate::db::mongodb::types::MongoExplorerNodeId::RetryIndexes(namespace) => format!("Retry indexes for {}", namespace.collection.as_deref().unwrap_or_default()),
+                            crate::db::mongodb::types::MongoExplorerNodeId::Monitor(database) => format!("Monitor · {database}"),
+                            crate::db::mongodb::types::MongoExplorerNodeId::Users(database) => format!("Users & Roles · {database}"),
+                        };
+                        (label, None, None, None, None, None, None, None, None, false, None)
+                    }
                     ExplorerNodeId::EmptyProfiles => (
                         "No profiles".to_owned(),
                         None,
