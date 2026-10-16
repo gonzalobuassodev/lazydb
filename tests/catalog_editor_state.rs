@@ -58,6 +58,41 @@ fn table_column_edit_session_is_atomic_across_confirm_and_cancel() {
 }
 
 #[test]
+fn clickhouse_native_definition_populates_editor_baseline_without_rebuilding_columns() {
+    let definition = lazydb::db::catalog_mutation::ClickHouseTableDefinition {
+        database: "analytics".into(),
+        name: "events".into(),
+        engine: "ReplacingMergeTree".into(),
+        columns: vec![lazydb::db::catalog_mutation::ClickHouseColumnDefinition {
+            name: "id".into(), ordinal_position: 1,
+            native_type: "Nullable(UInt64)".into(), default_kind: "MATERIALIZED".into(),
+            default_expression: "toUInt64(1)".into(),
+            comment: lazydb::db::catalog::OptionalMetadata::Supported(None),
+        }],
+        canonical_ddl: "CREATE TABLE analytics.events (id Nullable(UInt64) MATERIALIZED toUInt64(1)) ENGINE = ReplacingMergeTree ORDER BY id SETTINGS x = 1".into(),
+        baseline_fingerprint: "sha256:test".into(),
+        comment: lazydb::db::catalog::OptionalMetadata::Supported(None),
+    };
+    let draft = TableDraft::from_clickhouse_definition(&definition);
+    assert_eq!(
+        draft.clickhouse_native_ddl.as_deref(),
+        Some(definition.canonical_ddl.as_str())
+    );
+    assert_eq!(
+        draft.clickhouse_baseline_fingerprint.as_deref(),
+        Some("sha256:test")
+    );
+    assert_eq!(
+        draft.clickhouse_baseline_columns.as_deref(),
+        Some(definition.columns.as_slice())
+    );
+    assert_eq!(draft.clickhouse_engine.value(), "ReplacingMergeTree");
+    assert_eq!(draft.columns[0].native_type.value(), "Nullable(UInt64)");
+    assert_eq!(draft.columns[0].generated_expression.value(), "toUInt64(1)");
+    assert_eq!(draft.columns[0].existing_name.as_deref(), Some("id"));
+}
+
+#[test]
 fn catalog_input_accessors_follow_explicit_targets() {
     let mut schema = CatalogDraft::Schema(SchemaDraft::new());
     if let CatalogDraft::Schema(draft) = &mut schema {
@@ -1567,6 +1602,7 @@ fn materialized_view_edit_draft_keeps_query_display_only() {
         tablespace: lazydb::db::catalog::OptionalMetadata::Supported(Some("fast".into())),
         populated: true,
         baseline_fingerprint: "sha256:mv".into(),
+        clickhouse_native: None,
     };
     let mut draft = MaterializedViewDraft::from_definition(&definition);
     draft.focus = lazydb::model::catalog_editor::CatalogFormFocus::Query;
@@ -1867,6 +1903,7 @@ fn view_draft_preserves_query_and_cycles_editable_fields() {
         security_invoker: lazydb::db::catalog_mutation::ViewOption::unavailable("not tested"),
         check_option: lazydb::db::catalog_mutation::ViewOption::unavailable("not tested"),
         focus: lazydb::model::catalog_editor::CatalogFormFocus::Query,
+        clickhouse_native: None,
     };
     draft.insert(' ');
     assert_eq!(draft.query.value(), "SELECT 1 ");
@@ -1891,6 +1928,7 @@ fn view_query_validation_ignores_semicolons_in_literals_and_comments() {
         security_invoker: lazydb::db::catalog_mutation::ViewOption::unavailable("not tested"),
         check_option: lazydb::db::catalog_mutation::ViewOption::unavailable("not tested"),
         focus: lazydb::model::catalog_editor::CatalogFormFocus::Name,
+        clickhouse_native: None,
     };
     assert!(draft.validate().is_ok());
     draft.query = "SELECT 1; SELECT 2".into();

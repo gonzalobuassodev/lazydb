@@ -60,6 +60,101 @@ fn sql_server_kind_and_url_formats_serialize_stably() {
 }
 
 #[test]
+fn clickhouse_http_and_https_urls_use_independent_schemes_and_defaults() {
+    let http = parse_connection_url("clickhouse://localhost").unwrap();
+    assert_eq!(http.kind, DatabaseKind::ClickHouse);
+    assert_eq!(http.format, ConnectionUrlFormat::ClickHouse);
+    assert_eq!(http.port, Some(8123));
+    assert_eq!(http.database.as_deref(), Some("default"));
+    assert_eq!(http.user.as_deref(), Some("default"));
+    assert_eq!(http.ssl_mode, SslMode::Disable);
+
+    let https = parse_connection_url("clickhouses://alice:p%40ss@[::1]:9443/analytics").unwrap();
+    assert_eq!(https.kind, DatabaseKind::ClickHouse);
+    assert_eq!(https.format, ConnectionUrlFormat::ClickHouseTls);
+    assert_eq!(https.host.as_deref(), Some("[::1]"));
+    assert_eq!(https.port, Some(9443));
+    assert_eq!(https.user.as_deref(), Some("alice"));
+    assert_eq!(https.password.unwrap().expose_secret(), "p@ss");
+    assert_eq!(https.database.as_deref(), Some("analytics"));
+    assert_eq!(https.ssl_mode, SslMode::VerifyFull);
+}
+
+#[test]
+fn clickhouse_uri_formatter_preserves_transport_and_never_password() {
+    for (input, format, expected) in [
+        (
+            "clickhouse://alice:secret@db.example/analytics",
+            ConnectionUrlFormat::ClickHouse,
+            "clickhouse://alice@db.example:8123/analytics",
+        ),
+        (
+            "clickhouses://alice:secret@db.example:9443/analytics",
+            ConnectionUrlFormat::ClickHouseTls,
+            "clickhouses://alice@db.example:9443/analytics?sslMode=verify-full",
+        ),
+    ] {
+        let imported = import_connection_url(input, None).unwrap();
+        let formatted = format_connection_url(&imported.profile, format).unwrap();
+        assert_eq!(formatted, expected);
+        assert!(!formatted.contains("secret"));
+        let reparsed = parse_connection_url(&formatted).unwrap();
+        assert_eq!(reparsed.format, format);
+        assert_eq!(reparsed.host, imported.profile.host);
+        assert_eq!(reparsed.port, imported.profile.port);
+        assert_eq!(reparsed.user, imported.profile.user);
+        assert_eq!(reparsed.database, imported.profile.database);
+        assert_eq!(reparsed.ssl_mode, imported.profile.ssl_mode);
+        assert!(reparsed.password.is_none());
+    }
+}
+
+#[test]
+fn clickhouse_urls_reject_ambiguous_ssl_and_injected_query_options() {
+    for input in [
+        "clickhouse://db/analytics?sslmode=require",
+        "clickhouses://db/analytics?sslmode=disable",
+        "clickhouse://db/analytics?query_id=other-query",
+        "clickhouse://db/analytics?session_id=other-session",
+        "clickhouse://db/analytics?unknown=value",
+        "clickhouses://db/analytics?sslMode=disable",
+        "clickhouse://db/analytics?sslMode=verify-full",
+    ] {
+        assert!(parse_connection_url(input).is_err(), "accepted {input}");
+    }
+}
+
+#[test]
+fn clickhouse_kind_and_formats_serialize_and_remain_isolated() {
+    #[derive(serde::Serialize)]
+    struct KindFixture {
+        kind: DatabaseKind,
+    }
+
+    assert_eq!(
+        toml::to_string(&KindFixture {
+            kind: DatabaseKind::ClickHouse,
+        })
+        .unwrap()
+        .trim(),
+        "kind = \"clickhouse\""
+    );
+    assert_eq!(
+        ConnectionUrlFormat::default_for(DatabaseKind::ClickHouse),
+        ConnectionUrlFormat::ClickHouse
+    );
+    assert_eq!(
+        ConnectionUrlFormat::compatible_formats(DatabaseKind::ClickHouse),
+        &[
+            ConnectionUrlFormat::ClickHouse,
+            ConnectionUrlFormat::ClickHouseTls
+        ]
+    );
+    assert!(ConnectionUrlFormat::ClickHouseTls.is_compatible(DatabaseKind::ClickHouse));
+    assert!(!ConnectionUrlFormat::ClickHouse.is_compatible(DatabaseKind::MySql));
+}
+
+#[test]
 fn parses_all_server_formats_and_connection_settings() {
     let cases = [
         ("postgres://db/app", ConnectionUrlFormat::Postgres),

@@ -135,6 +135,7 @@ impl DatabaseKindLabel for DatabaseKind {
             DatabaseKind::Sqlite => "SQLite",
             DatabaseKind::SqlServer => "SQL Server",
             DatabaseKind::Redis => "Redis",
+            DatabaseKind::ClickHouse => "ClickHouse",
         }
     }
 }

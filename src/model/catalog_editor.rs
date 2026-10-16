@@ -250,6 +250,10 @@ pub enum TableGeneralField {
     Schema,
     Owner,
     Comment,
+    ClickHouseEngine,
+    ClickHouseOrderBy,
+    ClickHousePartitionBy,
+    ClickHouseTtl,
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -661,7 +665,19 @@ impl DatabaseDraft {
             editable_creation_options: true,
         }
     }
+    pub fn new_for_database(database_kind: crate::profile::DatabaseKind) -> Self {
+        let mut draft = Self::new("");
+        draft.database_kind = database_kind;
+        draft
+    }
     pub fn validate(&self) -> Result<(), crate::db::catalog_mutation::CatalogMutationError> {
+        if self.database_kind == crate::profile::DatabaseKind::ClickHouse {
+            return if self.name.value().trim().is_empty() {
+                Err(invalid("database name is required"))
+            } else {
+                Ok(())
+            };
+        }
         if matches!(
             self.database_kind,
             crate::profile::DatabaseKind::MySql | crate::profile::DatabaseKind::MariaDb
@@ -698,6 +714,9 @@ impl DatabaseDraft {
             .unwrap_or(0)
     }
     pub fn focus_enabled(&self, focus: CatalogFormFocus) -> bool {
+        if self.database_kind == crate::profile::DatabaseKind::ClickHouse {
+            return matches!(focus, CatalogFormFocus::Name | CatalogFormFocus::Comment);
+        }
         if matches!(
             self.database_kind,
             crate::profile::DatabaseKind::MySql | crate::profile::DatabaseKind::MariaDb
@@ -816,6 +835,15 @@ pub struct TableDraft {
     pub column_editor: Option<TableColumnEditSession>,
     pub indexes: Vec<String>,
     pub constraints: Vec<String>,
+    pub clickhouse_engine: TextInput,
+    pub clickhouse_order_by: TextInput,
+    pub clickhouse_partition_by: TextInput,
+    pub clickhouse_ttl: TextInput,
+    pub clickhouse_native_ddl: Option<String>,
+    pub clickhouse_baseline_fingerprint: Option<String>,
+    pub clickhouse_baseline_comment: Option<String>,
+    pub clickhouse_baseline_columns:
+        Option<Vec<crate::db::catalog_mutation::ClickHouseColumnDefinition>>,
 }
 
 #[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
@@ -849,6 +877,7 @@ pub struct ViewDraft {
     pub security_invoker: crate::db::catalog_mutation::ViewOption<bool>,
     pub check_option: crate::db::catalog_mutation::ViewOption<String>,
     pub focus: CatalogFormFocus,
+    pub clickhouse_native: Option<crate::db::catalog_mutation::ClickHouseViewDefinition>,
 }
 
 #[derive(Clone, Debug, Eq, PartialEq)]
@@ -862,6 +891,8 @@ pub struct MaterializedViewDraft {
     pub with_data: bool,
     pub focus: CatalogFormFocus,
     pub query_editable: bool,
+    pub clickhouse_native:
+        Option<crate::db::catalog_mutation::ClickHouseMaterializedViewDefinition>,
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -1148,6 +1179,23 @@ impl SequenceDraft {
 }
 
 impl MaterializedViewDraft {
+    pub fn from_clickhouse_native(
+        definition: &crate::db::catalog_mutation::ClickHouseMaterializedViewDefinition,
+    ) -> Self {
+        Self {
+            name: definition.name.clone().into(),
+            schema: definition.database.clone().into(),
+            owner: TextInput::default(),
+            comment: optional_text(&definition.comment),
+            query: definition.query.clone().into(),
+            tablespace: TextInput::default(),
+            with_data: false,
+            focus: CatalogFormFocus::Name,
+            query_editable: false,
+            clickhouse_native: Some(definition.clone()),
+        }
+    }
+
     pub fn from_definition(
         definition: &crate::db::catalog_mutation::MaterializedViewDefinition,
     ) -> Self {
@@ -1161,6 +1209,7 @@ impl MaterializedViewDraft {
             with_data: definition.populated,
             focus: CatalogFormFocus::Name,
             query_editable: false,
+            clickhouse_native: definition.clickhouse_native.clone(),
         }
     }
 
@@ -1291,6 +1340,30 @@ impl MaterializedViewDraft {
 }
 
 impl ViewDraft {
+    pub fn from_clickhouse_native(
+        definition: &crate::db::catalog_mutation::ClickHouseViewDefinition,
+    ) -> Self {
+        Self {
+            name: definition.name.clone().into(),
+            schema: definition.database.clone().into(),
+            owner: TextInput::default(),
+            comment: optional_text(&definition.comment),
+            query: definition.query.clone().into(),
+            output_columns: TextInput::default(),
+            security_barrier: crate::db::catalog_mutation::ViewOption::unavailable(
+                "not applicable to ClickHouse",
+            ),
+            security_invoker: crate::db::catalog_mutation::ViewOption::unavailable(
+                "not applicable to ClickHouse",
+            ),
+            check_option: crate::db::catalog_mutation::ViewOption::unavailable(
+                "not applicable to ClickHouse",
+            ),
+            focus: CatalogFormFocus::Name,
+            clickhouse_native: Some(definition.clone()),
+        }
+    }
+
     pub fn from_definition(definition: &crate::db::catalog_mutation::ViewDefinition) -> Self {
         Self {
             name: definition.name.clone().into(),
@@ -1303,6 +1376,7 @@ impl ViewDraft {
             security_invoker: definition.security_invoker.clone(),
             check_option: definition.check_option.clone(),
             focus: CatalogFormFocus::Name,
+            clickhouse_native: definition.clickhouse_native.clone(),
         }
     }
 
@@ -1313,8 +1387,14 @@ impl ViewDraft {
         if self.query.value().trim().is_empty() {
             return Err(invalid("view query is required"));
         }
-        if crate::sql::scan_statements(self.query.value(), crate::sql::SqlDialect::Postgres).len()
-            != 1
+        if (self.clickhouse_native.is_some() && !safe_view_query(self.query.value()))
+            || (self.clickhouse_native.is_none()
+                && crate::sql::scan_statements(
+                    self.query.value(),
+                    crate::sql::SqlDialect::Postgres,
+                )
+                .len()
+                    != 1)
         {
             return Err(invalid("view definition must contain exactly one query"));
         }
@@ -1469,6 +1549,15 @@ impl ViewDraft {
         }
         true
     }
+}
+
+fn safe_view_query(query: &str) -> bool {
+    let query = query.trim();
+    !query.is_empty()
+        && !query.contains(';')
+        && !query.contains("--")
+        && !query.contains("/*")
+        && !query.contains("*/")
 }
 
 #[derive(Clone, Debug, Eq, PartialEq)]
@@ -1836,6 +1925,14 @@ impl TableDraft {
             column_editor: None,
             indexes: Vec::new(),
             constraints: Vec::new(),
+            clickhouse_engine: "MergeTree".into(),
+            clickhouse_order_by: TextInput::default(),
+            clickhouse_partition_by: TextInput::default(),
+            clickhouse_ttl: TextInput::default(),
+            clickhouse_native_ddl: None,
+            clickhouse_baseline_fingerprint: None,
+            clickhouse_baseline_comment: None,
+            clickhouse_baseline_columns: None,
         }
     }
 
@@ -1863,7 +1960,76 @@ impl TableDraft {
             column_editor: None,
             indexes: definition.indexes.clone(),
             constraints: definition.constraints.clone(),
+            clickhouse_engine: "MergeTree".into(),
+            clickhouse_order_by: TextInput::default(),
+            clickhouse_partition_by: TextInput::default(),
+            clickhouse_ttl: TextInput::default(),
+            clickhouse_native_ddl: None,
+            clickhouse_baseline_fingerprint: None,
+            clickhouse_baseline_comment: None,
+            clickhouse_baseline_columns: None,
         }
+    }
+
+    pub fn from_clickhouse_definition(
+        definition: &crate::db::catalog_mutation::ClickHouseTableDefinition,
+    ) -> Self {
+        let mut draft = Self::new_for_database(
+            &definition.database,
+            crate::profile::DatabaseKind::ClickHouse,
+        );
+        draft.name = definition.name.clone().into();
+        draft.comment = optional_text(&definition.comment);
+        draft.clickhouse_engine = definition.engine.clone().into();
+        if let Some(order_by) = clickhouse_order_by_clause(&definition.canonical_ddl) {
+            draft.clickhouse_order_by = order_by.into();
+        }
+        draft.clickhouse_native_ddl = Some(definition.canonical_ddl.clone());
+        draft.clickhouse_baseline_fingerprint = Some(definition.baseline_fingerprint.clone());
+        draft.clickhouse_baseline_columns = Some(definition.columns.clone());
+        draft.clickhouse_baseline_comment = match &definition.comment {
+            crate::db::catalog::OptionalMetadata::Supported(value) => {
+                Some(value.clone().unwrap_or_default())
+            }
+            _ => None,
+        };
+        draft.columns = definition
+            .columns
+            .iter()
+            .map(|column| ColumnDraft {
+                row_id: Uuid::new_v4(),
+                ordinal_position: column.ordinal_position,
+                existing_name: Some(column.name.clone()),
+                name: column.name.clone().into(),
+                native_type: column.native_type.clone().into(),
+                nullable: column.native_type.starts_with("Nullable("),
+                default_expression: column.default_expression.clone().into(),
+                identity: false,
+                generated_expression: if matches!(
+                    column.default_kind.as_str(),
+                    "MATERIALIZED" | "ALIAS"
+                ) {
+                    column.default_expression.clone().into()
+                } else {
+                    TextInput::default()
+                },
+                collation: TextInput::default(),
+                comment: optional_text(&column.comment),
+                state: DraftRowState::Existing {
+                    id: CatalogId::new(
+                        Uuid::nil(),
+                        crate::db::catalog::CatalogKind::Column,
+                        [
+                            definition.database.clone(),
+                            definition.database.clone(),
+                            definition.name.clone(),
+                            column.name.clone(),
+                        ],
+                    ),
+                },
+            })
+            .collect();
+        draft
     }
 
     pub fn validate(&self) -> Result<(), crate::db::catalog_mutation::CatalogMutationError> {
@@ -1897,7 +2063,7 @@ impl TableDraft {
                 )));
             }
         }
-        if column_count == 0 {
+        if self.database_kind != crate::profile::DatabaseKind::ClickHouse && column_count == 0 {
             return Err(invalid("a table requires at least one column"));
         }
         Ok(())
@@ -2118,6 +2284,25 @@ impl TableDraft {
                 TableEditorFocus::General(TableGeneralField::Comment)
             }
             TableEditorFocus::General(TableGeneralField::Comment) => {
+                if self.database_kind == crate::profile::DatabaseKind::ClickHouse {
+                    TableEditorFocus::General(TableGeneralField::ClickHouseEngine)
+                } else if self.columns.is_empty() {
+                    TableEditorFocus::Action(TableActionField::AddColumn)
+                } else {
+                    self.selected_column = self.selected_column.min(self.columns.len() - 1);
+                    TableEditorFocus::Columns
+                }
+            }
+            TableEditorFocus::General(TableGeneralField::ClickHouseEngine) => {
+                TableEditorFocus::General(TableGeneralField::ClickHouseOrderBy)
+            }
+            TableEditorFocus::General(TableGeneralField::ClickHouseOrderBy) => {
+                TableEditorFocus::General(TableGeneralField::ClickHousePartitionBy)
+            }
+            TableEditorFocus::General(TableGeneralField::ClickHousePartitionBy) => {
+                TableEditorFocus::General(TableGeneralField::ClickHouseTtl)
+            }
+            TableEditorFocus::General(TableGeneralField::ClickHouseTtl) => {
                 if self.columns.is_empty() {
                     TableEditorFocus::Action(TableActionField::AddColumn)
                 } else {
@@ -2176,6 +2361,18 @@ impl TableDraft {
             }
             TableEditorFocus::General(TableGeneralField::Comment) => {
                 TableEditorFocus::General(TableGeneralField::Owner)
+            }
+            TableEditorFocus::General(TableGeneralField::ClickHouseEngine) => {
+                TableEditorFocus::General(TableGeneralField::Comment)
+            }
+            TableEditorFocus::General(TableGeneralField::ClickHouseOrderBy) => {
+                TableEditorFocus::General(TableGeneralField::ClickHouseEngine)
+            }
+            TableEditorFocus::General(TableGeneralField::ClickHousePartitionBy) => {
+                TableEditorFocus::General(TableGeneralField::ClickHouseOrderBy)
+            }
+            TableEditorFocus::General(TableGeneralField::ClickHouseTtl) => {
+                TableEditorFocus::General(TableGeneralField::ClickHousePartitionBy)
             }
             TableEditorFocus::Columns => {
                 if self.selected_column > 0 {
@@ -2487,6 +2684,18 @@ impl TableDraft {
             TableEditorFocus::General(TableGeneralField::Schema) => Some(&self.schema),
             TableEditorFocus::General(TableGeneralField::Owner) => Some(&self.owner),
             TableEditorFocus::General(TableGeneralField::Comment) => Some(&self.comment),
+            TableEditorFocus::General(TableGeneralField::ClickHouseEngine) => {
+                Some(&self.clickhouse_engine)
+            }
+            TableEditorFocus::General(TableGeneralField::ClickHouseOrderBy) => {
+                Some(&self.clickhouse_order_by)
+            }
+            TableEditorFocus::General(TableGeneralField::ClickHousePartitionBy) => {
+                Some(&self.clickhouse_partition_by)
+            }
+            TableEditorFocus::General(TableGeneralField::ClickHouseTtl) => {
+                Some(&self.clickhouse_ttl)
+            }
             TableEditorFocus::ColumnDetails(field) => {
                 self.column_editor.as_ref().and_then(|session| match field {
                     TableColumnField::Name => Some(&session.draft.name),
@@ -2509,6 +2718,18 @@ impl TableDraft {
             TableEditorFocus::General(TableGeneralField::Schema) => Some(&mut self.schema),
             TableEditorFocus::General(TableGeneralField::Owner) => Some(&mut self.owner),
             TableEditorFocus::General(TableGeneralField::Comment) => Some(&mut self.comment),
+            TableEditorFocus::General(TableGeneralField::ClickHouseEngine) => {
+                Some(&mut self.clickhouse_engine)
+            }
+            TableEditorFocus::General(TableGeneralField::ClickHouseOrderBy) => {
+                Some(&mut self.clickhouse_order_by)
+            }
+            TableEditorFocus::General(TableGeneralField::ClickHousePartitionBy) => {
+                Some(&mut self.clickhouse_partition_by)
+            }
+            TableEditorFocus::General(TableGeneralField::ClickHouseTtl) => {
+                Some(&mut self.clickhouse_ttl)
+            }
             TableEditorFocus::ColumnDetails(TableColumnField::Name) => self
                 .column_editor
                 .as_mut()
@@ -2611,6 +2832,26 @@ impl TableDraft {
             input.finish_edit_group();
         }
     }
+}
+
+fn clickhouse_order_by_clause(ddl: &str) -> Option<String> {
+    let upper = ddl.to_ascii_uppercase();
+    let marker = upper.find(" ORDER BY ")? + " ORDER BY ".len();
+    let tail = &ddl[marker..];
+    let upper_tail = tail.to_ascii_uppercase();
+    let end = [
+        " PARTITION BY ",
+        " PRIMARY KEY ",
+        " SAMPLE BY ",
+        " TTL ",
+        " SETTINGS ",
+        " COMMENT ",
+    ]
+    .iter()
+    .filter_map(|clause| upper_tail.find(clause))
+    .min()
+    .unwrap_or(tail.len());
+    Some(tail[..end].trim().to_owned()).filter(|value| !value.is_empty())
 }
 
 fn optional_string(value: &crate::db::catalog::OptionalMetadata<String>) -> &str {
@@ -2716,7 +2957,7 @@ impl ColumnDraft {
             native_type: crate::db::column_type::ColumnTypePolicy::for_database(database_kind)
                 .default_native_type()
                 .into(),
-            nullable: true,
+            nullable: database_kind != crate::profile::DatabaseKind::ClickHouse,
             default_expression: TextInput::default(),
             identity: false,
             generated_expression: TextInput::default(),
@@ -3446,6 +3687,7 @@ pub struct CatalogEditorState {
     pub baseline: Option<CatalogObjectDefinition>,
     pub plan: Option<CatalogMutationPlan>,
     pub error: Option<String>,
+    pub outcome_unknown: bool,
     pub owner_picker: OwnerPickerState,
     pub preview_scroll: usize,
 }
@@ -3485,6 +3727,7 @@ impl CatalogEditorState {
             baseline: None,
             plan: None,
             error: None,
+            outcome_unknown: false,
             owner_picker: OwnerPickerState::default(),
             preview_scroll: 0,
         }
@@ -3504,6 +3747,66 @@ impl CatalogEditorState {
             _ => None,
         };
         Some(draft.change_summary(baseline))
+    }
+
+    pub fn clickhouse_table_change_summary(&self) -> Option<TableChangeSummary> {
+        let CatalogDraft::Table(draft) = self.draft.as_ref()? else {
+            return None;
+        };
+        let Some(CatalogObjectDefinition::ClickHouseTable(baseline)) = self.baseline.as_ref()
+        else {
+            return None;
+        };
+        Some(TableChangeSummary {
+            properties_changed: draft.name.value() != baseline.name
+                || draft.comment.value()
+                    != draft
+                        .clickhouse_baseline_comment
+                        .as_deref()
+                        .unwrap_or_default()
+                || matches!(
+                    &baseline.comment,
+                    crate::db::catalog::OptionalMetadata::Unsupported
+                ) && !draft.comment.value().is_empty(),
+            added_columns: draft
+                .columns
+                .iter()
+                .filter(|column| matches!(column.state, DraftRowState::Added))
+                .count(),
+            modified_columns: draft
+                .columns
+                .iter()
+                .filter(|column| {
+                    matches!(column.state, DraftRowState::Existing { .. })
+                        && (column.name.value()
+                            != column.existing_name.as_deref().unwrap_or_default()
+                            || baseline
+                                .columns
+                                .iter()
+                                .find(|base| {
+                                    Some(base.name.as_str()) == column.existing_name.as_deref()
+                                })
+                                .is_some_and(|base| {
+                                    base.native_type != column.native_type.value()
+                                        || base.default_expression
+                                            != column.default_expression.value()
+                                        || match &base.comment {
+                                            crate::db::catalog::OptionalMetadata::Unsupported => {
+                                                true
+                                            }
+                                            crate::db::catalog::OptionalMetadata::Supported(
+                                                value,
+                                            ) => {
+                                                value.as_deref().unwrap_or_default()
+                                                    != column.comment.value()
+                                            }
+                                        }
+                                }))
+                })
+                .count(),
+            removed_columns: 0,
+            ..TableChangeSummary::default()
+        })
     }
 
     /// True when a catalog form focuses the owner field, which the owner picker owns.
@@ -3551,10 +3854,10 @@ impl CatalogEditorState {
                     crate::db::catalog::CatalogKind::Database,
                 ))
         {
-            let mut draft = DatabaseDraft::new("");
-            if let Some(database_kind) = self.database_kind {
-                draft.database_kind = database_kind;
-            }
+            let draft = DatabaseDraft::new_for_database(
+                self.database_kind
+                    .unwrap_or(crate::profile::DatabaseKind::Postgres),
+            );
             self.draft = Some(CatalogDraft::Database(draft));
         }
         if matches!(self.anchor, CatalogMutationAnchor::Profile { .. })
@@ -3623,9 +3926,12 @@ impl CatalogEditorState {
                 && object_type
                     == CatalogObjectType::Catalog(crate::db::catalog::CatalogKind::Database)
             {
-                self.draft = Some(CatalogDraft::Database(DatabaseDraft::new(
-                    id.native_path.first().cloned().unwrap_or_default(),
-                )));
+                let mut draft = DatabaseDraft::new_for_database(
+                    self.database_kind
+                        .unwrap_or(crate::profile::DatabaseKind::Postgres),
+                );
+                draft.name = id.native_path.first().cloned().unwrap_or_default().into();
+                self.draft = Some(CatalogDraft::Database(draft));
             }
             if id.kind == crate::db::catalog::CatalogKind::Table {
                 let schema = id
@@ -3709,6 +4015,7 @@ impl CatalogEditorState {
                         "check option capability is not loaded",
                     ),
                     focus: CatalogFormFocus::Name,
+                    clickhouse_native: None,
                 }));
             }
             if id.kind == crate::db::catalog::CatalogKind::Schema
@@ -3725,10 +4032,12 @@ impl CatalogEditorState {
                     with_data: true,
                     focus: CatalogFormFocus::Name,
                     query_editable: true,
+                    clickhouse_native: None,
                 }));
             }
         }
         self.error = None;
+        self.outcome_unknown = false;
         true
     }
 
@@ -3766,6 +4075,11 @@ impl CatalogEditorState {
                         .unwrap_or(crate::profile::DatabaseKind::Postgres),
                 ),
             ));
+        }
+        if let Some(CatalogObjectDefinition::ClickHouseTable(definition)) = self.baseline.as_ref() {
+            self.draft = Some(CatalogDraft::Table(TableDraft::from_clickhouse_definition(
+                definition,
+            )));
         }
         if let Some(CatalogObjectDefinition::View(definition)) = self.baseline.as_ref() {
             self.draft = Some(CatalogDraft::View(ViewDraft::from_definition(definition)));
@@ -3871,11 +4185,21 @@ impl CatalogEditorState {
     }
 
     pub fn apply_failed(&mut self, request_id: u64, message: impl Into<String>) -> bool {
+        self.apply_failed_with_outcome(request_id, message, false)
+    }
+
+    pub fn apply_failed_with_outcome(
+        &mut self,
+        request_id: u64,
+        message: impl Into<String>,
+        outcome_unknown: bool,
+    ) -> bool {
         if self.operation != Some(CatalogEditorOperation::Applying { request_id }) {
             return false;
         }
         self.operation = None;
         self.error = Some(message.into());
+        self.outcome_unknown = outcome_unknown;
         self.page = CatalogEditorPage::SqlPreview;
         true
     }
@@ -3939,6 +4263,7 @@ mod tests {
             security_invoker: ViewOption::unavailable("not supported"),
             check_option: ViewOption::available(None),
             focus: CatalogFormFocus::Name,
+            clickhouse_native: None,
         }
     }
 
@@ -3953,6 +4278,7 @@ mod tests {
             with_data: true,
             focus: CatalogFormFocus::Name,
             query_editable,
+            clickhouse_native: None,
         }
     }
 

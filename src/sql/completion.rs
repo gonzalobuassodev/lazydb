@@ -869,6 +869,7 @@ fn relation_insert_text(
                 ]
             }
         }
+        SqlDialect::ClickHouse => vec![object],
     };
     parts
         .into_iter()
@@ -1073,9 +1074,9 @@ fn cursor_is_in_comment_or_literal(text: &str, dialect: SqlDialect) -> bool {
             continue;
         }
         let quote = match bytes[index] {
-            b'"' if dialect != SqlDialect::MySql => Some(b'"'),
+            b'"' if !matches!(dialect, SqlDialect::MySql | SqlDialect::ClickHouse) => Some(b'"'),
             b'[' if dialect == SqlDialect::SqlServer => Some(b']'),
-            b'`' if dialect == SqlDialect::MySql => Some(b'`'),
+            b'`' if matches!(dialect, SqlDialect::MySql | SqlDialect::ClickHouse) => Some(b'`'),
             _ => None,
         };
         if let Some(quote) = quote {
@@ -1139,6 +1140,9 @@ fn completion_kind(kind: CatalogKind) -> Option<CompletionKind> {
         CatalogKind::Trigger => CompletionKind::Trigger,
         CatalogKind::Sequence => CompletionKind::Sequence,
         CatalogKind::Type => CompletionKind::Type,
+        CatalogKind::Dictionary => CompletionKind::Table,
+        CatalogKind::Projection => CompletionKind::Index,
+        CatalogKind::UserDefinedFunction => CompletionKind::Function,
     })
 }
 
@@ -1804,6 +1808,7 @@ fn keywords_for_completion(
                 | SqlDialect::Sqlite
                 | SqlDialect::Generic
                 | SqlDialect::Oracle => &["ASC", "DESC", "NULLS FIRST", "NULLS LAST"],
+                SqlDialect::ClickHouse => &["ASC", "DESC"],
                 SqlDialect::MySql | SqlDialect::MariaDb | SqlDialect::SqlServer => &["ASC", "DESC"],
             },
             OrderingStage::AfterDirection => match dialect {
@@ -1811,6 +1816,7 @@ fn keywords_for_completion(
                 | SqlDialect::Sqlite
                 | SqlDialect::Generic
                 | SqlDialect::Oracle => &["NULLS FIRST", "NULLS LAST"],
+                SqlDialect::ClickHouse => &[],
                 SqlDialect::MySql | SqlDialect::MariaDb | SqlDialect::SqlServer => &[],
             },
             OrderingStage::NullPlacement => match dialect {
@@ -1818,6 +1824,7 @@ fn keywords_for_completion(
                 | SqlDialect::Sqlite
                 | SqlDialect::Generic
                 | SqlDialect::Oracle => &["FIRST", "LAST"],
+                SqlDialect::ClickHouse => &[],
                 SqlDialect::MySql | SqlDialect::MariaDb | SqlDialect::SqlServer => &[],
             },
             OrderingStage::Complete => &[],
@@ -2759,9 +2766,9 @@ fn completion_tokens(text: &str, dialect: SqlDialect) -> Vec<CompletionToken> {
             continue;
         }
         let quote = match bytes[index] {
-            b'"' if dialect != SqlDialect::MySql => Some(b'"'),
+            b'"' if !matches!(dialect, SqlDialect::MySql | SqlDialect::ClickHouse) => Some(b'"'),
             b'[' if dialect == SqlDialect::SqlServer => Some(b']'),
-            b'`' if dialect == SqlDialect::MySql => Some(b'`'),
+            b'`' if matches!(dialect, SqlDialect::MySql | SqlDialect::ClickHouse) => Some(b'`'),
             _ => None,
         };
         if let Some(quote) = quote {
@@ -2867,7 +2874,7 @@ pub fn quote_identifier(value: &str, dialect: SqlDialect) -> String {
     if dialect == SqlDialect::SqlServer {
         return format!("[{}]", value.replace(']', "]]"));
     }
-    let (quote, escaped) = if dialect == SqlDialect::MySql {
+    let (quote, escaped) = if matches!(dialect, SqlDialect::MySql | SqlDialect::ClickHouse) {
         ('`', value.replace('`', "``"))
     } else {
         ('"', value.replace('"', "\"\""))
@@ -2926,7 +2933,7 @@ fn keywords(
                 "REFERENCES",
                 "CHECK",
             ],
-            SqlDialect::Sqlite | SqlDialect::Oracle => &[],
+            SqlDialect::Sqlite | SqlDialect::Oracle | SqlDialect::ClickHouse => &[],
         },
         Context::Ddl(DdlContext::AlterColumnType(_)) => &[],
         Context::Ddl(DdlContext::NewColumnName) => &[],
@@ -3017,6 +3024,7 @@ fn ddl_object_keywords(dialect: SqlDialect, _create: bool) -> &'static [&'static
             "TRIGGER",
             "TYPE",
         ],
+        SqlDialect::ClickHouse => &["DATABASE", "DICTIONARY", "FUNCTION", "TABLE", "VIEW"],
     }
 }
 
@@ -3076,6 +3084,7 @@ fn alter_table_action_keywords(dialect: SqlDialect) -> &'static [&'static str] {
             "ADD CONSTRAINT",
             "DROP CONSTRAINT",
         ],
+        SqlDialect::ClickHouse => &[],
     }
 }
 
@@ -3137,6 +3146,31 @@ fn data_types_for_context(context: Context, dialect: SqlDialect) -> &'static [&'
             "RAW",
             "TIMESTAMP",
             "VARCHAR2",
+        ],
+        SqlDialect::ClickHouse => &[
+            "Array",
+            "Date",
+            "Date32",
+            "DateTime",
+            "DateTime64",
+            "Decimal",
+            "FixedString",
+            "Float32",
+            "Float64",
+            "Int8",
+            "Int16",
+            "Int32",
+            "Int64",
+            "Int128",
+            "Nullable",
+            "String",
+            "Tuple",
+            "UInt8",
+            "UInt16",
+            "UInt32",
+            "UInt64",
+            "UInt128",
+            "UUID",
         ],
     }
 }

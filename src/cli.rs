@@ -209,6 +209,7 @@ pub enum LspDialect {
     #[value(name = "sqlserver", alias = "sql-server")]
     SqlServer,
     Sqlite,
+    ClickHouse,
     #[default]
     Generic,
 }
@@ -223,6 +224,7 @@ impl From<crate::profile::DatabaseKind> for LspDialect {
             crate::sql::SqlDialect::Sqlite
             | crate::sql::SqlDialect::Generic
             | crate::sql::SqlDialect::Oracle => Self::Sqlite,
+            crate::sql::SqlDialect::ClickHouse => Self::ClickHouse,
         }
     }
 }
@@ -401,7 +403,7 @@ pub struct Capabilities<'a> {
     pub version: &'a str,
     pub cli_api: u16,
     pub features: [&'a str; 8],
-    pub drivers: &'a [&'a str; 7],
+    pub drivers: &'a [&'a str; crate::db::descriptor::DRIVERS.len()],
 }
 
 #[derive(Debug, Serialize)]
@@ -681,7 +683,8 @@ mod tests {
                 "oracle",
                 "sqlserver",
                 "sqlite",
-                "redis"
+                "redis",
+                "clickhouse"
             ])
         );
         assert_eq!(

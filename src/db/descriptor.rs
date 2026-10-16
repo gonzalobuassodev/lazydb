@@ -24,7 +24,7 @@ pub struct DatabaseDescriptor {
     pub category: DatabaseCategory,
 }
 
-pub const DRIVERS: [DatabaseDescriptor; 7] = [
+pub const DRIVERS: [DatabaseDescriptor; 8] = [
     DatabaseDescriptor {
         kind: DatabaseKind::Postgres,
         name: "postgres",
@@ -67,6 +67,12 @@ pub const DRIVERS: [DatabaseDescriptor; 7] = [
         display_name: "Redis",
         category: DatabaseCategory::NonRelational,
     },
+    DatabaseDescriptor {
+        kind: DatabaseKind::ClickHouse,
+        name: "clickhouse",
+        display_name: "ClickHouse",
+        category: DatabaseCategory::Relational,
+    },
 ];
 
 pub const DRIVER_NAMES: [&str; DRIVERS.len()] = [
@@ -77,9 +83,10 @@ pub const DRIVER_NAMES: [&str; DRIVERS.len()] = [
     DRIVERS[4].name,
     DRIVERS[5].name,
     DRIVERS[6].name,
+    DRIVERS[7].name,
 ];
 
-pub const DRIVER_LIST: &str = "postgres,mysql,mariadb,oracle,sqlserver,sqlite,redis";
+pub const DRIVER_LIST: &str = "postgres,mysql,mariadb,oracle,sqlserver,sqlite,redis,clickhouse";
 
 pub fn kinds() -> impl Iterator<Item = DatabaseKind> {
     DRIVERS.iter().map(|descriptor| descriptor.kind)

@@ -156,6 +156,7 @@ fn materialized_view_mutation_create_and_native_safe_edit_never_replaces_definit
         with_data: false,
         focus: lazydb::model::catalog_editor::CatalogFormFocus::Name,
         query_editable: true,
+        clickhouse_native: None,
     };
     let request = CatalogMutationRequest::new(
         connection,
@@ -203,6 +204,7 @@ fn materialized_view_mutation_create_and_native_safe_edit_never_replaces_definit
         tablespace: OptionalMetadata::Supported(Some("fast".into())),
         populated: false,
         baseline_fingerprint: "sha256:x".into(),
+        clickhouse_native: None,
     });
     let plan = PostgresAdapter::plan_catalog_mutation(
         request,
@@ -828,6 +830,14 @@ async fn serialized_postgres_catalog_mutations_round_trip_catalog_definitions() 
                     column_editor: None,
                     indexes: vec![],
                     constraints: vec![],
+                    clickhouse_engine: Default::default(),
+                    clickhouse_order_by: Default::default(),
+                    clickhouse_partition_by: Default::default(),
+                    clickhouse_ttl: Default::default(),
+                    clickhouse_native_ddl: None,
+                    clickhouse_baseline_fingerprint: None,
+                    clickhouse_baseline_comment: None,
+                    clickhouse_baseline_columns: None,
                 }),
             )
             .await;
@@ -1246,6 +1256,7 @@ async fn apply_view(
         security_invoker: lazydb::db::catalog_mutation::ViewOption::available(None),
         check_option: lazydb::db::catalog_mutation::ViewOption::available(None),
         focus: lazydb::model::catalog_editor::CatalogFormFocus::Name,
+        clickhouse_native: None,
     };
     apply_plan(
         database,
@@ -1288,6 +1299,7 @@ async fn apply_materialized(
         with_data: true,
         focus: lazydb::model::catalog_editor::CatalogFormFocus::Name,
         query_editable: true,
+        clickhouse_native: None,
     };
     apply_plan(
         database,

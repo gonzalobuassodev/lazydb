@@ -3,6 +3,7 @@ pub mod catalog;
 pub mod catalog_change_set;
 pub mod catalog_drop;
 pub mod catalog_mutation;
+pub mod clickhouse;
 pub mod column_type;
 pub(crate) mod ddl;
 pub mod descriptor;
@@ -41,6 +42,7 @@ use self::{
     },
     catalog_mutation::CatalogMutationCapabilities,
     catalog_mutation::{CatalogObjectDefinition, CatalogObjectDefinitionRequest},
+    clickhouse::ClickHouseAdapter,
     mssql::MsSqlAdapter,
     mysql::MySqlAdapter,
     oracle::OracleAdapter,
@@ -289,6 +291,7 @@ pub enum DatabaseConnection {
     Sqlite(SqliteAdapter),
     SqlServer(MsSqlAdapter),
     Redis(RedisAdapter),
+    ClickHouse(ClickHouseAdapter),
 }
 
 impl DatabaseConnection {
@@ -299,6 +302,7 @@ impl DatabaseConnection {
                 principal::PrincipalCapability::DdlOnly
             }
             Self::Sqlite(_) | Self::Redis(_) => principal::PrincipalCapability::Unsupported,
+            Self::ClickHouse(_) => ClickHouseAdapter::principal_capability(),
         }
     }
 
@@ -333,6 +337,7 @@ impl DatabaseConnection {
                 privileges: Vec::new(),
                 memberships: false,
             },
+            Self::ClickHouse(_) => ClickHouseAdapter::principal_mutation_capabilities(),
         }
     }
 
@@ -344,6 +349,7 @@ impl DatabaseConnection {
             Self::Oracle(adapter) => adapter.list_principals().await,
             Self::Sqlite(adapter) => adapter.list_principals().await,
             Self::Redis(_) => Err(DatabaseError::unsupported("Redis has no SQL principals")),
+            Self::ClickHouse(adapter) => adapter.list_principals().await,
         }
     }
 
@@ -358,6 +364,7 @@ impl DatabaseConnection {
             Self::Oracle(adapter) => adapter.principal_ddl(principal).await,
             Self::Sqlite(_) => Err(DatabaseError::unsupported("SQLite has no SQL principals")),
             Self::Redis(_) => Err(DatabaseError::unsupported("Redis has no SQL principals")),
+            Self::ClickHouse(adapter) => adapter.principal_ddl(principal).await,
         }
     }
 
@@ -376,6 +383,7 @@ impl DatabaseConnection {
             Self::Sqlite(_) | Self::Redis(_) => Err(DatabaseError::unsupported(
                 "This database does not support SQL principal permission details",
             )),
+            Self::ClickHouse(adapter) => adapter.principal_details(principal, target).await,
         }
     }
 
@@ -398,6 +406,9 @@ impl DatabaseConnection {
             }
             Self::Oracle(_) => {
                 oracle::plan_principal_mutation(principal, connection, database, mutation)
+            }
+            Self::ClickHouse(adapter) => {
+                adapter.plan_principal_mutation(principal, connection, database, mutation)
             }
             _ => Err(DatabaseError::unsupported(
                 "principal mutations are DDL-only for this adapter (structured mutations are not implemented)",
@@ -423,6 +434,7 @@ impl DatabaseConnection {
                 diagnostic: None,
             }),
             Self::Redis(adapter) => adapter.load_monitor_snapshot().await,
+            Self::ClickHouse(adapter) => adapter.load_monitor_snapshot().await,
         }
     }
 
@@ -435,6 +447,7 @@ impl DatabaseConnection {
             Self::SqlServer(adapter) => adapter.load_monitor_metadata().await,
             Self::Sqlite(_) => Ok(monitor::MonitorMetadata::default()),
             Self::Redis(_) => Ok(monitor::MonitorMetadata::default()),
+            Self::ClickHouse(_) => Ok(monitor::MonitorMetadata::default()),
         }
     }
 
@@ -462,6 +475,7 @@ impl DatabaseConnection {
                 message: "Redis process list is not implemented yet".into(),
                 diagnostic: None,
             }),
+            Self::ClickHouse(adapter) => adapter.load_process_snapshot().await,
         }
     }
 
@@ -509,6 +523,9 @@ impl DatabaseConnection {
             Self::Redis(_) => Err(DatabaseError::configuration(
                 "Redis does not support SQL transactions",
             )),
+            Self::ClickHouse(_) => Err(DatabaseError::unsupported(
+                "ClickHouse does not support manual SQL transactions",
+            )),
         }
     }
 
@@ -536,6 +553,9 @@ impl DatabaseConnection {
             DatabaseKind::Redis => RedisAdapter::connect(profile, password)
                 .await
                 .map(Self::Redis),
+            DatabaseKind::ClickHouse => ClickHouseAdapter::connect(profile, password)
+                .await
+                .map(Self::ClickHouse),
         }
     }
 
@@ -559,6 +579,7 @@ impl DatabaseConnection {
             Self::Sqlite(_) => DatabaseKind::Sqlite,
             Self::SqlServer(_) => DatabaseKind::SqlServer,
             Self::Redis(_) => DatabaseKind::Redis,
+            Self::ClickHouse(_) => DatabaseKind::ClickHouse,
         }
     }
 
@@ -596,6 +617,7 @@ impl DatabaseConnection {
                 column_metadata: catalog::ColumnMetadataCapabilities::default(),
                 supports_lazy_children: false,
             },
+            Self::ClickHouse(_) => crate::db::clickhouse::ClickHouseAdapter::catalog_capabilities(),
         }
     }
 
@@ -608,6 +630,7 @@ impl DatabaseConnection {
             Self::Sqlite(_) => SqliteAdapter::catalog_mutation_capabilities(),
             Self::SqlServer(_) => MsSqlAdapter::catalog_mutation_capabilities(),
             Self::Redis(_) => CatalogMutationCapabilities::default(),
+            Self::ClickHouse(_) => ClickHouseAdapter::catalog_mutation_capabilities(),
         }
     }
 
@@ -637,6 +660,7 @@ impl DatabaseConnection {
                 kind: entry.kind,
                 reason: "Redis does not have SQL catalog objects".to_owned(),
             }),
+            Self::ClickHouse(_) => ClickHouseAdapter::plan_catalog_drop(request, entry),
         }
     }
 
@@ -676,6 +700,12 @@ impl DatabaseConnection {
                     object_type: request.object_type,
                 },
             ),
+            Self::ClickHouse(adapter) => ClickHouseAdapter::plan_catalog_mutation(
+                request,
+                draft,
+                baseline,
+                adapter.server_database(),
+            ),
         }
     }
 
@@ -694,6 +724,7 @@ impl DatabaseConnection {
             Self::Redis(_) => Err(DatabaseError::configuration(
                 "catalog mutation is not supported for Redis",
             )),
+            Self::ClickHouse(adapter) => adapter.execute_catalog_mutation(plan).await,
         }
     }
 
@@ -762,6 +793,7 @@ impl DatabaseConnection {
             Self::Sqlite(adapter) => adapter.probe().await,
             Self::SqlServer(adapter) => adapter.probe().await,
             Self::Redis(adapter) => adapter.probe().await,
+            Self::ClickHouse(adapter) => adapter.probe().await,
         }
     }
 
@@ -793,6 +825,9 @@ impl DatabaseConnection {
             Self::Redis(_) => Err(DatabaseError::configuration(
                 "Redis uses keyspace discovery instead of SQL catalog discovery",
             )),
+            Self::ClickHouse(_) => Err(DatabaseError::unsupported(
+                "ClickHouse catalog is not implemented yet",
+            )),
         }
     }
 
@@ -807,6 +842,7 @@ impl DatabaseConnection {
             | Self::Sqlite(_)
             | Self::SqlServer(_) => Ok(None),
             Self::Redis(_) => Ok(None),
+            Self::ClickHouse(_) => Ok(None),
         }
     }
 
@@ -824,6 +860,7 @@ impl DatabaseConnection {
             Self::Redis(_) => Err(DatabaseError::configuration(
                 "Redis does not support SQL catalog pages",
             )),
+            Self::ClickHouse(adapter) => adapter.load_catalog_page(request).await,
         }
     }
 
@@ -839,6 +876,7 @@ impl DatabaseConnection {
             | Self::Sqlite(_)
             | Self::SqlServer(_) => Ok(None),
             Self::Redis(_) => Ok(None),
+            Self::ClickHouse(adapter) => adapter.resolve_relation_identity(relation).await,
         }
     }
 
@@ -859,6 +897,11 @@ impl DatabaseConnection {
             | Self::Sqlite(_)
             | Self::SqlServer(_) => Ok(None),
             Self::Redis(_) => Ok(None),
+            Self::ClickHouse(adapter) => {
+                let mut adapter = adapter.clone();
+                adapter.catalog_scope = scope.clone();
+                adapter.resolve_relation_identity(relation).await
+            }
         }
     }
 
@@ -877,6 +920,7 @@ impl DatabaseConnection {
             Self::Redis(_) => Err(DatabaseError::configuration(
                 "Redis does not support SQL catalog object definitions",
             )),
+            Self::ClickHouse(adapter) => adapter.load_catalog_object_definition(request).await,
         }
     }
 
@@ -892,6 +936,7 @@ impl DatabaseConnection {
             | Self::Sqlite(_)
             | Self::SqlServer(_) => Ok(None),
             Self::Redis(_) => Ok(None),
+            Self::ClickHouse(_) => Ok(None),
         }
     }
 
@@ -911,6 +956,7 @@ impl DatabaseConnection {
             Self::Redis(_) => Err(DatabaseError::configuration(
                 "Redis does not support SQL catalog search",
             )),
+            Self::ClickHouse(adapter) => adapter.search_catalog(request).await,
         }
     }
 
@@ -930,6 +976,7 @@ impl DatabaseConnection {
             Self::Oracle(adapter) => adapter.execute_pool_with_budget(sql, budget).await,
             Self::Sqlite(adapter) => adapter.execute_pool_with_budget(sql, budget).await,
             Self::SqlServer(adapter) => adapter.execute_pool_with_budget(sql, budget).await,
+            Self::ClickHouse(adapter) => adapter.execute_with_budget(sql, budget).await,
             Self::Redis(_) => Err(DatabaseError::configuration(
                 "Redis commands do not use SQL execution",
             )),
@@ -952,6 +999,20 @@ impl DatabaseConnection {
             Self::Redis(_) => Err(DatabaseError::configuration(
                 "Redis does not support relation previews",
             )),
+            Self::ClickHouse(adapter) => {
+                adapter
+                    .preview_relation_with_scope(
+                        relation,
+                        &crate::profile::CatalogScope::for_profile(
+                            DatabaseKind::ClickHouse,
+                            "default",
+                            None,
+                        ),
+                        options,
+                        page,
+                    )
+                    .await
+            }
         }
     }
 
@@ -992,6 +1053,11 @@ impl DatabaseConnection {
             Self::Redis(_) => Err(DatabaseError::configuration(
                 "Redis does not support relation previews",
             )),
+            Self::ClickHouse(adapter) => {
+                adapter
+                    .preview_relation_with_scope(relation, scope, options, page)
+                    .await
+            }
         }
     }
 
@@ -1006,6 +1072,18 @@ impl DatabaseConnection {
             Self::Redis(_) => Err(DatabaseError::configuration(
                 "Redis does not support relation DDL",
             )),
+            Self::ClickHouse(adapter) => {
+                adapter
+                    .relation_ddl_with_scope(
+                        relation,
+                        &crate::profile::CatalogScope::for_profile(
+                            DatabaseKind::ClickHouse,
+                            "default",
+                            None,
+                        ),
+                    )
+                    .await
+            }
         }
     }
 
@@ -1024,6 +1102,7 @@ impl DatabaseConnection {
             Self::Redis(_) => Err(DatabaseError::configuration(
                 "Redis does not support relation DDL",
             )),
+            Self::ClickHouse(adapter) => adapter.relation_ddl_with_scope(relation, scope).await,
         }
     }
 
@@ -1041,6 +1120,7 @@ impl DatabaseConnection {
             Self::Sqlite(adapter) => adapter.object_ddl(kind, schema, name).await,
             Self::SqlServer(adapter) => adapter.object_ddl(kind, schema, name).await,
             Self::Redis(_) => Ok(None),
+            Self::ClickHouse(_) => Ok(None),
         }
     }
 
@@ -1053,6 +1133,7 @@ impl DatabaseConnection {
             Self::Sqlite(adapter) => adapter.quote_identifier(value),
             Self::SqlServer(adapter) => adapter.quote_identifier(value),
             Self::Redis(_) => value.to_owned(),
+            Self::ClickHouse(_) => format!("`{}`", value.replace('`', "``")),
         }
     }
 
@@ -1065,6 +1146,7 @@ impl DatabaseConnection {
             Self::Sqlite(adapter) => adapter.close().await,
             Self::SqlServer(adapter) => adapter.close().await,
             Self::Redis(adapter) => adapter.close().await,
+            Self::ClickHouse(adapter) => adapter.close().await,
         }
     }
 }

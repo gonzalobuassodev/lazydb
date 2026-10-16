@@ -88,7 +88,7 @@ jobs:
           sh scripts/release/check-macos-dependencies.sh target/debug/lazydb
 
   databases:
-    name: PostgreSQL, MySQL, and SQL Server adapters
+    name: Database adapter integration tests
     runs-on: ubuntu-24.04
     services:
       postgres:
@@ -160,6 +160,13 @@ jobs:
         with: { persist-credentials: false }
       - run: rustup toolchain install 1.94.0 --profile minimal --no-self-update
       - run: rustup default 1.94.0
+      - name: Validate ClickHouse local compose fixture
+        run: docker compose -f docker-compose.clickhouse.yml config --quiet
+      - name: Start deterministic ClickHouse 25.8 fixture
+        run: docker compose -f docker-compose.clickhouse.yml up -d --wait
+      - name: Initialize ClickHouse deterministic fixture
+        run: |
+          ruby -e 'File.read("tests/fixtures/clickhouse/init.sql").split(/;\s*(?=\S)/).each { |sql| next if sql.strip.empty?; system("curl", "--fail", "--silent", "--show-error", "--data-binary", sql, "http://127.0.0.1:18123/") or exit 1 }'
       - name: PostgreSQL adapter tests
         run: timeout 10m cargo test --locked --test postgres_adapter -- --nocapture --test-threads=1
       - name: PostgreSQL principal permission tests
@@ -176,3 +183,13 @@ jobs:
         run: timeout 10m cargo test --locked --test sqlserver_transactions -- --nocapture --test-threads=1
       - name: Redis mutation tests
         run: timeout 10m cargo test --locked --test redis_mutation -- --ignored --nocapture --test-threads=1
+      - name: ClickHouse forced-live adapters and object workflows
+        env:
+          LAZYDB_REQUIRE_DATABASE_TESTS: "1"
+          LAZYDB_TEST_CLICKHOUSE_URL: clickhouse://lazydb_test:lazydb_test@127.0.0.1:18123/lazydb_test
+        run: timeout 10m cargo test --locked --test clickhouse_adapter --test clickhouse_catalog_mutation --test clickhouse_monitoring -- --nocapture --test-threads=1
+      - name: ClickHouse deterministic adapter, catalog, principal, monitoring, agent and LSP tests
+        run: timeout 10m cargo test --locked --test clickhouse_agent --test clickhouse_catalog --test clickhouse_catalog_drop --test clickhouse_principals --test clickhouse_relation --test clickhouse_sql --test sql_dialect_mapping -- --nocapture --test-threads=1
+      - name: Stop ClickHouse test service
+        if: always()
+        run: docker compose -f docker-compose.clickhouse.yml down --volumes

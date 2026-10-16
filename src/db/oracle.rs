@@ -591,6 +591,7 @@ impl OracleAdapter {
                             "Oracle view check option mapping is not implemented",
                         ),
                         baseline_fingerprint,
+                        clickhouse_native: None,
                     }));
                 }
                 if object.kind == CatalogKind::Sequence {
@@ -1794,6 +1795,7 @@ fn oracle_catalog_entries(
         CatalogTarget::Groups { schema } | CatalogTarget::Objects { schema, .. } => {
             schema.native_path.last().cloned()
         }
+        CatalogTarget::ProjectionChildren { .. } => None,
         CatalogTarget::RelationChildren { .. } => None,
     };
     let limit = request.page_size.saturating_add(1);
@@ -1814,6 +1816,7 @@ fn oracle_catalog_entries(
             return Err(oracle_error("Oracle objects must use the object page loader"));
         }
         CatalogTarget::Groups { .. } => return Ok(Vec::new()),
+        CatalogTarget::ProjectionChildren { .. } => return Ok(Vec::new()),
         CatalogTarget::RelationChildren { relation } => {
             let [database, schema, table] = relation.native_path.as_slice() else {
                 return Ok(Vec::new());

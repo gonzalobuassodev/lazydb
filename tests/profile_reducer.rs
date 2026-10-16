@@ -733,8 +733,11 @@ fn form_navigation_skips_fields_hidden_by_driver_and_mode() {
             .as_ref()
             .unwrap()
             .kind,
-        DatabaseKind::Sqlite
+        DatabaseKind::ClickHouse
     );
+    app.update(Action::ProfileFocusField(ProfileField::SqliteMemory));
+    app.update(Action::ProfileFocusField(ProfileField::Kind));
+    app.update(Action::ProfileSelectDriver(DatabaseKind::Sqlite));
     app.update(Action::ProfileFocusField(ProfileField::SqliteMemory));
     app.update(Action::ProfileToggle);
     app.update(Action::ProfileFieldNext);

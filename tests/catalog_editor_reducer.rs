@@ -119,6 +119,7 @@ fn simple_catalog_editor(mode: CatalogMutationMode, draft: CatalogDraft) -> App 
         baseline: None,
         plan: None,
         error: None,
+        outcome_unknown: false,
         owner_picker: Default::default(),
         preview_scroll: 0,
     });
@@ -138,6 +139,7 @@ fn materialized_view_editor(mode: CatalogMutationMode, focus: CatalogFormFocus) 
             with_data: true,
             focus,
             query_editable: mode == CatalogMutationMode::Create,
+            clickhouse_native: None,
         }),
     )
 }
@@ -228,6 +230,7 @@ fn catalog_preview_focuses_the_first_invalid_view_field() {
             security_invoker: ViewOption::available(None),
             check_option: ViewOption::available(None),
             focus: CatalogFormFocus::Review,
+            clickhouse_native: None,
         }),
     );
     app.update(Action::CatalogEditorPreview);
@@ -340,6 +343,7 @@ fn typed_form_focus_delegates_to_view_materialized_view_and_sequence_drafts() {
             security_invoker: ViewOption::available(None),
             check_option: ViewOption::available(None),
             focus: CatalogFormFocus::Name,
+            clickhouse_native: None,
         }),
     );
     view.update(Action::CatalogEditorFocusFormField(CatalogFormFocus::Query));
@@ -421,6 +425,7 @@ fn typed_form_focus_rejects_disabled_and_read_only_fields() {
             security_invoker: ViewOption::available(None),
             check_option: ViewOption::available(None),
             focus: CatalogFormFocus::Name,
+            clickhouse_native: None,
         }),
     );
     view.update(Action::CatalogEditorFocusFormField(
@@ -465,6 +470,7 @@ fn catalog_editor_paste_supports_view_materialized_view_and_sequence_text_fields
             security_invoker: ViewOption::available(None),
             check_option: ViewOption::available(None),
             focus: CatalogFormFocus::Query,
+            clickhouse_native: None,
         }),
     );
     view.update(Action::CatalogEditorPaste("名 前".into()));
@@ -553,6 +559,7 @@ fn catalog_editor_paste_is_noop_for_read_only_choice_toggle_and_action_focus() {
                 security_invoker: ViewOption::available(None),
                 check_option: ViewOption::available(None),
                 focus,
+                clickhouse_native: None,
             }),
         );
         view.update(Action::CatalogEditorPaste(" ignored".into()));
@@ -624,6 +631,7 @@ fn view_option_actions_cycle_only_the_focused_available_choice() {
             security_invoker: ViewOption::unavailable("unsupported"),
             check_option: ViewOption::available(None),
             focus: CatalogFormFocus::SecurityBarrier,
+            clickhouse_native: None,
         }),
     );
 
@@ -1595,6 +1603,7 @@ fn catalog_mutation_failure_from_an_old_connection_is_ignored() {
         baseline: None,
         plan: Some(plan.clone()),
         error: None,
+        outcome_unknown: false,
         owner_picker: Default::default(),
         preview_scroll: 0,
     });
@@ -1602,6 +1611,7 @@ fn catalog_mutation_failure_from_an_old_connection_is_ignored() {
     app.update(Action::CatalogMutationFailed {
         plan,
         message: "old connection failed".into(),
+        outcome_unknown: false,
     });
 
     let editor = app.catalog_editor.as_ref().unwrap();
@@ -1610,6 +1620,260 @@ fn catalog_mutation_failure_from_an_old_connection_is_ignored() {
         Some(lazydb::model::catalog_editor::CatalogEditorOperation::Applying { request_id: 2 })
     ));
     assert_eq!(editor.error, None);
+}
+
+#[test]
+fn clickhouse_permission_failure_keeps_error_and_requests_catalog_refresh() {
+    let mut profile = import_connection_url("clickhouse://localhost/analytics", Some("ch"))
+        .unwrap()
+        .profile;
+    profile.kind = lazydb::profile::DatabaseKind::ClickHouse;
+    let profile_id = profile.id;
+    let mut app = App::new(vec![profile]);
+    let generation = match app.update(Action::RequestConnect(profile_id)).as_slice() {
+        [lazydb::action::Command::Connect { generation, .. }] => *generation,
+        commands => panic!("unexpected commands: {commands:?}"),
+    };
+    let target = lazydb::model::execution_target::ExecutionTarget::from_profile(
+        app.profiles
+            .iter()
+            .find(|item| item.id == profile_id)
+            .unwrap(),
+    );
+    app.sessions.register_attempt(
+        target.clone(),
+        lazydb::identity::ConnectionIdentity {
+            profile_id,
+            generation,
+        },
+    );
+    app.update(Action::ConnectionSucceeded {
+        profile_id,
+        generation,
+        server: lazydb::db::ServerInfo {
+            kind: lazydb::profile::DatabaseKind::ClickHouse,
+            version: "25.8".into(),
+            database: "analytics".into(),
+            current_user: Some("limited".into()),
+        },
+        mutation_capabilities:
+            lazydb::db::clickhouse::ClickHouseAdapter::catalog_mutation_capabilities(),
+    });
+    assert!(app.sessions.accept_success(
+        lazydb::identity::ConnectionIdentity {
+            profile_id,
+            generation
+        },
+        lazydb::db::ServerInfo {
+            kind: lazydb::profile::DatabaseKind::ClickHouse,
+            version: "25.8".into(),
+            database: "analytics".into(),
+            current_user: Some("limited".into()),
+        },
+        lazydb::db::clickhouse::ClickHouseAdapter::catalog_mutation_capabilities(),
+    ));
+    app.connection.profile_id = Some(profile_id);
+    app.connection.generation = generation;
+    app.connection.status = lazydb::model::workspace::ConnectionStatus::Connected;
+    app.connection.target = Some(target);
+    app.explorer.catalog_sessions.insert(
+        profile_id,
+        lazydb::identity::ConnectionIdentity {
+            profile_id,
+            generation,
+        },
+    );
+    let connection = lazydb::identity::ConnectionIdentity {
+        profile_id,
+        generation,
+    };
+    let schema = CatalogId::new(profile_id, CatalogKind::Schema, ["analytics", "analytics"]);
+    let request = lazydb::db::catalog_mutation::CatalogMutationRequest::new(
+        connection,
+        17,
+        0,
+        CatalogMutationMode::Create,
+        CatalogMutationAnchor::Group {
+            schema: schema.clone(),
+            group: lazydb::db::catalog::ObjectGroup::Tables,
+        },
+        CatalogObjectType::Catalog(CatalogKind::Table),
+    )
+    .unwrap()
+    .with_current_database("analytics");
+    let refresh = lazydb::db::catalog::CatalogTarget::objects(
+        schema,
+        lazydb::db::catalog::ObjectGroup::Tables,
+    )
+    .unwrap();
+    let plan = lazydb::db::catalog_mutation::CatalogMutationPlan::new(
+        request,
+        CatalogObjectType::Catalog(CatalogKind::Table),
+        lazydb::db::catalog_mutation::CatalogMutationExecutionMode::Autocommit,
+        lazydb::db::catalog_mutation::CatalogMutationTarget::maintenance("analytics").unwrap(),
+        vec![refresh],
+        lazydb::db::catalog_mutation::CatalogSelectionHint::Parent(
+            lazydb::db::catalog::CatalogTarget::Databases,
+        ),
+        None,
+        Vec::new(),
+        vec!["CREATE TABLE analytics.denied (id UInt64) ENGINE = MergeTree ORDER BY id".into()],
+    )
+    .unwrap();
+    let mut editor = CatalogEditorState::new(
+        CatalogMutationMode::Create,
+        plan.request.anchor.clone(),
+        0,
+        vec![],
+    );
+    editor.plan = Some(plan.clone());
+    editor.page = CatalogEditorPage::SqlPreview;
+    assert!(editor.begin_apply(17));
+    app.catalog_editor = Some(editor);
+
+    let commands = app.update(Action::CatalogMutationFailed {
+        plan,
+        message: "permission denied".into(),
+        outcome_unknown: false,
+    });
+
+    let editor = app.catalog_editor.as_ref().unwrap();
+    assert_eq!(editor.error.as_deref(), Some("permission denied"));
+    assert!(!editor.outcome_unknown);
+    assert_eq!(editor.operation, None);
+    assert!(commands.iter().any(|command| matches!(
+        command,
+        lazydb::action::Command::LoadCatalogPage(request)
+            if request.key.target == lazydb::db::catalog::CatalogTarget::objects(
+                CatalogId::new(profile_id, CatalogKind::Schema, ["analytics", "analytics"]),
+                lazydb::db::catalog::ObjectGroup::Tables,
+            ).unwrap()
+    )));
+}
+
+#[test]
+fn clickhouse_unknown_mutation_outcome_keeps_editor_and_refreshes_catalog() {
+    let mut profile = import_connection_url("clickhouse://localhost/analytics", Some("ch"))
+        .unwrap()
+        .profile;
+    profile.kind = lazydb::profile::DatabaseKind::ClickHouse;
+    let profile_id = profile.id;
+    let mut app = App::new(vec![profile]);
+    let generation = match app.update(Action::RequestConnect(profile_id)).as_slice() {
+        [lazydb::action::Command::Connect { generation, .. }] => *generation,
+        commands => panic!("unexpected commands: {commands:?}"),
+    };
+    let target = lazydb::model::execution_target::ExecutionTarget::from_profile(
+        app.profiles
+            .iter()
+            .find(|item| item.id == profile_id)
+            .unwrap(),
+    );
+    app.sessions.register_attempt(
+        target.clone(),
+        lazydb::identity::ConnectionIdentity {
+            profile_id,
+            generation,
+        },
+    );
+    let server = lazydb::db::ServerInfo {
+        kind: lazydb::profile::DatabaseKind::ClickHouse,
+        version: "25.8".into(),
+        database: "analytics".into(),
+        current_user: Some("limited".into()),
+    };
+    app.update(Action::ConnectionSucceeded {
+        profile_id,
+        generation,
+        server: server.clone(),
+        mutation_capabilities:
+            lazydb::db::clickhouse::ClickHouseAdapter::catalog_mutation_capabilities(),
+    });
+    assert!(app.sessions.accept_success(
+        lazydb::identity::ConnectionIdentity {
+            profile_id,
+            generation
+        },
+        server,
+        lazydb::db::clickhouse::ClickHouseAdapter::catalog_mutation_capabilities(),
+    ));
+    app.connection.profile_id = Some(profile_id);
+    app.connection.generation = generation;
+    app.connection.status = lazydb::model::workspace::ConnectionStatus::Connected;
+    app.connection.target = Some(target);
+    app.explorer.catalog_sessions.insert(
+        profile_id,
+        lazydb::identity::ConnectionIdentity {
+            profile_id,
+            generation,
+        },
+    );
+    let connection = lazydb::identity::ConnectionIdentity {
+        profile_id,
+        generation,
+    };
+    let schema = CatalogId::new(profile_id, CatalogKind::Schema, ["analytics", "analytics"]);
+    let request = lazydb::db::catalog_mutation::CatalogMutationRequest::new(
+        connection,
+        18,
+        0,
+        CatalogMutationMode::Create,
+        CatalogMutationAnchor::Group {
+            schema: schema.clone(),
+            group: lazydb::db::catalog::ObjectGroup::Tables,
+        },
+        CatalogObjectType::Catalog(CatalogKind::Table),
+    )
+    .unwrap()
+    .with_current_database("analytics");
+    let refresh = lazydb::db::catalog::CatalogTarget::objects(
+        schema.clone(),
+        lazydb::db::catalog::ObjectGroup::Tables,
+    )
+    .unwrap();
+    let plan = lazydb::db::catalog_mutation::CatalogMutationPlan::new(
+        request,
+        CatalogObjectType::Catalog(CatalogKind::Table),
+        lazydb::db::catalog_mutation::CatalogMutationExecutionMode::Autocommit,
+        lazydb::db::catalog_mutation::CatalogMutationTarget::maintenance("analytics").unwrap(),
+        vec![refresh.clone()],
+        lazydb::db::catalog_mutation::CatalogSelectionHint::Parent(
+            lazydb::db::catalog::CatalogTarget::Databases,
+        ),
+        None,
+        Vec::new(),
+        vec![
+            "CREATE TABLE analytics.maybe_created (id UInt64) ENGINE = MergeTree ORDER BY id"
+                .into(),
+        ],
+    )
+    .unwrap();
+    let mut editor = CatalogEditorState::new(
+        CatalogMutationMode::Create,
+        plan.request.anchor.clone(),
+        0,
+        vec![],
+    );
+    editor.plan = Some(plan.clone());
+    editor.page = CatalogEditorPage::SqlPreview;
+    assert!(editor.begin_apply(18));
+    app.catalog_editor = Some(editor);
+
+    let commands = app.update(Action::CatalogMutationFailed {
+        plan,
+        message: "ClickHouse did not confirm whether the statement was applied".into(),
+        outcome_unknown: true,
+    });
+
+    let editor = app.catalog_editor.as_ref().unwrap();
+    assert!(editor.outcome_unknown);
+    assert!(editor.error.as_deref().unwrap().contains("did not confirm"));
+    assert_eq!(editor.operation, None);
+    assert_eq!(editor.page, CatalogEditorPage::SqlPreview);
+    assert!(commands.iter().any(|command| matches!(
+        command,
+        lazydb::action::Command::LoadCatalogPage(request) if request.key.target == refresh
+    )));
 }
 
 fn draft_mut(app: &mut App) -> &mut lazydb::model::catalog_editor::TableDraft {

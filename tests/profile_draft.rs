@@ -334,6 +334,60 @@ fn new_sql_server_uses_server_defaults_and_fields() {
 }
 
 #[test]
+fn new_clickhouse_uses_http_defaults_and_database_is_its_schema() {
+    let mut draft = ProfileDraft::new(DatabaseKind::ClickHouse);
+    assert_eq!(draft.host.value(), "localhost");
+    assert_eq!(draft.port.value(), "8123");
+    assert_eq!(draft.database.value(), "default");
+    assert_eq!(draft.user.value(), "default");
+    assert_eq!(draft.ssl_mode, SslMode::Disable);
+    assert!(!draft.visible_fields().contains(&ProfileField::Schema));
+
+    draft.name.set("clickhouse");
+    let profile = draft.validate(&[]).unwrap().profile;
+    assert_eq!(profile.default_schema.as_deref(), Some("default"));
+    assert_eq!(
+        profile.catalog_scope,
+        CatalogScope::for_profile(DatabaseKind::ClickHouse, "default", Some("default"))
+    );
+
+    let mut https = ProfileDraft::new(DatabaseKind::ClickHouse);
+    https.url_format = ConnectionUrlFormat::ClickHouseTls;
+    https.port.set("8443");
+    https.ssl_mode = SslMode::VerifyFull;
+    https.name.set("clickhouse-tls");
+    assert!(https.validate(&[]).is_ok());
+    https.ssl_mode = SslMode::Disable;
+    assert_eq!(
+        https.validate(&[]).unwrap_err().field,
+        ProfileField::SslMode
+    );
+}
+
+#[test]
+fn clickhouse_uri_commit_changes_driver_defaults_and_redacts_password() {
+    let mut draft = ProfileDraft::new(DatabaseKind::MySql);
+    while draft.url_cursor() > 0 {
+        draft.backspace(ProfileField::Url);
+    }
+    draft.paste(
+        ProfileField::Url,
+        "clickhouses://alice:super-secret@db.example/analytics",
+    );
+    assert!(!draft.url_display().contains("super-secret"));
+    draft.commit_url().unwrap();
+
+    assert_eq!(draft.kind, DatabaseKind::ClickHouse);
+    assert_eq!(draft.url_format, ConnectionUrlFormat::ClickHouseTls);
+    assert_eq!(draft.port.value(), "8443");
+    assert_eq!(draft.database.value(), "analytics");
+    assert_eq!(draft.schema.value(), "");
+    assert_eq!(draft.ssl_mode, SslMode::VerifyFull);
+    assert_eq!(draft.password().expose_secret(), "super-secret");
+    assert!(!draft.url_display().contains("super-secret"));
+}
+
+#[test]
 fn new_profiles_derive_catalog_scope_defaults() {
     let postgres = valid_postgres_draft().validate(&[]).unwrap().profile;
     assert_eq!(
@@ -878,6 +932,8 @@ fn driver_cycle_includes_sql_server_before_sqlite() {
     assert_eq!(state.draft.as_ref().unwrap().kind, DatabaseKind::SqlServer);
     state.cycle(1);
     assert_eq!(state.draft.as_ref().unwrap().kind, DatabaseKind::Sqlite);
+    state.cycle(1);
+    assert_eq!(state.draft.as_ref().unwrap().kind, DatabaseKind::ClickHouse);
     state.cycle(1);
     assert_eq!(state.draft.as_ref().unwrap().kind, DatabaseKind::Postgres);
 }

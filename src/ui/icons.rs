@@ -248,6 +248,7 @@ impl IconSet {
                 DatabaseKind::SqlServer => md::MD_DATABASE,
                 DatabaseKind::Sqlite => dev::DEV_SQLITE,
                 DatabaseKind::Redis => dev::DEV_REDIS,
+                DatabaseKind::ClickHouse => md::MD_DATABASE,
             },
             IconMode::Unicode => match kind {
                 DatabaseKind::Postgres => "PG",
@@ -257,6 +258,7 @@ impl IconSet {
                 DatabaseKind::SqlServer => "MS",
                 DatabaseKind::Sqlite => "SQ",
                 DatabaseKind::Redis => "RD",
+                DatabaseKind::ClickHouse => "CH",
             },
             IconMode::Ascii => match kind {
                 DatabaseKind::Postgres => "PG",
@@ -266,6 +268,7 @@ impl IconSet {
                 DatabaseKind::SqlServer => "MS",
                 DatabaseKind::Sqlite => "SQ",
                 DatabaseKind::Redis => "RD",
+                DatabaseKind::ClickHouse => "CH",
             },
         }
     }
@@ -278,6 +281,7 @@ impl IconSet {
             DatabaseKind::SqlServer => ratatui::style::Color::Rgb(13, 127, 228),
             DatabaseKind::Sqlite => ratatui::style::Color::Rgb(68, 184, 214),
             DatabaseKind::Redis => ratatui::style::Color::Rgb(220, 45, 45),
+            DatabaseKind::ClickHouse => ratatui::style::Color::Rgb(252, 199, 0),
         }
     }
 
@@ -303,6 +307,8 @@ impl IconSet {
                 CatalogKind::Table => md::MD_TABLE,
                 CatalogKind::View => md::MD_TABLE_EYE,
                 CatalogKind::MaterializedView => md::MD_TABLE_SYNC,
+                CatalogKind::Dictionary => md::MD_BOOK_MULTIPLE,
+                CatalogKind::Projection => md::MD_TABLE_ARROW_RIGHT,
                 CatalogKind::Column => md::MD_TABLE_COLUMN,
                 CatalogKind::Index => md::MD_FORMAT_LIST_NUMBERED,
                 CatalogKind::PrimaryKey => md::MD_KEY,
@@ -314,6 +320,7 @@ impl IconSet {
                 CatalogKind::Trigger => md::MD_LIGHTNING_BOLT,
                 CatalogKind::Sequence => md::MD_ORDER_NUMERIC_ASCENDING,
                 CatalogKind::Type => md::MD_SHAPE_OUTLINE,
+                CatalogKind::UserDefinedFunction => md::MD_FUNCTION,
             },
             IconMode::Unicode => match kind {
                 CatalogKind::Database => "◆",
@@ -321,6 +328,8 @@ impl IconSet {
                 CatalogKind::Table => "▦",
                 CatalogKind::View => "◈",
                 CatalogKind::MaterializedView => "◉",
+                CatalogKind::Dictionary => "▤",
+                CatalogKind::Projection => "⇥",
                 CatalogKind::Column => "│",
                 CatalogKind::Index => "#",
                 CatalogKind::PrimaryKey => "●",
@@ -332,6 +341,7 @@ impl IconSet {
                 CatalogKind::Trigger => "!",
                 CatalogKind::Sequence => "≡",
                 CatalogKind::Type => "τ",
+                CatalogKind::UserDefinedFunction => "ƒ",
             },
             IconMode::Ascii => match kind {
                 CatalogKind::Database => "DB",
@@ -339,6 +349,8 @@ impl IconSet {
                 CatalogKind::Table => "TB",
                 CatalogKind::View => "VW",
                 CatalogKind::MaterializedView => "MV",
+                CatalogKind::Dictionary => "DI",
+                CatalogKind::Projection => "PX",
                 CatalogKind::Column => "CL",
                 CatalogKind::Index => "IX",
                 CatalogKind::PrimaryKey => "PK",
@@ -350,6 +362,7 @@ impl IconSet {
                 CatalogKind::Trigger => "TG",
                 CatalogKind::Sequence => "SQ",
                 CatalogKind::Type => "TY",
+                CatalogKind::UserDefinedFunction => "UF",
             },
         }
     }

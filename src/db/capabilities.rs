@@ -84,6 +84,14 @@ impl DatabaseCapabilities {
                 manual_transactions: false,
                 cancellation: false,
             },
+            DatabaseKind::ClickHouse => Self {
+                catalog: true,
+                relation_ddl: false,
+                relation_edit: false,
+                monitoring: true,
+                manual_transactions: false,
+                cancellation: false,
+            },
         }
     }
 }

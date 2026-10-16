@@ -21,6 +21,56 @@ disable it at runtime.
 | SQL Server | Relational | Available; table/view mutation; complex children gated | Insert supports `OUTPUT`; update/delete require primary key | AUTO/MANUAL | Session close; open transaction rolls back | Not supported |
 | SQLite | Relational | Available; table/view DDL and catalog mutation | Rowid-table insert lookup; update/delete require primary key; table shape is gated | AUTO/MANUAL | Progress handler / close | Not applicable |
 | Redis | Key-value | No SQL catalog or DDL | Native key/value and collection mutation, separate from relation grid | No SQL transaction UI | Not applicable | Read-only `INFO` metrics |
+| ClickHouse | Relational | Available; database/table/view/MV and bounded native object catalog | Constrained table shape edits only; no general row editing | No manual transactions | Local request cancellation only; server query may continue | `system.events` counters and bounded `system.processes` |
+
+## ClickHouse
+
+ClickHouse uses the HTTP(S) interface, with `clickhouse://` defaulting to port
+8123 and `clickhouses://` defaulting to verified HTTPS on port 8443. The default
+database and user are `default`. TLS is never silently downgraded. Current
+adapter and deterministic live fixture coverage targets ClickHouse 25.8 LTS;
+other releases may differ in system-table columns and feature support.
+
+The catalog maps a database to LazyDB's schema namespace. It reads databases,
+tables, views, materialized views, dictionaries, SQL user-defined functions,
+columns, projections, indexes and checks where the server exposes them. Profile
+visible-object selections scope catalog and search requests. Type names are
+retained alongside values; values that cannot be represented safely by LazyDB's
+cell model remain textual instead of being silently narrowed.
+
+The SQL editor supports native ClickHouse statements through the HTTP endpoint.
+Grid query execution accepts one statement, normalizes its result format, and
+applies row/byte budgets. Multi-statement buffers are not a ClickHouse
+transaction: a completed prefix can already have taken effect, and a network
+failure after sending a statement may have an unknown remote outcome. The adapter
+does not advertise manual transactions. Relation-grid insert/update/delete is
+not advertised because ClickHouse sorting keys are not unique row identities.
+
+Structured catalog mutation preserves native engine, sorting, target and query
+definitions. Table editing is limited to a single rename, comment change, or
+appended simple column; other table shape changes fail closed. Ordinary views
+support rename/comment while retaining their query. Materialized-view target and
+engine are preserved; unsupported mutation controls remain gated. Dictionary
+definitions that could reveal external credentials are not rendered as replay
+DDL. User/role identity and grants are read from safe system columns; permission
+coverage is Partial, and structured principal GRANT/REVOKE and membership
+mutations are unavailable.
+
+Monitoring reads actual cumulative `Query`, `SelectQuery`, and `InsertQuery`
+counters from `system.events`; absent values remain absent. The process list reads
+at most `MAX_PROCESS_ROWS` (2,000) initial queries from `system.processes`, displays the full native
+`query_id`, and reports visibility as unknown because ClickHouse does not expose
+whether this user's permissions hide matching sessions. Permission denial is
+reported as restricted. It does not synthesize numeric PID values for
+ClickHouse queries. Cancelling a running request aborts the local HTTP task;
+this does not confirm that ClickHouse stopped executing the remote query.
+
+Agent and MCP query/search reuse the same ClickHouse adapter, catalog scope,
+read-only SQL classification, and explicit write policy. `SYSTEM`, `KILL`,
+`ALTER`, and unclassified settings statements remain denied by agent SQL policy.
+The server's own permissions remain authoritative. See the [ClickHouse test
+database guide](clickhouse-test-database.md) for the deterministic 25.8 fixture
+and forced-live test command.
 
 ## Users & Roles
 
@@ -40,6 +90,7 @@ other secrets are never read or reproduced.
 | Oracle | `all_users` plus `dba_roles` (falling back to `user_role_privs`, marked incomplete) | User and role names are namespaced in the native identity because they can collide; `DBMS_METADATA.GET_DDL` is not used for users because it embeds `IDENTIFIED BY VALUES` |
 | SQLite | Not applicable | The group expands to an explicit "SQLite does not support users or roles" notice and issues no account query |
 | Redis | Not applicable | No `Users & Roles` group is shown |
+| ClickHouse | `system.users`, `system.roles`, `system.grants`, and `system.role_grants`; cluster scope | Safe identity/grant columns only; permission and role-inherited coverage is Partial; structured GRANT/REVOKE/membership mutations are unavailable |
 
 ## Relation Data Mutation Matrix
 
@@ -74,6 +125,7 @@ their adapter tests pass.
 | SQL Server | Database + schema | Database, schema, table, view, sequence, principal | Database/schema/table/view/sequence/index/constraint/principal | Login, database user, and role have different scopes; batches matter |
 | SQLite | File database + attached aliases | File database, table, view, index, trigger | Table, view, index, trigger | No users/roles; complex table edits require a lossless rebuild plan |
 | Redis | Logical database + key namespace | Key and supported collection elements | Values, collection elements, and TTL where native semantics permit | Database number is not a creatable SQL catalog; streams are not freely editable |
+| ClickHouse | Database is schema | Database, table, view and materialized view slices | Table rename/comment/simple appended columns; view rename/comment; unsupported engine/shape changes gated | Preserve native engine, sorting and target definitions; no drop/create emulation |
 
 The implementation is deliberately staged. The current implementation status
 for the first mutation slice is:
@@ -112,7 +164,7 @@ mutation protocols even though they share the same Explorer action contract.
 
 ## Monitoring Dashboard
 
-The connection dashboard is available for PostgreSQL, MySQL, MariaDB, and Redis.
+The connection dashboard is available for PostgreSQL, MySQL, MariaDB, Redis, and ClickHouse.
 It collects read-only status counters and connection gauges; PostgreSQL, MySQL,
 and MariaDB also expose a bounded process list. SQLite and Oracle report
 monitoring as unsupported, while SQL Server's dashboard and process metrics are
@@ -121,9 +173,10 @@ not persisted. Counter rates use the elapsed time between valid samples;
 the first sample, missing fields, resets, restarts, and failed polls create a
 history gap rather than a fabricated rate.
 
-The process list is bounded to 2,000 rows and may be marked restricted when
-the database role cannot observe every session. Dashboard V1 does not cancel
-queries or terminate sessions.
+The process list is bounded to `MAX_PROCESS_ROWS` (2,000 rows) and is marked
+restricted when the database role cannot inspect it; ClickHouse visibility is
+otherwise unknown because the server does not expose a completeness flag. Dashboard cancellation
+aborts the local request and does not confirm remote query termination.
 
 | Driver | Server/version gate | Namespace model | Catalog groups | Metadata support |
 | --- | --- | --- | --- | --- |
@@ -134,8 +187,9 @@ queries or terminate sessions.
 | SQL Server | SQL Server 2012 or newer | Database + schema | Tables, views, functions, procedures, sequences, triggers; relation children include columns, indexes, keys, and foreign keys | Type family, defaults, identity, computed/generated expressions, numeric precision/scale, character length, collation, comments, and rowversion metadata |
 | SQLite | SQLite metadata support through native schema tables; no server-version gate | Database + attached schema aliases | Tables, views, triggers | Default expressions and hidden-column metadata; unsupported fields are represented as unsupported |
 | Redis | Redis server; logical database selected by profile | Logical database + key namespace | Keys and native collection metadata | Key type, TTL, memory, and value-shape metadata; relational catalog fields are not applicable |
+| ClickHouse | HTTP interface; supported and tested against ClickHouse 25.8 LTS | Database is schema | Tables, views, materialized views, dictionaries, functions; projections are table children | Names, engine/native kind, comments, columns, defaults, and native definition metadata where available |
 
-PostgreSQL, MySQL, MariaDB, and SQLite advertise lazy children. SQLite opens a pool with
+PostgreSQL, MySQL, MariaDB, SQLite, and ClickHouse advertise lazy children. SQLite opens a pool with
 exactly one physical connection; SQL Server loads its supported catalog groups
 without lazy child requests.
 

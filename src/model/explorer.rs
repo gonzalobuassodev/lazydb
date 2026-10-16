@@ -27,6 +27,8 @@ fn group_label(group: ObjectGroup) -> &'static str {
         ObjectGroup::Tables => "Tables",
         ObjectGroup::Views => "Views",
         ObjectGroup::MaterializedViews => "Materialized views",
+        ObjectGroup::Dictionaries => "Dictionaries",
+        ObjectGroup::UserDefinedFunctions => "User defined functions",
         ObjectGroup::Sequences => "Sequences",
         ObjectGroup::Functions => "Functions",
         ObjectGroup::Procedures => "Procedures",
@@ -59,6 +61,7 @@ pub enum ProfileRegion {
 pub enum ExplorerOwnerId {
     Profile(Uuid),
     Catalog(CatalogId),
+    Projections(CatalogId),
     Group {
         parent: CatalogId,
         group: ObjectGroup,
@@ -69,7 +72,9 @@ impl ExplorerOwnerId {
     pub const fn profile_id(&self) -> Uuid {
         match self {
             Self::Profile(profile_id) => *profile_id,
-            Self::Catalog(id) | Self::Group { parent: id, .. } => id.profile_id(),
+            Self::Catalog(id) | Self::Projections(id) | Self::Group { parent: id, .. } => {
+                id.profile_id()
+            }
         }
     }
 
@@ -77,6 +82,7 @@ impl ExplorerOwnerId {
         match self {
             Self::Profile(profile_id) => ExplorerNodeId::Profile(*profile_id),
             Self::Catalog(id) => ExplorerNodeId::Catalog(id.clone()),
+            Self::Projections(id) => ExplorerNodeId::ProjectionGroup(id.clone()),
             Self::Group { parent, group } => ExplorerNodeId::Group {
                 parent: parent.clone(),
                 group: *group,
@@ -99,6 +105,7 @@ pub enum ExplorerNodeId {
         region: ProfileRegion,
     },
     Catalog(CatalogId),
+    ProjectionGroup(CatalogId),
     Group {
         parent: CatalogId,
         group: ObjectGroup,
@@ -170,6 +177,7 @@ pub fn resolve_mutation_intent(
         | ExplorerNodeId::Status { .. }
         | ExplorerNodeId::LoadMore { .. }
         | ExplorerNodeId::Empty { .. }
+        | ExplorerNodeId::ProjectionGroup(_)
         | ExplorerNodeId::Group { .. } => None,
     }
 }
@@ -179,6 +187,7 @@ impl ExplorerNodeId {
         match self {
             Self::Profile(profile_id) => Some(*profile_id),
             Self::Catalog(id) => Some(id.profile_id()),
+            Self::ProjectionGroup(id) => Some(id.profile_id()),
             Self::Group { parent, .. } => Some(parent.profile_id()),
             Self::Status { owner, .. }
             | Self::LoadMore { parent: owner, .. }
@@ -359,6 +368,12 @@ impl CatalogTree {
         if entry.kind.is_relation() {
             return Some(&entry.id);
         }
+        if entry.kind == CatalogKind::Projection {
+            let table_id = entry.parent_id.as_ref()?;
+            let table = self.entries.get(table_id)?;
+            return (table.kind == CatalogKind::Table && table.id.profile_id() == self.profile_id)
+                .then_some(&table.id);
+        }
         if !entry.kind.is_relation_child() {
             return None;
         }
@@ -383,6 +398,9 @@ impl CatalogTree {
                 return (relation.kind.is_relation()
                     && relation.id.profile_id() == self.profile_id)
                     .then_some(&relation.id);
+            }
+            if current_entry.kind == CatalogKind::Table {
+                return Some(&current_entry.id);
             }
             if !current_entry.kind.is_relation_child() {
                 return None;
@@ -533,6 +551,14 @@ impl CatalogTree {
         self.replace_page(&ExplorerOwnerId::Catalog(parent.clone()), entries)
     }
 
+    pub fn replace_projections(
+        &mut self,
+        table: &CatalogId,
+        entries: Vec<CatalogEntry>,
+    ) -> Result<Vec<CatalogId>, CatalogTreeError> {
+        self.replace_page(&ExplorerOwnerId::Projections(table.clone()), entries)
+    }
+
     pub fn replace_roots(
         &mut self,
         entries: Vec<CatalogEntry>,
@@ -551,6 +577,16 @@ impl CatalogTree {
         let removal_roots = match owner {
             ExplorerOwnerId::Profile(_) => self.roots.clone(),
             ExplorerOwnerId::Catalog(parent) => self.children(parent).to_vec(),
+            ExplorerOwnerId::Projections(parent) => self
+                .children(parent)
+                .iter()
+                .filter(|id| {
+                    self.entries
+                        .get(*id)
+                        .is_some_and(|entry| entry.kind == CatalogKind::Projection)
+                })
+                .cloned()
+                .collect(),
             ExplorerOwnerId::Group { parent, group } => {
                 self.group_children(parent, *group).to_vec()
             }
@@ -591,6 +627,20 @@ impl CatalogTree {
         Ok(())
     }
 
+    pub fn append_projections(
+        &mut self,
+        table: &CatalogId,
+        entries: Vec<CatalogEntry>,
+    ) -> Result<(), CatalogTreeError> {
+        self.append_page(&ExplorerOwnerId::Projections(table.clone()), entries)
+    }
+
+    pub fn is_projection_table(&self, table: &CatalogId) -> bool {
+        self.entries
+            .get(table)
+            .is_some_and(|entry| entry.kind == CatalogKind::Table)
+    }
+
     pub fn remove_subtree(&mut self, root: &CatalogId) -> Result<Vec<CatalogId>, CatalogTreeError> {
         self.validate_profile(root.profile_id())?;
         if !self.entries.contains_key(root) {
@@ -616,6 +666,16 @@ impl CatalogTree {
         Ok(removed)
     }
 
+    pub fn remove_projection(
+        &mut self,
+        projection: &CatalogId,
+    ) -> Result<Vec<CatalogId>, CatalogTreeError> {
+        if projection.kind != CatalogKind::Projection {
+            return Ok(Vec::new());
+        }
+        self.remove_subtree(projection)
+    }
+
     fn validate_profile(&self, found: Uuid) -> Result<(), CatalogTreeError> {
         if found == self.profile_id {
             Ok(())
@@ -632,6 +692,18 @@ impl CatalogTree {
             ExplorerOwnerId::Profile(_) => Ok(()),
             ExplorerOwnerId::Catalog(id) => {
                 if self.entries.contains_key(id) {
+                    Ok(())
+                } else {
+                    Err(CatalogTreeError::MissingOwner { id: id.clone() })
+                }
+            }
+            ExplorerOwnerId::Projections(id) => {
+                if id.kind == CatalogKind::Table
+                    && self
+                        .entries
+                        .get(id)
+                        .is_some_and(|entry| entry.kind == CatalogKind::Table)
+                {
                     Ok(())
                 } else {
                     Err(CatalogTreeError::MissingOwner { id: id.clone() })
@@ -723,6 +795,13 @@ impl CatalogTree {
             let belongs = match owner {
                 ExplorerOwnerId::Profile(_) => entry.parent_id.is_none(),
                 ExplorerOwnerId::Catalog(parent) => entry.parent_id.as_ref() == Some(parent),
+                ExplorerOwnerId::Projections(parent) => {
+                    entry.kind == CatalogKind::Projection
+                        && entry.parent_id.as_ref() == Some(parent)
+                        && entry.relation_id.as_ref() == Some(parent)
+                        && entry.id.native_path.len() == parent.native_path.len() + 1
+                        && entry.id.native_path.starts_with(&parent.native_path)
+                }
                 ExplorerOwnerId::Group { parent, group } => {
                     entry.parent_id.as_ref() == Some(parent) && group.contains_kind(entry.kind)
                 }
@@ -781,7 +860,6 @@ impl CatalogTree {
     fn remove_ids(&mut self, removed: &[CatalogId], removed_set: &HashSet<CatalogId>) {
         self.search_injected.retain(|id| !removed_set.contains(id));
         self.roots.retain(|id| !removed_set.contains(id));
-
         let mut retained_parents = HashSet::new();
         let mut retained_group_parents = HashSet::new();
         for id in removed {
@@ -939,6 +1017,26 @@ impl ExplorerProfileState {
         self.load_errors.remove(&owner);
         self.load_states
             .insert(owner, ExplorerLoadState::Stale { next_cursor });
+        if let CatalogTarget::RelationChildren { relation } = target
+            && relation.kind == CatalogKind::Table
+            && self.catalog.is_projection_table(relation)
+        {
+            let projection_owner = ExplorerOwnerId::Projections(relation.clone());
+            let projection_cursor = match self.load_states.get(&projection_owner) {
+                Some(ExplorerLoadState::Loaded { next_cursor })
+                | Some(ExplorerLoadState::Stale { next_cursor }) => next_cursor.clone(),
+                _ => None,
+            };
+            self.pending_requests.remove(&projection_owner);
+            self.previous_load_states.remove(&projection_owner);
+            self.load_errors.remove(&projection_owner);
+            self.load_states.insert(
+                projection_owner,
+                ExplorerLoadState::Stale {
+                    next_cursor: projection_cursor,
+                },
+            );
+        }
     }
 
     pub fn recover_pending_requests(&mut self) -> Vec<CatalogTarget> {
@@ -966,6 +1064,7 @@ pub fn owner_for_target(profile_id: Uuid, target: &CatalogTarget) -> ExplorerOwn
             parent: schema.clone(),
             group: *group,
         },
+        CatalogTarget::ProjectionChildren { table } => ExplorerOwnerId::Projections(table.clone()),
         CatalogTarget::RelationChildren { relation } => ExplorerOwnerId::Catalog(relation.clone()),
     }
 }
@@ -1048,6 +1147,7 @@ fn search_group(kind: CatalogKind) -> Option<ObjectGroup> {
         CatalogKind::Table => Some(ObjectGroup::Tables),
         CatalogKind::View => Some(ObjectGroup::Views),
         CatalogKind::MaterializedView => Some(ObjectGroup::MaterializedViews),
+        CatalogKind::Dictionary => Some(ObjectGroup::Dictionaries),
         CatalogKind::Sequence => Some(ObjectGroup::Sequences),
         CatalogKind::Function => Some(ObjectGroup::Functions),
         CatalogKind::Procedure => Some(ObjectGroup::Procedures),
@@ -1072,6 +1172,15 @@ fn append_filtered_search_rows(
     let Some(entry) = profile.catalog.get(id) else {
         return;
     };
+    if entry.kind == CatalogKind::Table && profile.kind == DatabaseKind::ClickHouse {
+        let projection_node = ExplorerNodeId::ProjectionGroup(id.clone());
+        if included.contains(&projection_node) {
+            rows.push(VisibleExplorerNode {
+                id: projection_node,
+                depth: depth + 1,
+            });
+        }
+    }
     if entry.kind.is_relation() {
         return;
     }
@@ -1124,6 +1233,7 @@ impl ExplorerTreeState {
                         .find(|principal| principal.id == *entry)
                 })
                 .map(|principal| principal.name.clone()),
+            ExplorerNodeId::ProjectionGroup(_) => Some("Projections".to_owned()),
             ExplorerNodeId::EmptyProfiles
             | ExplorerNodeId::Others
             | ExplorerNodeId::Status { .. }
@@ -1149,7 +1259,7 @@ impl ExplorerTreeState {
         let mut included = HashSet::new();
         let mut matches = HashSet::new();
         for entry in profile.catalog.entries().values() {
-            if entry.kind.is_relation_child()
+            if (entry.kind.is_relation_child() && entry.kind != CatalogKind::Projection)
                 || entry
                     .relation_id
                     .as_ref()
@@ -1173,7 +1283,17 @@ impl ExplorerTreeState {
             }
             matches.insert(ExplorerNodeId::Catalog(entry.id.clone()));
             included.insert(ExplorerNodeId::Catalog(entry.id.clone()));
+            if entry.kind == CatalogKind::Projection
+                && let Some(table) = entry.parent_id.as_ref()
+            {
+                included.insert(ExplorerNodeId::ProjectionGroup(table.clone()));
+            }
             let mut current = entry.id.clone();
+            if entry.kind == CatalogKind::Projection
+                && let Some(table) = entry.parent_id.as_ref()
+            {
+                included.insert(ExplorerNodeId::ProjectionGroup(table.clone()));
+            }
             while let Some(parent) = profile.catalog.parent(&current).cloned() {
                 included.insert(ExplorerNodeId::Catalog(parent.clone()));
                 if parent.kind == CatalogKind::Schema
@@ -1641,6 +1761,13 @@ impl ExplorerTreeState {
                 .get(&id.profile_id())
                 .and_then(|profile| profile.catalog.get(id))
                 .is_some_and(|entry| entry.expandable),
+            ExplorerNodeId::ProjectionGroup(table) => self
+                .profiles
+                .get(&table.profile_id())
+                .is_some_and(|profile| {
+                    profile.kind == DatabaseKind::ClickHouse
+                        && profile.catalog.is_projection_table(table)
+                }),
             ExplorerNodeId::Group { parent, group } => self
                 .profiles
                 .get(&parent.profile_id())
@@ -2054,6 +2181,9 @@ impl ExplorerTreeState {
                 let Some(parent) = entry.parent_id.as_ref() else {
                     return Some(ExplorerNodeId::Profile(id.profile_id()));
                 };
+                if entry.kind == CatalogKind::Projection {
+                    return Some(ExplorerNodeId::ProjectionGroup(parent.clone()));
+                }
                 if parent.kind == CatalogKind::Schema
                     && let Some(group) = object_group(entry.kind)
                     && profile.catalog.group_state(parent, group).is_some()
@@ -2065,6 +2195,7 @@ impl ExplorerTreeState {
                 }
                 Some(ExplorerNodeId::Catalog(parent.clone()))
             }
+            ExplorerNodeId::ProjectionGroup(table) => Some(ExplorerNodeId::Catalog(table.clone())),
             ExplorerNodeId::Group { parent, .. } => Some(ExplorerNodeId::Catalog(parent.clone())),
             ExplorerNodeId::RedisDatabase { profile_id, .. } => {
                 Some(ExplorerNodeId::Profile(*profile_id))
@@ -2123,6 +2254,13 @@ impl ExplorerTreeState {
                 .profiles
                 .get(&id.profile_id())
                 .is_some_and(|profile| profile.catalog.get(id).is_some()),
+            ExplorerNodeId::ProjectionGroup(table) => self
+                .profiles
+                .get(&table.profile_id())
+                .is_some_and(|profile| {
+                    profile.kind == DatabaseKind::ClickHouse
+                        && profile.catalog.is_projection_table(table)
+                }),
             ExplorerNodeId::Group { parent, group } => self
                 .profiles
                 .get(&parent.profile_id())
@@ -2182,6 +2320,11 @@ impl ExplorerTreeState {
                 .profiles
                 .get(&id.profile_id())
                 .is_some_and(|profile| profile.catalog.get(id).is_some()),
+            ExplorerOwnerId::Projections(id) => {
+                self.profiles.get(&id.profile_id()).is_some_and(|profile| {
+                    profile.catalog.get(id).is_some() && id.kind == CatalogKind::Table
+                })
+            }
             ExplorerOwnerId::Group { parent, group } => self
                 .profiles
                 .get(&parent.profile_id())
@@ -2201,6 +2344,19 @@ impl ExplorerTreeState {
                     Some(profile.catalog.children(id).len())
                 }
             }
+            ExplorerOwnerId::Projections(id) => Some(
+                profile
+                    .catalog
+                    .children(id)
+                    .iter()
+                    .filter(|child| {
+                        profile
+                            .catalog
+                            .get(child)
+                            .is_some_and(|entry| entry.kind == CatalogKind::Projection)
+                    })
+                    .count(),
+            ),
             ExplorerOwnerId::Group { parent, group } => {
                 Some(profile.catalog.group_children(parent, *group).len())
             }
@@ -2214,6 +2370,9 @@ impl ExplorerTreeState {
         let mut chain = vec![selected.clone()];
         match selected {
             ExplorerNodeId::Catalog(id) => self.append_catalog_ancestors(id, &mut chain),
+            ExplorerNodeId::ProjectionGroup(table) => {
+                self.append_catalog_ancestors(table, &mut chain)
+            }
             ExplorerNodeId::Group { parent, .. } => {
                 self.append_catalog_ancestors(parent, &mut chain)
             }
@@ -2224,6 +2383,10 @@ impl ExplorerTreeState {
                     chain.push(ExplorerNodeId::Profile(*profile_id));
                 }
                 ExplorerOwnerId::Catalog(id) => self.append_catalog_ancestors(id, &mut chain),
+                ExplorerOwnerId::Projections(id) => {
+                    chain.push(ExplorerNodeId::ProjectionGroup(id.clone()));
+                    self.append_catalog_ancestors(id, &mut chain)
+                }
                 ExplorerOwnerId::Group { parent, group } => {
                     chain.push(ExplorerNodeId::Group {
                         parent: parent.clone(),
@@ -2385,13 +2548,61 @@ impl<'a> Projection<'a> {
         } else {
             let children = profile.catalog.children(id);
             for child in children {
+                if entry.kind == CatalogKind::Table
+                    && profile.kind == DatabaseKind::ClickHouse
+                    && profile
+                        .catalog
+                        .get(child)
+                        .is_some_and(|entry| entry.kind == CatalogKind::Projection)
+                {
+                    continue;
+                }
                 self.append_catalog(profile, child, depth + 1);
+            }
+            if entry.kind == CatalogKind::Table && profile.kind == DatabaseKind::ClickHouse {
+                let projection_node = ExplorerNodeId::ProjectionGroup(id.clone());
+                self.push(projection_node.clone(), depth + 1);
+                if self.explorer.expanded.contains(&projection_node) {
+                    let projection_children = profile
+                        .catalog
+                        .children(id)
+                        .iter()
+                        .filter(|child| {
+                            profile
+                                .catalog
+                                .get(child)
+                                .is_some_and(|entry| entry.kind == CatalogKind::Projection)
+                        })
+                        .cloned()
+                        .collect::<Vec<_>>();
+                    self.append_state_rows(
+                        profile,
+                        &ExplorerOwnerId::Projections(id.clone()),
+                        depth + 2,
+                        projection_children.len(),
+                    );
+                    for child in projection_children {
+                        self.append_catalog(profile, &child, depth + 2);
+                    }
+                }
             }
             self.append_state_rows(
                 profile,
                 &ExplorerOwnerId::Catalog(id.clone()),
                 depth + 1,
-                children.len(),
+                if entry.kind == CatalogKind::Table && profile.kind == DatabaseKind::ClickHouse {
+                    children
+                        .iter()
+                        .filter(|child| {
+                            profile
+                                .catalog
+                                .get(child)
+                                .is_some_and(|entry| entry.kind != CatalogKind::Projection)
+                        })
+                        .count()
+                } else {
+                    children.len()
+                },
             );
         }
     }
@@ -2496,10 +2707,12 @@ fn valid_parent(child: CatalogKind, parent: CatalogKind) -> bool {
         CatalogKind::Table
         | CatalogKind::View
         | CatalogKind::MaterializedView
+        | CatalogKind::Dictionary
         | CatalogKind::Function
         | CatalogKind::Procedure
         | CatalogKind::Sequence
         | CatalogKind::Type => parent == CatalogKind::Schema,
+        CatalogKind::UserDefinedFunction => parent == CatalogKind::Schema,
         CatalogKind::Trigger => parent == CatalogKind::Schema || parent.is_relation(),
         CatalogKind::Column
         | CatalogKind::Index
@@ -2507,6 +2720,7 @@ fn valid_parent(child: CatalogKind, parent: CatalogKind) -> bool {
         | CatalogKind::UniqueConstraint
         | CatalogKind::ForeignKey
         | CatalogKind::CheckConstraint => parent.is_relation(),
+        CatalogKind::Projection => parent == CatalogKind::Table,
     }
 }
 
@@ -2515,8 +2729,10 @@ fn object_group(kind: CatalogKind) -> Option<ObjectGroup> {
         CatalogKind::Table => Some(ObjectGroup::Tables),
         CatalogKind::View => Some(ObjectGroup::Views),
         CatalogKind::MaterializedView => Some(ObjectGroup::MaterializedViews),
+        CatalogKind::Dictionary => Some(ObjectGroup::Dictionaries),
         CatalogKind::Sequence => Some(ObjectGroup::Sequences),
         CatalogKind::Function => Some(ObjectGroup::Functions),
+        CatalogKind::UserDefinedFunction => Some(ObjectGroup::UserDefinedFunctions),
         CatalogKind::Procedure => Some(ObjectGroup::Procedures),
         CatalogKind::Type => Some(ObjectGroup::Types),
         CatalogKind::Trigger => Some(ObjectGroup::Triggers),
@@ -2527,7 +2743,8 @@ fn object_group(kind: CatalogKind) -> Option<ObjectGroup> {
         | CatalogKind::PrimaryKey
         | CatalogKind::UniqueConstraint
         | CatalogKind::ForeignKey
-        | CatalogKind::CheckConstraint => None,
+        | CatalogKind::CheckConstraint
+        | CatalogKind::Projection => None,
     }
 }
 

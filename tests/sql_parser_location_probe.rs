@@ -7,6 +7,7 @@ fn dialect(dialect: SqlDialect) -> &'static dyn sqlparser::dialect::Dialect {
         SqlDialect::MySql | SqlDialect::MariaDb => &sqlparser::dialect::MySqlDialect {},
         SqlDialect::SqlServer => &sqlparser::dialect::MsSqlDialect {},
         SqlDialect::Sqlite => &sqlparser::dialect::SQLiteDialect {},
+        SqlDialect::ClickHouse => &sqlparser::dialect::ClickHouseDialect {},
         SqlDialect::Generic | SqlDialect::Oracle => &sqlparser::dialect::GenericDialect {},
     }
 }

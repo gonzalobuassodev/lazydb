@@ -120,6 +120,7 @@ async fn mariadb_explorer_mutation_plans_execute_and_refresh_catalog() {
         security_invoker: lazydb::db::catalog_mutation::ViewOption::unavailable("unsupported"),
         check_option: lazydb::db::catalog_mutation::ViewOption::unavailable("unsupported"),
         focus: lazydb::model::catalog_editor::CatalogFormFocus::Name,
+        clickhouse_native: None,
     };
     view.name.set(&view_name);
     view.schema.set(&database_name);

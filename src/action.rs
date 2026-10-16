@@ -308,6 +308,7 @@ pub enum Action {
     CatalogMutationFailed {
         plan: CatalogMutationPlan,
         message: String,
+        outcome_unknown: bool,
     },
     CatalogObjectDefinitionLoaded {
         request: CatalogObjectDefinitionRequest,

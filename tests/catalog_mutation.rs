@@ -21,6 +21,86 @@ use lazydb::{
 };
 use uuid::Uuid;
 
+#[test]
+fn clickhouse_table_create_and_drop_plans_quote_identity_and_keep_native_options() {
+    use lazydb::db::{
+        catalog_drop::{CatalogDropExecutionTarget, CatalogDropRequest},
+        clickhouse::ClickHouseAdapter,
+    };
+    use lazydb::profile::DatabaseKind;
+
+    let profile_id = Uuid::new_v4();
+    let connection = ConnectionIdentity {
+        profile_id,
+        generation: 1,
+    };
+    let schema = CatalogId::new(profile_id, CatalogKind::Schema, ["analytics", "analytics"]);
+    let request = CatalogMutationRequest::new(
+        connection,
+        1,
+        0,
+        CatalogMutationMode::Create,
+        CatalogMutationAnchor::Group {
+            schema: schema.clone(),
+            group: ObjectGroup::Tables,
+        },
+        CatalogObjectType::Catalog(CatalogKind::Table),
+    )
+    .unwrap()
+    .with_current_database("default");
+    let mut draft = TableDraft::new_for_database("analytics", DatabaseKind::ClickHouse);
+    draft.name = "events`raw".into();
+    draft.columns[0].name = "event id".into();
+    draft.columns[0].native_type = "UInt64".into();
+    draft.columns[0].nullable = false;
+    draft.clickhouse_order_by = "`event id`".into();
+    draft.clickhouse_partition_by = "toYYYYMM(ts)".into();
+    let plan = ClickHouseAdapter::plan_catalog_mutation(
+        request,
+        CatalogDraft::Table(draft),
+        None,
+        "default",
+    )
+    .unwrap();
+    assert_eq!(
+        plan.execution_mode,
+        CatalogMutationExecutionMode::Autocommit
+    );
+    assert_eq!(plan.statements(), &["CREATE TABLE `analytics`.`events``raw` (`event id` UInt64) ENGINE = MergeTree ORDER BY `event id` PARTITION BY toYYYYMM(ts)".to_owned()]);
+
+    let table_id = CatalogId::new(
+        profile_id,
+        CatalogKind::Table,
+        ["analytics", "analytics", "events`raw"],
+    );
+    let entry = CatalogEntry::relation(
+        table_id.clone(),
+        schema,
+        QualifiedName {
+            database: Some("analytics".into()),
+            schema: Some("analytics".into()),
+            object: "events`raw".into(),
+        },
+        "MergeTree",
+        OptionalMetadata::Supported(None),
+        true,
+    )
+    .unwrap();
+    let drop_request = CatalogDropRequest::new(connection, table_id, 2).with_entry(entry.clone());
+    let drop = ClickHouseAdapter::plan_catalog_drop(drop_request, &entry).unwrap();
+    assert_eq!(drop.sql(), "DROP TABLE `analytics`.`events``raw`");
+    assert_eq!(
+        drop.execution_target,
+        CatalogDropExecutionTarget::CurrentConnection
+    );
+
+    let capabilities = ClickHouseAdapter::catalog_mutation_capabilities();
+    assert!(matches!(
+        capabilities.create_availability(CatalogObjectType::Catalog(CatalogKind::Table)),
+        Some(CatalogMutationAvailability::Available)
+    ));
+}
+
 fn id(profile: Uuid, kind: CatalogKind, path: &[&str]) -> CatalogId {
     CatalogId::new(profile, kind, path.iter().copied())
 }
@@ -248,6 +328,7 @@ fn postgres_materialized_view_draft_disables_query_edits_after_loading() {
         tablespace: OptionalMetadata::Supported(None),
         populated: false,
         baseline_fingerprint: "sha256:x".into(),
+        clickhouse_native: None,
     });
     assert!(!draft.query_editable);
     assert!(!draft.with_data);
@@ -283,6 +364,7 @@ fn postgres_materialized_view_create_plan_refreshes_materialized_view_group_and_
         with_data: false,
         focus: lazydb::model::catalog_editor::CatalogFormFocus::Name,
         query_editable: true,
+        clickhouse_native: None,
     };
     let plan = lazydb::db::postgres::PostgresAdapter::plan_catalog_mutation(
         request,
@@ -310,6 +392,7 @@ fn postgres_materialized_view_create_plan_refreshes_materialized_view_group_and_
         tablespace: OptionalMetadata::Supported(None),
         populated: false,
         baseline_fingerprint: "sha256:x".into(),
+        clickhouse_native: None,
     });
 }
 
@@ -1151,6 +1234,7 @@ fn postgres_view_draft_rejects_trailing_statements_and_plans_safe_replace() {
         security_invoker: lazydb::db::catalog_mutation::ViewOption::unavailable("not tested"),
         check_option: lazydb::db::catalog_mutation::ViewOption::unavailable("not tested"),
         focus: lazydb::model::catalog_editor::CatalogFormFocus::Name,
+        clickhouse_native: None,
     };
     assert!(draft.validate().is_err());
     draft.query = "SELECT 1".into();
@@ -1187,6 +1271,7 @@ fn postgres_view_options_are_version_gated_and_render_exact_syntax() {
         security_invoker: lazydb::db::catalog_mutation::ViewOption::unavailable("not supported"),
         check_option: lazydb::db::catalog_mutation::ViewOption::available(Some("LOCAL".into())),
         focus: lazydb::model::catalog_editor::CatalogFormFocus::Name,
+        clickhouse_native: None,
     };
     let profile = Uuid::new_v4();
     let request = CatalogMutationRequest::new(
@@ -1302,6 +1387,14 @@ fn table_draft(name: &str, columns: Vec<ColumnDraft>) -> CatalogDraft {
         column_editor: None,
         indexes: vec![],
         constraints: vec![],
+        clickhouse_engine: "MergeTree".into(),
+        clickhouse_order_by: "".into(),
+        clickhouse_partition_by: "".into(),
+        clickhouse_ttl: "".into(),
+        clickhouse_native_ddl: None,
+        clickhouse_baseline_fingerprint: None,
+        clickhouse_baseline_comment: None,
+        clickhouse_baseline_columns: None,
     })
 }
 

@@ -388,6 +388,7 @@ impl MySqlAdapter {
             server_generation: 1,
             values,
             redis_details: None,
+            visibility: crate::db::monitor::MonitorVisibility::Unknown,
         })
     }
 
@@ -428,6 +429,7 @@ impl MySqlAdapter {
                     .map_err(decode_error)?;
                 Ok(crate::model::dashboard::ProcessRow {
                     id: row.try_get("Id").map_err(decode_error)?,
+                    native_id: None,
                     user: sanitize_terminal_text(
                         &row.try_get::<String, _>("User").map_err(decode_error)?,
                     ),
@@ -1078,6 +1080,7 @@ impl MySqlAdapter {
                 security_invoker: ViewOption::unavailable("not applicable to MySQL"),
                 check_option: ViewOption::unavailable("not mapped for MySQL"),
                 baseline_fingerprint: format!("mysql:view:{database}:{schema}:{name}:{query}"),
+                clickhouse_native: None,
             }));
         }
         if request.object.kind != CatalogKind::Table {
@@ -1385,6 +1388,9 @@ impl MySqlAdapter {
                 )
                 .await
             }
+            CatalogTarget::ProjectionChildren { .. } => Err(DatabaseError::unsupported(
+                "projection catalog target is not supported by MySQL",
+            )),
             CatalogTarget::RelationChildren { relation } => {
                 self.load_relation_children_page(
                     &mut transaction,
@@ -4311,6 +4317,8 @@ fn add_memberships(
 fn group_sort_key(group: ObjectGroup) -> &'static str {
     match group {
         ObjectGroup::Tables => "00:tables",
+        ObjectGroup::Dictionaries => "08:dictionaries",
+        ObjectGroup::UserDefinedFunctions => "09:user_defined_functions",
         ObjectGroup::Views => "01:views",
         ObjectGroup::Functions => "02:functions",
         ObjectGroup::Procedures => "03:procedures",

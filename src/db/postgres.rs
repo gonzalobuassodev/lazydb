@@ -1141,6 +1141,7 @@ LIMIT 2001
             server_generation: monitor_timestamp(&row, "server_generation")?,
             values,
             redis_details: None,
+            visibility: crate::db::monitor::MonitorVisibility::Unknown,
         })
     }
 
@@ -1175,6 +1176,7 @@ LIMIT 2001
             .map(|row| {
                 Ok(crate::model::dashboard::ProcessRow {
                     id: row.try_get::<i32, _>("pid").map_err(decode_error)? as u64,
+                    native_id: None,
                     user: sanitize_terminal_text(
                         &row.try_get::<Option<String>, _>("user_name")
                             .map_err(decode_error)?
@@ -4141,6 +4143,9 @@ LIMIT 2001
                 self.load_object_page(&mut transaction, request, schema, *group)
                     .await
             }
+            CatalogTarget::ProjectionChildren { .. } => Err(DatabaseError::unsupported(
+                "projection catalog target is not supported by PostgreSQL",
+            )),
             CatalogTarget::RelationChildren { relation } => {
                 self.load_relation_children_page(&mut transaction, request, relation)
                     .await
@@ -4812,6 +4817,7 @@ LIMIT 2001
                 ViewOption::unavailable("view check options require PostgreSQL 9.4 or newer")
             },
             baseline_fingerprint: format!("sha256:{:x}", hasher.finalize()),
+            clickhouse_native: None,
         }))
     }
 
@@ -4853,6 +4859,7 @@ LIMIT 2001
                 tablespace: OptionalMetadata::Supported(tablespace),
                 populated,
                 baseline_fingerprint: format!("sha256:{:x}", hasher.finalize()),
+                clickhouse_native: None,
             },
         ))
     }
@@ -5224,6 +5231,18 @@ LIMIT 2001
                 "table",
                 true,
             ),
+            ObjectGroup::Dictionaries => {
+                return Err(DatabaseError::unsupported_catalog_target(
+                    DatabaseKind::Postgres,
+                    &request.key.target,
+                ));
+            }
+            ObjectGroup::UserDefinedFunctions => {
+                return Err(DatabaseError::unsupported_catalog_target(
+                    DatabaseKind::Postgres,
+                    &request.key.target,
+                ));
+            }
             ObjectGroup::Views => (
                 "pg_class c",
                 "c.relkind='v'",
@@ -7345,6 +7364,8 @@ fn add_memberships(
 fn group_sort_key(group: ObjectGroup) -> &'static str {
     match group {
         ObjectGroup::Tables => "00:tables",
+        ObjectGroup::Dictionaries => "08:dictionaries",
+        ObjectGroup::UserDefinedFunctions => "09:user_defined_functions",
         ObjectGroup::Views => "01:views",
         ObjectGroup::MaterializedViews => "02:materialized_views",
         ObjectGroup::Sequences => "03:sequences",

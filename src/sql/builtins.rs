@@ -123,6 +123,64 @@ const SQLITE: &[Builtin] = &[
     },
 ];
 
+const CLICKHOUSE: &[Builtin] = &[
+    Builtin {
+        name: "arrayJoin",
+        kind: CompletionKind::Function,
+        detail: "arrayJoin(...)",
+    },
+    Builtin {
+        name: "count",
+        kind: CompletionKind::Function,
+        detail: "count()",
+    },
+    Builtin {
+        name: "countIf",
+        kind: CompletionKind::Function,
+        detail: "countIf(condition)",
+    },
+    Builtin {
+        name: "dictGet",
+        kind: CompletionKind::Function,
+        detail: "dictGet(...)",
+    },
+    Builtin {
+        name: "if",
+        kind: CompletionKind::Function,
+        detail: "if(condition, then, else)",
+    },
+    Builtin {
+        name: "length",
+        kind: CompletionKind::Function,
+        detail: "length(...)",
+    },
+    Builtin {
+        name: "now",
+        kind: CompletionKind::Function,
+        detail: "now()",
+    },
+    Builtin {
+        name: "toDate",
+        kind: CompletionKind::Function,
+        detail: "toDate(value)",
+    },
+    Builtin {
+        name: "toDateTime",
+        kind: CompletionKind::Function,
+        detail: "toDateTime(value)",
+    },
+    Builtin {
+        name: "toString",
+        kind: CompletionKind::Function,
+        detail: "toString(value)",
+    },
+    Builtin {
+        name: "uniqExact",
+        kind: CompletionKind::Function,
+        detail: "uniqExact(...)",
+    },
+];
+
 pub(super) fn expression_builtins(dialect: SqlDialect) -> impl Iterator<Item = Builtin> {
     COMMON
         .iter()
@@ -143,6 +201,7 @@ fn dialect_builtins(dialect: SqlDialect) -> &'static [Builtin] {
         SqlDialect::MySql | SqlDialect::MariaDb => MYSQL,
         SqlDialect::SqlServer => SQL_SERVER,
         SqlDialect::Sqlite => SQLITE,
+        SqlDialect::ClickHouse => CLICKHOUSE,
         SqlDialect::Generic | SqlDialect::Oracle => &[],
     }
 }
@@ -170,6 +229,7 @@ fn default_value_dialect_builtins(dialect: SqlDialect) -> &'static [Builtin] {
         | SqlDialect::MariaDb
         | SqlDialect::Sqlite
         | SqlDialect::Generic
-        | SqlDialect::Oracle => &[],
+        | SqlDialect::Oracle
+        | SqlDialect::ClickHouse => &[],
     }
 }

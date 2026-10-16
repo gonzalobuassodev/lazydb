@@ -904,6 +904,7 @@ impl MsSqlAdapter {
                         "SQL Server view check option mapping is not implemented",
                     ),
                     baseline_fingerprint,
+                    clickhouse_native: None,
                 }))
             }
             _ => Err(DatabaseError::configuration(
@@ -1169,6 +1170,9 @@ impl MsSqlAdapter {
                     self.load_object_page(request, schema, *group).await
                 }
             }
+            CatalogTarget::ProjectionChildren { .. } => Err(DatabaseError::unsupported(
+                "projection catalog target is not supported by SQL Server",
+            )),
             CatalogTarget::RelationChildren { relation } => {
                 self.load_relation_children_page(request, relation).await
             }

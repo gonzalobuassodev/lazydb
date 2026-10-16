@@ -1,7 +1,7 @@
 use sqlparser::{
     dialect::{
-        Dialect as ParserDialect, GenericDialect, MsSqlDialect, MySqlDialect, PostgreSqlDialect,
-        SQLiteDialect,
+        ClickHouseDialect, Dialect as ParserDialect, GenericDialect, MsSqlDialect, MySqlDialect,
+        PostgreSqlDialect, SQLiteDialect,
     },
     tokenizer::{Token, Tokenizer},
 };
@@ -36,6 +36,7 @@ pub fn format_sql(sql: &str, dialect: SqlDialect) -> Result<String, FormatError>
         SqlDialect::SqlServer => &MsSqlDialect {},
         SqlDialect::Sqlite => &SQLiteDialect {},
         SqlDialect::Generic | SqlDialect::Oracle => &GenericDialect {},
+        SqlDialect::ClickHouse => &ClickHouseDialect {},
     };
     let before = meaningful_tokens(parser_dialect, sql);
     let after = meaningful_tokens(parser_dialect, &formatted);

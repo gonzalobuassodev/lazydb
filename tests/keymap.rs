@@ -1466,12 +1466,14 @@ fn materialized_view_keymap_app() -> App {
                     with_data: true,
                     focus: lazydb::model::catalog_editor::CatalogFormFocus::Name,
                     query_editable: true,
+                    clickhouse_native: None,
                 },
             ),
         ),
         baseline: None,
         plan: None,
         error: None,
+        outcome_unknown: false,
         owner_picker: Default::default(),
         preview_scroll: 0,
     });
@@ -1798,6 +1800,7 @@ fn constraint_editor_maps_field_navigation_and_text_input() {
         baseline: None,
         plan: None,
         error: None,
+        outcome_unknown: false,
         owner_picker: Default::default(),
         preview_scroll: 0,
         draft: Some(lazydb::model::catalog_editor::CatalogDraft::Constraint(
@@ -1844,6 +1847,7 @@ fn role_editor_uses_catalog_editor_field_keymap() {
         baseline: None,
         plan: None,
         error: None,
+        outcome_unknown: false,
         owner_picker: Default::default(),
         preview_scroll: 0,
     });
@@ -1882,6 +1886,7 @@ fn database_editor_toggle_key_is_routed_to_catalog_toggle() {
         baseline: None,
         plan: None,
         error: None,
+        outcome_unknown: false,
         owner_picker: Default::default(),
         preview_scroll: 0,
     });
@@ -2365,6 +2370,7 @@ fn schema_editor_with_owner_choices() -> App {
         baseline: None,
         plan: None,
         error: None,
+        outcome_unknown: false,
         owner_picker: Default::default(),
         preview_scroll: 0,
         draft: Some(lazydb::model::catalog_editor::CatalogDraft::Schema(
@@ -2501,6 +2507,7 @@ fn view_editor_form_owns_navigation_and_preview_keys() {
         baseline: None,
         plan: None,
         error: None,
+        outcome_unknown: false,
         owner_picker: Default::default(),
         preview_scroll: 0,
         draft: Some(lazydb::model::catalog_editor::CatalogDraft::View(
@@ -2515,6 +2522,7 @@ fn view_editor_form_owns_navigation_and_preview_keys() {
                 security_invoker: lazydb::db::catalog_mutation::ViewOption::unavailable("test"),
                 check_option: lazydb::db::catalog_mutation::ViewOption::unavailable("test"),
                 focus: lazydb::model::catalog_editor::CatalogFormFocus::Name,
+                clickhouse_native: None,
             },
         )),
     });
@@ -3269,6 +3277,7 @@ fn maps_column_details_navigation_and_toggle_keys() {
         baseline: None,
         plan: None,
         error: None,
+        outcome_unknown: false,
         owner_picker: Default::default(),
         preview_scroll: 0,
         draft: Some(lazydb::model::catalog_editor::CatalogDraft::Table(
@@ -3666,12 +3675,14 @@ fn materialized_view_editor(
                     focus,
                     query_editable: mode
                         == lazydb::db::catalog_mutation::CatalogMutationMode::Create,
+                    clickhouse_native: None,
                 },
             ),
         ),
         baseline: None,
         plan: None,
         error: None,
+        outcome_unknown: false,
         owner_picker: Default::default(),
         preview_scroll: 0,
     });

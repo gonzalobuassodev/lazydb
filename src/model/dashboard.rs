@@ -272,6 +272,8 @@ pub enum DashboardVisibility {
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct ProcessRow {
     pub id: u64,
+    /// Lossless engine-native identifier when it is not representable as a numeric PID.
+    pub native_id: Option<String>,
     pub user: String,
     pub database: Option<String>,
     pub client: Option<String>,
@@ -312,7 +314,7 @@ pub fn process_result_set(rows: &[ProcessRow], needle: &str) -> crate::db::query
     use crate::db::{query::ColumnMeta, value::CellValue};
 
     let columns = [
-        ("PID", "UNSIGNED"),
+        ("PID / QUERY ID", "TEXT"),
         ("USER", "TEXT"),
         ("DB", "TEXT"),
         ("CLIENT", "TEXT"),
@@ -333,7 +335,11 @@ pub fn process_result_set(rows: &[ProcessRow], needle: &str) -> crate::db::query
         .filter(|row| process_matches(row, needle))
         .map(|row| {
             vec![
-                CellValue::Unsigned(row.id),
+                row.native_id
+                    .as_ref()
+                    .map_or(CellValue::Unsigned(row.id), |native_id| {
+                        CellValue::Text(native_id.clone())
+                    }),
                 CellValue::Text(row.user.clone()),
                 optional_text(row.database.as_deref()),
                 optional_text(row.client.as_deref()),
@@ -447,7 +453,7 @@ pub fn process_matches(row: &ProcessRow, needle: &str) -> bool {
     let needle = needle.trim().to_ascii_lowercase();
     needle.is_empty()
         || [
-            row.id.to_string(),
+            row.native_id.clone().unwrap_or_else(|| row.id.to_string()),
             row.user.clone(),
             row.database.clone().unwrap_or_default(),
             row.client.clone().unwrap_or_default(),
@@ -455,6 +461,7 @@ pub fn process_matches(row: &ProcessRow, needle: &str) -> bool {
             row.state.clone().unwrap_or_default(),
             row.wait.clone().unwrap_or_default(),
             row.query.clone().unwrap_or_default(),
+            row.elapsed.as_secs_f64().to_string(),
         ]
         .iter()
         .any(|value| value.to_ascii_lowercase().contains(&needle))
@@ -549,6 +556,7 @@ mod tests {
     fn process_projection_preserves_all_fields_and_filters_case_insensitively() {
         let row = ProcessRow {
             id: 42,
+            native_id: None,
             user: "Ada".into(),
             database: Some("demo".into()),
             client: Some("localhost".into()),
@@ -577,6 +585,7 @@ mod tests {
     fn process_projection_uses_null_for_missing_optional_values() {
         let row = ProcessRow {
             id: 7,
+            native_id: Some("query-0007".into()),
             user: "u".into(),
             database: None,
             client: None,
@@ -588,6 +597,10 @@ mod tests {
         };
 
         let result = process_result_set(&[row], "");
+        assert_eq!(
+            result.rows[0][0],
+            crate::db::value::CellValue::Text("query-0007".into())
+        );
         assert!(matches!(
             result.rows[0][2],
             crate::db::value::CellValue::Null

@@ -16,11 +16,11 @@ Crossterm input / DB events
            |
 DatabaseConnection enum
     |          |          |          |          |          |          |
- Postgres   MySQL    MariaDB     Oracle   SQL Server  SQLite     Redis
+  Postgres   MySQL    MariaDB     Oracle   SQL Server  SQLite     Redis   ClickHouse
 ```
 
 The monitoring dashboard is a separate workspace tab. Its native read-only
-queries live in the concrete PostgreSQL/MySQL/MariaDB/Redis adapters, while the
+queries live in the concrete PostgreSQL/MySQL/MariaDB/Redis/ClickHouse adapters, while the
 dashboard model owns typed snapshots, elapsed-time counter rates, time-bounded
 history, and process filtering. Runtime schedules single-flight metric and process
 loads and tags every result with the dashboard tab generation and its bound

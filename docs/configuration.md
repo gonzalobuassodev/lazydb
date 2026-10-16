@@ -18,8 +18,8 @@ silently accepting a setting that LazyDB does not use.
 ## Connection driver categories
 
 New and edited connection forms show **Category** above **Driver**. Choose
-**Relational** for PostgreSQL, MySQL, MariaDB, Oracle, SQL Server or SQLite;
-choose **Non-relational** for Redis. Left/Right changes the focused category or
+**Relational** for PostgreSQL, MySQL, MariaDB, Oracle, SQL Server, SQLite, or
+ClickHouse; choose **Non-relational** for Redis. Left/Right changes the focused category or
 cycles drivers within that category. Categories and drivers also support mouse
 selection. Narrow forms keep full driver names in a selection-following window.
 
@@ -41,6 +41,22 @@ directory because doing so would prevent new defaults from being inherited on
 upgrade.
 
 ## Configuration Files
+
+## ClickHouse Profiles
+
+ClickHouse uses its HTTP(S) interface. Use `clickhouse://host[:8123]/database`
+for HTTP or `clickhouses://host[:8443]/database` for verified HTTPS. Explicit
+ports are preserved. If no database or user is supplied, ClickHouse's `default`
+database and user are used. Passwords are stored using the selected LazyDB
+credential policy and sent in the `X-ClickHouse-Key` request header; they are
+not embedded in the HTTP URL. `SSL mode = Disable` selects HTTP; every other
+SSL mode uses HTTPS with certificate verification. The adapter does not convert
+native TCP ports or silently downgrade TLS.
+
+ClickHouse maps the selected database to LazyDB's database/schema catalog
+namespace. The profile's visible-object selection scopes Explorer search and
+catalog requests. See [database capabilities](database-capabilities.md#clickhouse)
+for supported objects, mutation boundaries, monitoring and transaction limits.
 
 `AppPaths` uses `~/lazydb/` for new users on macOS and Linux. Existing users
 continue using the root selected by their installation during upgrades. Set

@@ -544,6 +544,156 @@ fn projection_inserts_groups_and_skips_collapsed_catalog_subtrees() {
 }
 
 #[test]
+fn clickhouse_projection_group_has_independent_page_state_and_children() {
+    use lazydb::profile::DatabaseKind;
+
+    let profile_id = profile_id(41);
+    let database = CatalogEntry::database(
+        CatalogId::new(profile_id, CatalogKind::Database, ["analytics"]),
+        QualifiedName {
+            database: Some("analytics".into()),
+            schema: None,
+            object: "analytics".into(),
+        },
+        "database",
+        OptionalMetadata::Supported(None),
+        true,
+    )
+    .unwrap();
+    let schema = CatalogEntry::schema(
+        CatalogId::new(profile_id, CatalogKind::Schema, ["analytics", "analytics"]),
+        database.id.clone(),
+        QualifiedName {
+            database: Some("analytics".into()),
+            schema: Some("analytics".into()),
+            object: "analytics".into(),
+        },
+        "database",
+        OptionalMetadata::Supported(None),
+        true,
+    )
+    .unwrap();
+    let table = CatalogEntry::relation(
+        CatalogId::new(
+            profile_id,
+            CatalogKind::Table,
+            ["analytics", "analytics", "events"],
+        ),
+        schema.id.clone(),
+        QualifiedName {
+            database: Some("analytics".into()),
+            schema: Some("analytics".into()),
+            object: "events".into(),
+        },
+        "table",
+        OptionalMetadata::Supported(None),
+        true,
+    )
+    .unwrap();
+    let projection_id = CatalogId::new(
+        profile_id,
+        CatalogKind::Projection,
+        ["analytics", "analytics", "events", "by_id"],
+    );
+    let projection = CatalogEntry::projection(
+        projection_id.clone(),
+        table.id.clone(),
+        QualifiedName {
+            database: Some("analytics".into()),
+            schema: Some("analytics".into()),
+            object: "by_id".into(),
+        },
+        "PROJECTION",
+        lazydb::db::catalog::IndexMetadata {
+            columns: vec!["id".to_owned()],
+            unique: false,
+        },
+    )
+    .unwrap();
+    let mut tree = CatalogTree::new(profile_id);
+    tree.insert_subtree(vec![database.clone(), schema.clone(), table.clone()])
+        .unwrap();
+    tree.set_group_state(&schema.id, ObjectGroup::Tables, complete_group(1))
+        .unwrap();
+    let table_owner = ExplorerOwnerId::Catalog(table.id.clone());
+    let projection_owner = ExplorerOwnerId::Projections(table.id.clone());
+
+    let mut explorer = ExplorerTreeState::default();
+    explorer.add_profile_with_placement(
+        profile_id,
+        "ClickHouse".into(),
+        DatabaseKind::ClickHouse,
+        String::new(),
+        ProfileProvenance::Saved,
+        ProfilePlacement::CurrentProject,
+    );
+    let state = explorer.profiles.get_mut(&profile_id).unwrap();
+    state.catalog = tree;
+    state.status = ExplorerConnectionStatus::Online;
+    state.load_states.insert(
+        table_owner.clone(),
+        ExplorerLoadState::Loaded { next_cursor: None },
+    );
+    state.load_states.insert(
+        projection_owner.clone(),
+        ExplorerLoadState::Loaded {
+            next_cursor: Some(CatalogCursor::from_keyset("by_id", "by_id").unwrap()),
+        },
+    );
+    state
+        .catalog
+        .replace_projections(&table.id, vec![projection.clone()])
+        .unwrap();
+    explorer.expanded.extend([
+        ExplorerNodeId::Profile(profile_id),
+        ExplorerNodeId::Catalog(database.id.clone()),
+        ExplorerNodeId::Catalog(schema.id.clone()),
+        ExplorerNodeId::Group {
+            parent: schema.id.clone(),
+            group: ObjectGroup::Tables,
+        },
+        ExplorerNodeId::Catalog(table.id.clone()),
+        ExplorerNodeId::ProjectionGroup(table.id.clone()),
+    ]);
+
+    let rows = explorer.visible();
+    let projection_group_index = rows
+        .iter()
+        .position(|row| row.id == ExplorerNodeId::ProjectionGroup(table.id.clone()))
+        .unwrap();
+    let projection_index = rows
+        .iter()
+        .position(|row| row.id == ExplorerNodeId::Catalog(projection_id.clone()))
+        .unwrap();
+    assert_eq!(
+        rows[projection_index].depth,
+        rows[projection_group_index].depth + 1
+    );
+    assert!(rows.iter().any(|row| matches!(
+        &row.id,
+        ExplorerNodeId::LoadMore { parent, .. } if parent == &projection_owner
+    )));
+    assert_eq!(
+        explorer.profiles[&profile_id].load_states[&table_owner],
+        ExplorerLoadState::Loaded { next_cursor: None }
+    );
+
+    explorer
+        .profiles
+        .get_mut(&profile_id)
+        .unwrap()
+        .catalog
+        .replace_projections(&table.id, Vec::new())
+        .unwrap();
+    assert!(
+        explorer.profiles[&profile_id]
+            .catalog
+            .get(&projection_id)
+            .is_none()
+    );
+}
+
+#[test]
 fn synthetic_child_rows_have_deterministic_non_recursive_ids() {
     let profile = profile_id(1);
     let owner = ExplorerOwnerId::Profile(profile);

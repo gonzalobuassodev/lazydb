@@ -31,3 +31,18 @@ fn capability_fields_are_conservative_for_features_not_implemented_by_adapters()
         assert!(!capabilities.relation_edit);
     }
 }
+
+#[test]
+fn clickhouse_catalog_capability_is_enabled_with_the_native_adapter() {
+    assert_eq!(
+        DatabaseCapabilities::for_kind(DatabaseKind::ClickHouse),
+        DatabaseCapabilities {
+            catalog: true,
+            relation_ddl: false,
+            relation_edit: false,
+            monitoring: true,
+            manual_transactions: false,
+            cancellation: false,
+        }
+    );
+}

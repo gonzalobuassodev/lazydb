@@ -34,6 +34,7 @@ impl ColumnTypePolicy {
             DatabaseKind::MySql | DatabaseKind::MariaDb => "text",
             DatabaseKind::SqlServer => "nvarchar(255)",
             DatabaseKind::Redis => "text",
+            DatabaseKind::ClickHouse => "String",
         }
     }
 

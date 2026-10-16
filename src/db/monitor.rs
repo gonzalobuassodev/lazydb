@@ -10,6 +10,7 @@ pub struct MonitorSnapshot {
     pub server_generation: u64,
     pub values: BTreeMap<MetricKey, f64>,
     pub redis_details: Option<crate::db::redis::monitor::RedisMonitorDetails>,
+    pub visibility: MonitorVisibility,
 }
 
 #[derive(Clone, Debug, Default, PartialEq, Eq)]

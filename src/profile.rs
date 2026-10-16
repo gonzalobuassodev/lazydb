@@ -19,6 +19,7 @@ pub enum DatabaseKind {
     SqlServer,
     Sqlite,
     Redis,
+    ClickHouse,
 }
 
 impl DatabaseKind {
@@ -31,6 +32,7 @@ impl DatabaseKind {
                 | Self::Oracle
                 | Self::SqlServer
                 | Self::Sqlite
+                | Self::ClickHouse
         )
     }
 }
@@ -54,6 +56,8 @@ pub enum ConnectionUrlFormat {
     JdbcSqlite,
     Redis,
     RedisTls,
+    ClickHouse,
+    ClickHouseTls,
 }
 
 impl ConnectionUrlFormat {
@@ -66,6 +70,7 @@ impl ConnectionUrlFormat {
             DatabaseKind::SqlServer => Self::SqlServer,
             DatabaseKind::Sqlite => Self::Sqlite,
             DatabaseKind::Redis => Self::Redis,
+            DatabaseKind::ClickHouse => Self::ClickHouse,
         }
     }
 
@@ -87,6 +92,10 @@ impl ConnectionUrlFormat {
                     DatabaseKind::Sqlite
                 )
                 | (Self::Redis | Self::RedisTls, DatabaseKind::Redis)
+                | (
+                    Self::ClickHouse | Self::ClickHouseTls,
+                    DatabaseKind::ClickHouse
+                )
         )
     }
 
@@ -99,6 +108,7 @@ impl ConnectionUrlFormat {
             DatabaseKind::SqlServer => &[Self::SqlServer, Self::MsSql, Self::JdbcSqlServer],
             DatabaseKind::Sqlite => &[Self::Sqlite, Self::FileUri, Self::JdbcSqlite],
             DatabaseKind::Redis => &[Self::Redis, Self::RedisTls],
+            DatabaseKind::ClickHouse => &[Self::ClickHouse, Self::ClickHouseTls],
         }
     }
 }
@@ -147,7 +157,9 @@ impl CatalogScope {
             };
         }
         let schemas = match (kind, default_schema) {
-            (DatabaseKind::MySql, _) | (_, None) => CatalogSelection::All,
+            (DatabaseKind::MySql | DatabaseKind::ClickHouse, _) | (_, None) => {
+                CatalogSelection::All
+            }
             (_, Some(schema)) => CatalogSelection::Selected(vec![schema.to_owned()]),
         };
 
@@ -556,6 +568,8 @@ pub fn parse_connection_url(input: &str) -> Result<ParsedConnectionUrl, ProfileE
         ("mssql", false) => (DatabaseKind::SqlServer, ConnectionUrlFormat::MsSql),
         ("redis", false) => (DatabaseKind::Redis, ConnectionUrlFormat::Redis),
         ("rediss", false) => (DatabaseKind::Redis, ConnectionUrlFormat::RedisTls),
+        ("clickhouse", false) => (DatabaseKind::ClickHouse, ConnectionUrlFormat::ClickHouse),
+        ("clickhouses", false) => (DatabaseKind::ClickHouse, ConnectionUrlFormat::ClickHouseTls),
         (scheme, _) => return Err(ProfileError::UnsupportedScheme(scheme.to_owned())),
     };
     parse_server_url(url, kind, format)
@@ -665,15 +679,38 @@ fn parse_server_url(
             .parse::<u32>()
             .map_err(|_| ProfileError::InvalidQueryParameter("database".into()))?;
         Some(number.to_string())
+    } else if kind == DatabaseKind::ClickHouse {
+        Some(
+            if database.is_empty() {
+                "default"
+            } else {
+                &database
+            }
+            .to_owned(),
+        )
     } else {
         (!database.is_empty()).then_some(database)
     };
-    let user = (!url.username().is_empty()).then(|| decode(url.username()));
+    let user = if kind == DatabaseKind::ClickHouse {
+        Some(if url.username().is_empty() {
+            "default".to_owned()
+        } else {
+            decode(url.username())
+        })
+    } else {
+        (!url.username().is_empty()).then(|| decode(url.username()))
+    };
     let password = url
         .password()
         .map(|value| SecretString::from(decode(value)));
     let mut default_schema = None;
-    let mut ssl_mode = if kind == DatabaseKind::Redis {
+    let mut ssl_mode = if kind == DatabaseKind::ClickHouse {
+        if format == ConnectionUrlFormat::ClickHouseTls {
+            SslMode::VerifyFull
+        } else {
+            SslMode::Disable
+        }
+    } else if kind == DatabaseKind::Redis {
         if format == ConnectionUrlFormat::RedisTls {
             SslMode::Require
         } else {
@@ -716,6 +753,12 @@ fn parse_server_url(
             reject_duplicate(&mut seen_ssl, "ssl")?;
             ssl_mode = parse_ssl_mode(&value)
                 .ok_or_else(|| ProfileError::InvalidQueryParameter("sslMode".into()))?;
+        } else if (key.eq_ignore_ascii_case("sslMode") || key.eq_ignore_ascii_case("sslmode"))
+            && kind == DatabaseKind::ClickHouse
+        {
+            reject_duplicate(&mut seen_ssl, "sslMode")?;
+            ssl_mode = parse_ssl_mode(&value)
+                .ok_or_else(|| ProfileError::InvalidQueryParameter("sslMode".into()))?;
         } else if key.eq_ignore_ascii_case("encrypt") && kind == DatabaseKind::SqlServer {
             reject_option_duplicate(&encrypt, "encrypt")?;
             encrypt = Some(parse_bool(&value, "encrypt")?);
@@ -737,6 +780,11 @@ fn parse_server_url(
     if kind == DatabaseKind::SqlServer {
         ssl_mode = sql_server_ssl_mode(encrypt, trust_server_certificate)?;
     }
+    if kind == DatabaseKind::ClickHouse
+        && ((format == ConnectionUrlFormat::ClickHouseTls) == (ssl_mode == SslMode::Disable))
+    {
+        return Err(ProfileError::ConflictingQueryParameter("sslMode".into()));
+    }
 
     let default_port = match kind {
         DatabaseKind::Postgres => 5432,
@@ -745,6 +793,10 @@ fn parse_server_url(
         DatabaseKind::SqlServer => 1433,
         DatabaseKind::Sqlite => unreachable!("server URL cannot be SQLite"),
         DatabaseKind::Redis => 6379,
+        DatabaseKind::ClickHouse => match format {
+            ConnectionUrlFormat::ClickHouseTls if url.port().is_none() => 8443,
+            _ => 8123,
+        },
     };
     Ok(ParsedConnectionUrl {
         kind,
@@ -1034,6 +1086,8 @@ pub fn format_connection_url(
         ConnectionUrlFormat::MsSql => "mssql",
         ConnectionUrlFormat::Redis => "redis",
         ConnectionUrlFormat::RedisTls => "rediss",
+        ConnectionUrlFormat::ClickHouse => "clickhouse",
+        ConnectionUrlFormat::ClickHouseTls => "clickhouses",
         _ => return Err(ProfileError::IncompatibleFormat),
     };
     let host = profile.host.as_deref().ok_or(ProfileError::MissingHost)?;
@@ -1092,6 +1146,14 @@ pub fn format_connection_url(
         query.push(format!("sslMode={}", ssl_mode_value(profile.ssl_mode)));
     } else if profile.kind == DatabaseKind::Redis {
         // The redis/rediss scheme is the TLS source of truth.
+    } else if profile.kind == DatabaseKind::ClickHouse {
+        if (format == ConnectionUrlFormat::ClickHouseTls) == (profile.ssl_mode == SslMode::Disable)
+        {
+            return Err(ProfileError::ConflictingQueryParameter("ssl".to_owned()));
+        }
+        if format == ConnectionUrlFormat::ClickHouseTls {
+            query.push(format!("sslMode={}", ssl_mode_value(profile.ssl_mode)));
+        }
     } else {
         if let Some(schema) = profile
             .default_schema
