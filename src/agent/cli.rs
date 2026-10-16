@@ -34,6 +34,58 @@ pub async fn run(
                     .await?,
             )?)
         }
+        AgentCommand::MongoQuery {
+            target,
+            database,
+            command,
+            file,
+        } => {
+            let service = AgentService::load(target.project.as_deref(), config)?;
+            let input = read_sql(
+                file.as_deref(),
+                command.as_deref(),
+                target.project.as_deref(),
+            )?;
+            Ok(serde_json::to_string(
+                &service
+                    .mongo_query(target.connection.as_deref(), &database, &input)
+                    .await?,
+            )?)
+        }
+        AgentCommand::MongoExecute {
+            target,
+            database,
+            command,
+            file,
+            write_policy,
+        }
+        | AgentCommand::Mongo {
+            command:
+                crate::cli::MongoAgentCommand::Execute {
+                    target,
+                    database,
+                    command,
+                    file,
+                    write_policy,
+                },
+        } => {
+            let service = AgentService::load(target.project.as_deref(), config)?;
+            let input = read_sql(
+                file.as_deref(),
+                command.as_deref(),
+                target.project.as_deref(),
+            )?;
+            Ok(serde_json::to_string(
+                &service
+                    .mongo_execute_change(
+                        target.connection.as_deref(),
+                        &database,
+                        &input,
+                        write_policy,
+                    )
+                    .await?,
+            )?)
+        }
         AgentCommand::Query { target, sql, file } => {
             let service = AgentService::load(target.project.as_deref(), config)?;
             let sql = read_sql(file.as_deref(), sql.as_deref(), target.project.as_deref())?;

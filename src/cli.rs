@@ -286,6 +286,34 @@ pub enum AgentCommand {
         #[arg(long, default_value_t = 100)]
         limit: usize,
     },
+    /// Execute one supported, read-only native MongoDB command as Extended JSON.
+    MongoQuery {
+        #[command(flatten)]
+        target: AgentTargetArgs,
+        #[arg(long)]
+        database: String,
+        #[arg(long, conflicts_with = "file", required_unless_present = "file")]
+        command: Option<String>,
+        #[arg(long, conflicts_with = "command", required_unless_present = "command")]
+        file: Option<PathBuf>,
+    },
+    /// Execute one authorized MongoDB insert, update, or delete command.
+    MongoExecute {
+        #[command(flatten)]
+        target: AgentTargetArgs,
+        #[arg(long)]
+        database: String,
+        #[arg(long, conflicts_with = "file", required_unless_present = "file")]
+        command: Option<String>,
+        #[arg(long, conflicts_with = "command", required_unless_present = "command")]
+        file: Option<PathBuf>,
+        #[arg(long, value_enum, default_value_t = crate::agent::policy::WritePolicy::Deny)]
+        write_policy: crate::agent::policy::WritePolicy,
+    },
+    Mongo {
+        #[command(subcommand)]
+        command: MongoAgentCommand,
+    },
     Query {
         #[command(flatten)]
         target: AgentTargetArgs,
@@ -300,6 +328,23 @@ pub enum AgentCommand {
         #[arg(long, conflicts_with = "file", required_unless_present = "file")]
         sql: Option<String>,
         #[arg(long, conflicts_with = "sql", required_unless_present = "sql")]
+        file: Option<PathBuf>,
+        #[arg(long, value_enum, default_value_t = crate::agent::policy::WritePolicy::Deny)]
+        write_policy: crate::agent::policy::WritePolicy,
+    },
+}
+
+#[derive(Debug, Subcommand)]
+pub enum MongoAgentCommand {
+    /// Execute one authorized MongoDB insert, update, or delete command.
+    Execute {
+        #[command(flatten)]
+        target: AgentTargetArgs,
+        #[arg(long)]
+        database: String,
+        #[arg(long, conflicts_with = "file", required_unless_present = "file")]
+        command: Option<String>,
+        #[arg(long, conflicts_with = "command", required_unless_present = "command")]
         file: Option<PathBuf>,
         #[arg(long, value_enum, default_value_t = crate::agent::policy::WritePolicy::Deny)]
         write_policy: crate::agent::policy::WritePolicy,
@@ -400,8 +445,8 @@ pub struct VersionInfo<'a> {
 pub struct Capabilities<'a> {
     pub version: &'a str,
     pub cli_api: u16,
-    pub features: [&'a str; 8],
-    pub drivers: &'a [&'a str; 7],
+    pub features: [&'a str; 11],
+    pub drivers: &'a [&'a str; 8],
 }
 
 #[derive(Debug, Serialize)]
@@ -450,6 +495,9 @@ pub fn capabilities() -> Capabilities<'static> {
             "theme-file-v1",
             "lsp-v1",
             "connections-v1",
+            "mongodb-document-console-v1",
+            "mongodb-monitor-v1",
+            "mongodb-principals-read-v1",
         ],
         drivers: &crate::db::descriptor::DRIVER_NAMES,
     }
@@ -503,7 +551,7 @@ pub fn render_command(command: &Command) -> Result<String, serde_json::Error> {
         Command::Version { json: false } => Ok(format!("lazydb {}", env!("CARGO_PKG_VERSION"))),
         Command::Capabilities { json: true } => serde_json::to_string(&capabilities()),
         Command::Capabilities { json: false } => Ok(format!(
-            "lazydb {} (cli api {})\ndrivers: {}\nfeatures: mouse, read-only, context-help, profile-manager, system-keyring, theme-file-v1, lsp-v1, connections-v1",
+            "lazydb {} (cli api {})\ndrivers: {}\nfeatures: mouse, read-only, context-help, profile-manager, system-keyring, theme-file-v1, lsp-v1, connections-v1, mongodb-document-console-v1, mongodb-monitor-v1, mongodb-principals-read-v1",
             env!("CARGO_PKG_VERSION"),
             CLI_API_VERSION,
             crate::db::descriptor::DRIVER_LIST
@@ -681,7 +729,8 @@ mod tests {
                 "oracle",
                 "sqlserver",
                 "sqlite",
-                "redis"
+                "redis",
+                "mongodb"
             ])
         );
         assert_eq!(
@@ -694,7 +743,10 @@ mod tests {
                 "system-keyring",
                 "theme-file-v1",
                 "lsp-v1",
-                "connections-v1"
+                "connections-v1",
+                "mongodb-document-console-v1",
+                "mongodb-monitor-v1",
+                "mongodb-principals-read-v1"
             ])
         );
     }

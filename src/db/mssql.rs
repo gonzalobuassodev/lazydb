@@ -4685,6 +4685,7 @@ mod tests {
             database: Some("app".to_owned()),
             default_schema: Some("dbo".to_owned()),
             sqlite_path: None,
+            mongodb_options: None,
             ssl_mode,
             credential_policy: CredentialPolicy::Prompt,
             read_only: false,

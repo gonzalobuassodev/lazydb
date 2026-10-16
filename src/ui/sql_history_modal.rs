@@ -36,7 +36,7 @@ pub(crate) fn render(
         .borders(Borders::ALL)
         .border_style(Style::new().fg(theme.accent))
         .style(Style::new().bg(theme.surface_raised))
-        .title(" SQL HISTORY ");
+        .title(" EXECUTION HISTORY ");
     let inner = block.inner(popup);
     frame.render_widget(block, popup);
     if inner.width < 12 || inner.height < 5 {
@@ -158,7 +158,7 @@ fn render_list(
     let block = Block::default()
         .borders(Borders::ALL)
         .border_style(Style::new().fg(theme.border))
-        .title(" SQL ");
+        .title(" SQL / MONGO ");
     let inner = block.inner(area);
     frame.render_widget(block, area);
     const TYPE_WIDTH: u16 = 6;
@@ -181,17 +181,35 @@ fn render_list(
             break;
         }
         let dialect = app.sql_history_dialect(item.profile_id);
-        let kind = state
-            .sql_history_kind_cache
-            .kind(item.execution_id, &item.sql, dialect);
+        let kind = (item.language == crate::model::sql_history::HistoryLanguage::Sql).then(|| {
+            state
+                .sql_history_kind_cache
+                .kind(item.execution_id, &item.sql, dialect)
+        });
         visible_ids.insert(item.execution_id);
         let preview_height = remaining.saturating_sub(1).min(3);
-        let lines = sql_preview::lines_without_line_numbers(
-            &item.sql,
-            dialect,
-            content_width as usize,
-            theme,
-        );
+        let display_text = if item.language == crate::model::sql_history::HistoryLanguage::Mongo {
+            format!(
+                "db.{} · {}",
+                item.database.as_deref().unwrap_or("?"),
+                item.mongo_command.as_deref().unwrap_or("command")
+            )
+        } else {
+            item.sql.clone()
+        };
+        let lines = if item.language == crate::model::sql_history::HistoryLanguage::Mongo {
+            display_text
+                .lines()
+                .map(|line| Line::raw(crate::security::sanitize_terminal_text(line)))
+                .collect()
+        } else {
+            sql_preview::lines_without_line_numbers(
+                &item.sql,
+                dialect,
+                content_width as usize,
+                theme,
+            )
+        };
         let shown = lines
             .into_iter()
             .take(preview_height as usize)
@@ -222,8 +240,19 @@ fn render_list(
         frame.render_widget(Paragraph::new(" ").style(row_style), row_area);
         if has_type_column {
             frame.render_widget(
-                Paragraph::new(Span::styled(type_label(kind), type_style(kind, theme)))
-                    .style(row_style),
+                Paragraph::new(Span::styled(
+                    if item.language == crate::model::sql_history::HistoryLanguage::Mongo {
+                        "[MONGO] "
+                    } else {
+                        type_label(kind.unwrap_or(SqlStatementKind::Other))
+                    },
+                    if item.language == crate::model::sql_history::HistoryLanguage::Mongo {
+                        Style::new().fg(theme.action).add_modifier(Modifier::BOLD)
+                    } else {
+                        type_style(kind.unwrap_or(SqlStatementKind::Other), theme)
+                    },
+                ))
+                .style(row_style),
                 Rect::new(inner.x, y, TYPE_WIDTH, 1),
             );
         }
@@ -253,7 +282,7 @@ fn render_list(
     if view.loading && view.items.is_empty() {
         frame.render_widget(Paragraph::new(" Loading…"), inner);
     } else if view.items.is_empty() && view.error.is_none() {
-        frame.render_widget(Paragraph::new(" No SQL execution history"), inner);
+        frame.render_widget(Paragraph::new(" No execution history"), inner);
     }
 }
 
@@ -296,7 +325,7 @@ fn render_detail(
     let inner = block.inner(area);
     frame.render_widget(block, area);
     let Some(item) = view.selected_item() else {
-        frame.render_widget(Paragraph::new(" Select a SQL record"), inner);
+        frame.render_widget(Paragraph::new(" Select an execution record"), inner);
         return;
     };
     let info_height = inner.height.min(7);
@@ -343,13 +372,16 @@ fn render_detail(
             height: code_area.height.saturating_sub(1) as usize,
         };
         if let Ok(snapshot) = app.sql_history_editor_snapshot(viewport) {
+            let mongo = view.selected_item().is_some_and(|item| {
+                item.language == crate::model::sql_history::HistoryLanguage::Mongo
+            });
             super::read_only_sql::ReadOnlySqlEditor {
                 session_id: view.editor_session_id,
                 snapshot: &snapshot,
                 block: Block::default()
                     .borders(Borders::TOP)
                     .border_style(Style::new().fg(theme.border))
-                    .title(" SQL "),
+                    .title(if mongo { " MONGO SUMMARY " } else { " SQL " }),
                 focused: view.mode == SqlHistoryMode::Sql,
                 show_line_numbers: true,
             }

@@ -176,3 +176,36 @@ jobs:
         run: timeout 10m cargo test --locked --test sqlserver_transactions -- --nocapture --test-threads=1
       - name: Redis mutation tests
         run: timeout 10m cargo test --locked --test redis_mutation -- --ignored --nocapture --test-threads=1
+
+  mongodb:
+    name: MongoDB replica set and standalone integration
+    runs-on: ubuntu-24.04
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with: { persist-credentials: false }
+      - run: rustup toolchain install 1.94.0 --profile minimal --no-self-update
+      - run: rustup default 1.94.0
+      - name: Start MongoDB fixtures
+        run: docker compose -f docker-compose.mongodb.yml up -d --wait
+      - name: Initialize replica set
+        run: |
+          docker compose -f docker-compose.mongodb.yml exec -T mongodb-rs mongosh --quiet --eval 'rs.initiate({_id:"lazydb-rs",members:[{_id:0,host:"mongodb-rs:27017"}]})'
+          container_wait_deadline=$((SECONDS + 90))
+          until docker compose -f docker-compose.mongodb.yml exec -T mongodb-rs mongosh --quiet --eval 'quit(db.hello().isWritablePrimary ? 0 : 1)'; do
+            if [ "$SECONDS" -ge "$container_wait_deadline" ]; then echo "MongoDB replica set initialization timed out" >&2; exit 1; fi
+            sleep 2
+          done
+      - name: MongoDB integration tests
+        env:
+          LAZYDB_REQUIRE_DATABASE_TESTS: "1"
+          LAZYDB_TEST_MONGODB_URL: mongodb://127.0.0.1:27017/?replicaSet=lazydb-rs&directConnection=true
+          LAZYDB_TEST_MONGODB_STANDALONE_URL: mongodb://127.0.0.1:27018
+          LAZYDB_TEST_MONGODB_PRINCIPALS_URL: mongodb://127.0.0.1:27019
+        run: timeout 15m cargo +1.94.0 test --locked --test mongodb_connection --test mongodb_catalog --test mongodb_cursor --test mongodb_console --test mongodb_transactions --test mongodb_cancellation --test mongodb_mutation --test mongodb_management --test mongodb_monitoring --test mongodb_principals -- --test-threads=1
+      - name: MongoDB service diagnostics
+        if: failure()
+        run: docker compose -f docker-compose.mongodb.yml ps
+      - name: Stop MongoDB fixtures
+        if: always()
+        run: docker compose -f docker-compose.mongodb.yml down -v

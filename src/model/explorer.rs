@@ -94,6 +94,10 @@ pub enum ExplorerNodeId {
         profile_id: Uuid,
         database: u32,
     },
+    Mongo {
+        profile_id: Uuid,
+        node: crate::db::mongodb::types::MongoExplorerNodeId,
+    },
     ConnectionGroup {
         group_id: Uuid,
         region: ProfileRegion,
@@ -162,7 +166,9 @@ pub fn resolve_mutation_intent(
                 group: *group,
             },
         )),
-        ExplorerNodeId::ConnectionGroup { .. } | ExplorerNodeId::RedisDatabase { .. } => None,
+        ExplorerNodeId::ConnectionGroup { .. }
+        | ExplorerNodeId::RedisDatabase { .. }
+        | ExplorerNodeId::Mongo { .. } => None,
         ExplorerNodeId::PrincipalGroup { .. } | ExplorerNodeId::Principal { .. } => None,
         ExplorerNodeId::PrincipalNotice { .. } => None,
         ExplorerNodeId::EmptyProfiles
@@ -185,6 +191,7 @@ impl ExplorerNodeId {
             | Self::Empty { owner } => Some(owner.profile_id()),
             Self::EmptyProfiles | Self::Others | Self::ConnectionGroup { .. } => None,
             Self::RedisDatabase { profile_id, .. } => Some(*profile_id),
+            Self::Mongo { profile_id, .. } => Some(*profile_id),
             Self::PrincipalGroup { profile_id } => Some(*profile_id),
             Self::Principal { entry } => Some(entry.profile_id),
             Self::PrincipalNotice { profile_id } => Some(*profile_id),
@@ -844,6 +851,15 @@ pub struct ExplorerProfileState {
     pub expand_after_connect: bool,
     pub unavailable_reason: Option<String>,
     pub redis_databases: Vec<crate::db::redis::discovery::RedisDatabaseInfo>,
+    pub mongodb_databases: Vec<String>,
+    pub mongodb_collections: HashMap<String, Vec<crate::db::mongodb::types::MongoCollectionInfo>>,
+    pub mongodb_indexes: HashMap<
+        crate::db::mongodb::types::MongoNamespace,
+        Vec<crate::db::mongodb::types::MongoIndexInfo>,
+    >,
+    pub mongodb_error: Option<String>,
+    pub mongodb_collection_errors: HashMap<String, String>,
+    pub mongodb_index_errors: HashMap<crate::db::mongodb::types::MongoNamespace, String>,
     pub redis_databases_partial: bool,
     pub redis_databases_error: Option<String>,
     pub principals: Vec<PrincipalEntry>,
@@ -883,6 +899,12 @@ impl ExplorerProfileState {
             expand_after_connect: false,
             unavailable_reason: None,
             redis_databases: Vec::new(),
+            mongodb_databases: Vec::new(),
+            mongodb_collections: HashMap::new(),
+            mongodb_indexes: HashMap::new(),
+            mongodb_error: None,
+            mongodb_collection_errors: HashMap::new(),
+            mongodb_index_errors: HashMap::new(),
             redis_databases_partial: false,
             redis_databases_error: None,
             principals: Vec::new(),
@@ -1114,6 +1136,26 @@ impl ExplorerTreeState {
                 .map(|entry| entry.qualified_name.object.clone()),
             ExplorerNodeId::Group { group, .. } => Some(group_label(*group).to_owned()),
             ExplorerNodeId::PrincipalGroup { .. } => Some("Users & Roles".to_owned()),
+            ExplorerNodeId::Mongo { node, .. } => Some(match node {
+                crate::db::mongodb::types::MongoExplorerNodeId::Database(name) => name.clone(),
+                crate::db::mongodb::types::MongoExplorerNodeId::Monitor(database) => {
+                    format!("Monitor · {database}")
+                }
+                crate::db::mongodb::types::MongoExplorerNodeId::Users(database) => {
+                    format!("Users & Roles · {database}")
+                }
+                crate::db::mongodb::types::MongoExplorerNodeId::Collection(namespace) => {
+                    namespace.collection.clone().unwrap_or_default()
+                }
+                crate::db::mongodb::types::MongoExplorerNodeId::Index { name, .. } => name.clone(),
+                crate::db::mongodb::types::MongoExplorerNodeId::RetryCollections(database) => {
+                    format!("Retry collections for {database}")
+                }
+                crate::db::mongodb::types::MongoExplorerNodeId::RetryIndexes(namespace) => format!(
+                    "Retry indexes for {}",
+                    namespace.collection.as_deref().unwrap_or_default()
+                ),
+            }),
             ExplorerNodeId::Principal { entry } => self
                 .profiles
                 .get(&entry.profile_id)
@@ -1572,6 +1614,87 @@ impl ExplorerTreeState {
             }
             return;
         }
+        if profile.kind == DatabaseKind::MongoDb {
+            for database in &profile.mongodb_databases {
+                let database_node = ExplorerNodeId::Mongo {
+                    profile_id,
+                    node: crate::db::mongodb::types::MongoExplorerNodeId::Database(
+                        database.clone(),
+                    ),
+                };
+                projection.push(database_node.clone(), child_depth);
+                if self.expanded.contains(&database_node) {
+                    projection.push(
+                        ExplorerNodeId::Mongo {
+                            profile_id,
+                            node: crate::db::mongodb::types::MongoExplorerNodeId::Monitor(
+                                database.clone(),
+                            ),
+                        },
+                        child_depth + 1,
+                    );
+                    projection.push(
+                        ExplorerNodeId::Mongo {
+                            profile_id,
+                            node: crate::db::mongodb::types::MongoExplorerNodeId::Users(
+                                database.clone(),
+                            ),
+                        },
+                        child_depth + 1,
+                    );
+                }
+                if self.expanded.contains(&database_node) {
+                    if let Some(collections) = profile.mongodb_collections.get(database) {
+                        for collection in collections {
+                            let collection_node = ExplorerNodeId::Mongo {
+                                profile_id,
+                                node: crate::db::mongodb::types::MongoExplorerNodeId::Collection(
+                                    collection.namespace.clone(),
+                                ),
+                            };
+                            projection.push(collection_node.clone(), child_depth + 1);
+                            if self.expanded.contains(&collection_node) {
+                                if let Some(indexes) =
+                                    profile.mongodb_indexes.get(&collection.namespace)
+                                {
+                                    for index in indexes {
+                                        projection.push(ExplorerNodeId::Mongo { profile_id, node: crate::db::mongodb::types::MongoExplorerNodeId::Index { namespace: collection.namespace.clone(), name: index.name.clone() } }, child_depth + 2);
+                                    }
+                                } else if profile
+                                    .mongodb_index_errors
+                                    .contains_key(&collection.namespace)
+                                {
+                                    projection.push(ExplorerNodeId::Mongo { profile_id, node: crate::db::mongodb::types::MongoExplorerNodeId::RetryIndexes(collection.namespace.clone()) }, child_depth + 2);
+                                } else {
+                                    projection.push(
+                                        ExplorerNodeId::Status {
+                                            owner: ExplorerOwnerId::Profile(profile_id),
+                                            kind: StatusRowKind::Loading,
+                                        },
+                                        child_depth + 2,
+                                    );
+                                }
+                            }
+                        }
+                    } else if profile.mongodb_collection_errors.contains_key(database) {
+                        projection.push(ExplorerNodeId::Mongo { profile_id, node: crate::db::mongodb::types::MongoExplorerNodeId::RetryCollections(database.clone()) }, child_depth + 1);
+                    } else {
+                        projection.push(
+                            ExplorerNodeId::Status {
+                                owner: ExplorerOwnerId::Profile(profile_id),
+                                kind: if profile.mongodb_error.is_some() {
+                                    StatusRowKind::Retry
+                                } else {
+                                    StatusRowKind::Loading
+                                },
+                            },
+                            child_depth + 1,
+                        );
+                    }
+                }
+            }
+            return;
+        }
         let roots = profile.catalog.roots();
         for root in roots {
             projection.append_catalog(profile, root, child_depth);
@@ -1652,6 +1775,39 @@ impl ExplorerTreeState {
             }
             ExplorerNodeId::Others => true,
             ExplorerNodeId::PrincipalGroup { profile_id } => self.profiles.contains_key(profile_id),
+            ExplorerNodeId::Mongo { profile_id, node } => match node {
+                crate::db::mongodb::types::MongoExplorerNodeId::Database(_) => self
+                    .profiles
+                    .get(profile_id)
+                    .is_some_and(|profile| profile.kind == DatabaseKind::MongoDb),
+                crate::db::mongodb::types::MongoExplorerNodeId::Collection(namespace) => {
+                    self.profiles.get(profile_id).is_some_and(|profile| {
+                        profile
+                            .mongodb_collections
+                            .get(&namespace.database)
+                            .is_some_and(|collections| {
+                                collections
+                                    .iter()
+                                    .any(|collection| collection.namespace == *namespace)
+                            })
+                    })
+                }
+                crate::db::mongodb::types::MongoExplorerNodeId::Index { namespace, name } => {
+                    self.profiles.get(profile_id).is_some_and(|profile| {
+                        profile
+                            .mongodb_indexes
+                            .get(namespace)
+                            .is_some_and(|indexes| indexes.iter().any(|index| index.name == *name))
+                    })
+                }
+                crate::db::mongodb::types::MongoExplorerNodeId::Monitor(database)
+                | crate::db::mongodb::types::MongoExplorerNodeId::Users(database) => self
+                    .profiles
+                    .get(profile_id)
+                    .is_some_and(|profile| profile.mongodb_databases.contains(database)),
+                crate::db::mongodb::types::MongoExplorerNodeId::RetryCollections(_)
+                | crate::db::mongodb::types::MongoExplorerNodeId::RetryIndexes(_) => false,
+            },
             ExplorerNodeId::EmptyProfiles
             | ExplorerNodeId::Status { .. }
             | ExplorerNodeId::LoadMore { .. }
@@ -2069,6 +2225,52 @@ impl ExplorerTreeState {
             ExplorerNodeId::RedisDatabase { profile_id, .. } => {
                 Some(ExplorerNodeId::Profile(*profile_id))
             }
+            ExplorerNodeId::Mongo { profile_id, node } => match node {
+                crate::db::mongodb::types::MongoExplorerNodeId::Database(_) => {
+                    Some(ExplorerNodeId::Profile(*profile_id))
+                }
+                crate::db::mongodb::types::MongoExplorerNodeId::Monitor(database)
+                | crate::db::mongodb::types::MongoExplorerNodeId::Users(database) => {
+                    Some(ExplorerNodeId::Mongo {
+                        profile_id: *profile_id,
+                        node: crate::db::mongodb::types::MongoExplorerNodeId::Database(
+                            database.clone(),
+                        ),
+                    })
+                }
+                crate::db::mongodb::types::MongoExplorerNodeId::Collection(namespace) => {
+                    Some(ExplorerNodeId::Mongo {
+                        profile_id: *profile_id,
+                        node: crate::db::mongodb::types::MongoExplorerNodeId::Database(
+                            namespace.database.clone(),
+                        ),
+                    })
+                }
+                crate::db::mongodb::types::MongoExplorerNodeId::Index { namespace, .. } => {
+                    Some(ExplorerNodeId::Mongo {
+                        profile_id: *profile_id,
+                        node: crate::db::mongodb::types::MongoExplorerNodeId::Collection(
+                            namespace.clone(),
+                        ),
+                    })
+                }
+                crate::db::mongodb::types::MongoExplorerNodeId::RetryCollections(database) => {
+                    Some(ExplorerNodeId::Mongo {
+                        profile_id: *profile_id,
+                        node: crate::db::mongodb::types::MongoExplorerNodeId::Database(
+                            database.clone(),
+                        ),
+                    })
+                }
+                crate::db::mongodb::types::MongoExplorerNodeId::RetryIndexes(namespace) => {
+                    Some(ExplorerNodeId::Mongo {
+                        profile_id: *profile_id,
+                        node: crate::db::mongodb::types::MongoExplorerNodeId::Collection(
+                            namespace.clone(),
+                        ),
+                    })
+                }
+            },
             ExplorerNodeId::PrincipalGroup { profile_id } => {
                 Some(ExplorerNodeId::Profile(*profile_id))
             }
@@ -2149,6 +2351,40 @@ impl ExplorerTreeState {
             ExplorerNodeId::PrincipalNotice { profile_id } => {
                 self.profiles.contains_key(profile_id)
             }
+            ExplorerNodeId::Mongo { profile_id, node } => self
+                .profiles
+                .get(profile_id)
+                .is_some_and(|profile| match node {
+                    crate::db::mongodb::types::MongoExplorerNodeId::Database(database) => {
+                        profile.mongodb_databases.contains(database)
+                    }
+                    crate::db::mongodb::types::MongoExplorerNodeId::Collection(namespace) => {
+                        profile
+                            .mongodb_collections
+                            .get(&namespace.database)
+                            .is_some_and(|collections| {
+                                collections
+                                    .iter()
+                                    .any(|collection| collection.namespace == *namespace)
+                            })
+                    }
+                    crate::db::mongodb::types::MongoExplorerNodeId::Index { namespace, name } => {
+                        profile
+                            .mongodb_indexes
+                            .get(namespace)
+                            .is_some_and(|indexes| indexes.iter().any(|index| index.name == *name))
+                    }
+                    crate::db::mongodb::types::MongoExplorerNodeId::RetryCollections(database) => {
+                        profile.mongodb_collection_errors.contains_key(database)
+                    }
+                    crate::db::mongodb::types::MongoExplorerNodeId::RetryIndexes(namespace) => {
+                        profile.mongodb_index_errors.contains_key(namespace)
+                    }
+                    crate::db::mongodb::types::MongoExplorerNodeId::Monitor(database)
+                    | crate::db::mongodb::types::MongoExplorerNodeId::Users(database) => {
+                        profile.mongodb_databases.contains(database)
+                    }
+                }),
             ExplorerNodeId::ConnectionGroup { group_id, region } => {
                 self.groups.iter().any(|group| {
                     group.id == *group_id && self.group_exists_in_region(*group_id, *region)
@@ -2236,6 +2472,55 @@ impl ExplorerTreeState {
             | ExplorerNodeId::Others
             | ExplorerNodeId::ConnectionGroup { .. }
             | ExplorerNodeId::RedisDatabase { .. } => {}
+            ExplorerNodeId::Mongo { profile_id, node } => {
+                let parent = match node {
+                    crate::db::mongodb::types::MongoExplorerNodeId::Database(_) => {
+                        ExplorerNodeId::Profile(*profile_id)
+                    }
+                    crate::db::mongodb::types::MongoExplorerNodeId::Collection(namespace) => {
+                        ExplorerNodeId::Mongo {
+                            profile_id: *profile_id,
+                            node: crate::db::mongodb::types::MongoExplorerNodeId::Database(
+                                namespace.database.clone(),
+                            ),
+                        }
+                    }
+                    crate::db::mongodb::types::MongoExplorerNodeId::Index { namespace, .. } => {
+                        ExplorerNodeId::Mongo {
+                            profile_id: *profile_id,
+                            node: crate::db::mongodb::types::MongoExplorerNodeId::Collection(
+                                namespace.clone(),
+                            ),
+                        }
+                    }
+                    crate::db::mongodb::types::MongoExplorerNodeId::RetryCollections(database) => {
+                        ExplorerNodeId::Mongo {
+                            profile_id: *profile_id,
+                            node: crate::db::mongodb::types::MongoExplorerNodeId::Database(
+                                database.clone(),
+                            ),
+                        }
+                    }
+                    crate::db::mongodb::types::MongoExplorerNodeId::RetryIndexes(namespace) => {
+                        ExplorerNodeId::Mongo {
+                            profile_id: *profile_id,
+                            node: crate::db::mongodb::types::MongoExplorerNodeId::Collection(
+                                namespace.clone(),
+                            ),
+                        }
+                    }
+                    crate::db::mongodb::types::MongoExplorerNodeId::Monitor(database)
+                    | crate::db::mongodb::types::MongoExplorerNodeId::Users(database) => {
+                        ExplorerNodeId::Mongo {
+                            profile_id: *profile_id,
+                            node: crate::db::mongodb::types::MongoExplorerNodeId::Database(
+                                database.clone(),
+                            ),
+                        }
+                    }
+                };
+                chain.push(parent);
+            }
             ExplorerNodeId::PrincipalGroup { profile_id } => {
                 chain.push(ExplorerNodeId::Profile(*profile_id));
             }
@@ -2552,6 +2837,83 @@ fn ancestor_row_indexes(rows: &[VisibleExplorerNode], ancestors: &[ExplorerNodeI
 pub(crate) mod tests {
     use super::*;
     use crate::db::catalog::{OptionalMetadata, QualifiedName};
+
+    #[test]
+    fn mongodb_collection_and_index_nodes_project_as_native_namespaces() {
+        let profile_id = Uuid::new_v4();
+        let namespace = crate::db::mongodb::types::MongoNamespace::collection("app", "orders.v2");
+        let mut tree = ExplorerTreeState::default();
+        tree.add_profile(profile_id);
+        let profile = tree.profiles.get_mut(&profile_id).unwrap();
+        profile.kind = DatabaseKind::MongoDb;
+        profile.mongodb_databases = vec!["app".into()];
+        profile.mongodb_collections.insert(
+            "app".into(),
+            vec![crate::db::mongodb::types::MongoCollectionInfo {
+                namespace: namespace.clone(),
+                collection_type: crate::db::mongodb::types::MongoCollectionType::Collection,
+                options_ejson: None,
+            }],
+        );
+        profile.mongodb_indexes.insert(
+            namespace.clone(),
+            vec![crate::db::mongodb::types::MongoIndexInfo {
+                name: "_id_".into(),
+                keys: mongodb::bson::doc! {"_id": 1},
+                unique: true,
+                ttl_seconds: None,
+                raw: mongodb::bson::doc! {},
+                key_description: vec![("_id".into(), mongodb::bson::Bson::Int32(1))],
+            }],
+        );
+        tree.expanded.insert(ExplorerNodeId::Profile(profile_id));
+        tree.expanded.insert(ExplorerNodeId::Mongo {
+            profile_id,
+            node: crate::db::mongodb::types::MongoExplorerNodeId::Database("app".into()),
+        });
+        tree.expanded.insert(ExplorerNodeId::Mongo {
+            profile_id,
+            node: crate::db::mongodb::types::MongoExplorerNodeId::Collection(namespace.clone()),
+        });
+        let visible = tree.visible();
+        assert!(visible.iter().any(|node| node.id
+            == ExplorerNodeId::Mongo {
+                profile_id,
+                node: crate::db::mongodb::types::MongoExplorerNodeId::Collection(namespace.clone())
+            }));
+        assert!(visible.iter().any(|node| node.id
+            == ExplorerNodeId::Mongo {
+                profile_id,
+                node: crate::db::mongodb::types::MongoExplorerNodeId::Index {
+                    namespace: namespace.clone(),
+                    name: "_id_".into()
+                }
+            }));
+    }
+
+    #[test]
+    fn mongodb_discovery_error_projects_a_targeted_retry_row() {
+        let profile_id = Uuid::new_v4();
+        let mut tree = ExplorerTreeState::default();
+        tree.add_profile(profile_id);
+        let profile = tree.profiles.get_mut(&profile_id).unwrap();
+        profile.kind = DatabaseKind::MongoDb;
+        profile.mongodb_databases = vec!["app".into()];
+        profile
+            .mongodb_collection_errors
+            .insert("app".into(), "denied".into());
+        tree.expanded.insert(ExplorerNodeId::Profile(profile_id));
+        tree.expanded.insert(ExplorerNodeId::Mongo {
+            profile_id,
+            node: crate::db::mongodb::types::MongoExplorerNodeId::Database("app".into()),
+        });
+        let retry = ExplorerNodeId::Mongo {
+            profile_id,
+            node: crate::db::mongodb::types::MongoExplorerNodeId::RetryCollections("app".into()),
+        };
+        assert!(tree.visible().iter().any(|row| row.id == retry));
+        assert!(tree.node_exists(&retry));
+    }
 
     fn table_entry(profile: Uuid, schema: &CatalogId, index: usize) -> CatalogEntry {
         let name = format!("table_{index:04}");

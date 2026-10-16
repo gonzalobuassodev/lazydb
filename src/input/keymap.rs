@@ -168,6 +168,126 @@ impl Keymap {
         if matches!(event.kind, KeyEventKind::Release) {
             return None;
         }
+        if matches!(
+            app.tabs.get(app.active_tab),
+            Some(crate::model::tab::WorkspaceTab::MongoConsole(_))
+        ) && event.modifiers.contains(KeyModifiers::ALT)
+        {
+            self.clear_pending();
+            return match event.code {
+                KeyCode::Char('b') => Some(Action::MongoTransactionBegin),
+                KeyCode::Char('c') => Some(Action::MongoTransactionCommit),
+                KeyCode::Char('a') => Some(Action::MongoTransactionAbort),
+                _ => None,
+            };
+        }
+        if matches!(
+            app.tabs.get(app.active_tab),
+            Some(crate::model::tab::WorkspaceTab::MongoDashboard(_))
+        ) && event.modifiers.is_empty()
+        {
+            match event.code {
+                KeyCode::Char('r') => return Some(Action::MongoMonitorRefresh),
+                KeyCode::Char('u') => return Some(Action::MongoPrincipalsRefresh),
+                KeyCode::Char('n') => return Some(Action::MongoPrincipalNewUser),
+                KeyCode::Char('N') => return Some(Action::MongoPrincipalNewRole),
+                _ => {}
+            }
+        }
+        if let Some(crate::model::tab::WorkspaceTab::MongoConsole(_)) = app.tabs.get(app.active_tab)
+            && event.modifiers.contains(KeyModifiers::CONTROL)
+            && event.code == KeyCode::Enter
+        {
+            return Some(Action::MongoConsoleRun);
+        }
+        if app.focus == Focus::Results
+            && let Some(crate::model::tab::WorkspaceTab::MongoBrowser(tab)) =
+                app.tabs.get(app.active_tab)
+        {
+            if tab.editing {
+                self.clear_pending();
+                return match event.code {
+                    KeyCode::Esc => Some(Action::MongoDocumentCancelEdit),
+                    KeyCode::Enter if event.modifiers.contains(KeyModifiers::CONTROL) => {
+                        Some(Action::MongoDocumentSave)
+                    }
+                    KeyCode::Char('s') if event.modifiers == KeyModifiers::CONTROL => None,
+                    KeyCode::Backspace => Some(Action::MongoDocumentEditText(
+                        crate::model::text_input::TextInputEdit::Backspace,
+                    )),
+                    KeyCode::Char(ch) if event.modifiers.is_empty() => {
+                        Some(Action::MongoDocumentEditText(
+                            crate::model::text_input::TextInputEdit::Insert(ch),
+                        ))
+                    }
+                    _ => None,
+                };
+            }
+            if tab.query_field.is_some() {
+                return match event.code {
+                    KeyCode::Esc => Some(Action::MongoQueryCancel),
+                    KeyCode::Enter => Some(Action::MongoQuerySubmit),
+                    KeyCode::Left => Some(Action::MongoQueryEdit(
+                        crate::model::text_input::TextInputEdit::MoveLeft,
+                    )),
+                    KeyCode::Right => Some(Action::MongoQueryEdit(
+                        crate::model::text_input::TextInputEdit::MoveRight,
+                    )),
+                    KeyCode::Home => Some(Action::MongoQueryEdit(
+                        crate::model::text_input::TextInputEdit::MoveHome,
+                    )),
+                    KeyCode::End => Some(Action::MongoQueryEdit(
+                        crate::model::text_input::TextInputEdit::MoveEnd,
+                    )),
+                    KeyCode::Backspace => Some(Action::MongoQueryEdit(
+                        crate::model::text_input::TextInputEdit::Backspace,
+                    )),
+                    KeyCode::Delete => Some(Action::MongoQueryEdit(
+                        crate::model::text_input::TextInputEdit::Delete,
+                    )),
+                    KeyCode::Char(ch) if event.modifiers.is_empty() => Some(
+                        Action::MongoQueryEdit(crate::model::text_input::TextInputEdit::Insert(ch)),
+                    ),
+                    _ => None,
+                };
+            }
+            if event.modifiers.is_empty() {
+                let action = match event.code {
+                    KeyCode::Char('j') | KeyCode::Down => Some(Action::MongoDocumentNext),
+                    KeyCode::Char('k') | KeyCode::Up => Some(Action::MongoDocumentPrevious),
+                    KeyCode::Char('e') => Some(Action::MongoDocumentEdit),
+                    KeyCode::Char('f') => Some(Action::MongoQueryField(
+                        crate::model::mongodb_browser::MongoQueryField::Filter,
+                    )),
+                    KeyCode::Char('s') => Some(Action::MongoQueryField(
+                        crate::model::mongodb_browser::MongoQueryField::Sort,
+                    )),
+                    KeyCode::Char('p') => Some(Action::MongoQueryField(
+                        crate::model::mongodb_browser::MongoQueryField::Projection,
+                    )),
+                    KeyCode::Char('y') => Some(Action::MongoCopyDocument),
+                    KeyCode::Char('E') => Some(Action::MongoExportEjson),
+                    KeyCode::Char('i') if tab.import_draft.is_some() => {
+                        Some(Action::MongoImportAccept)
+                    }
+                    KeyCode::Char('d') => Some(Action::MongoDeleteSelected),
+                    KeyCode::Char('l') => Some(Action::MongoPageNext),
+                    KeyCode::Char('r')
+                        if matches!(
+                            tab.page,
+                            crate::model::mongodb_browser::MongoPageState::Failed(_)
+                        ) =>
+                    {
+                        Some(Action::MongoPageRetry)
+                    }
+                    _ => None,
+                };
+                if action.is_some() {
+                    self.clear_pending();
+                    return action;
+                }
+            }
+        }
         if self.bindings.matches(
             "smart-toggle-pane-maximized",
             KeyEvent::new(event.code, event.modifiers),
@@ -632,6 +752,122 @@ impl Keymap {
                 _ => None,
             };
         }
+        if matches!(app.overlay, Some(Overlay::MongoPrincipalMutation(_))) {
+            self.pending = None;
+            let Some(Overlay::MongoPrincipalMutation(draft)) = app.overlay.as_ref() else {
+                return None;
+            };
+            let password = draft.selected_field
+                == crate::model::mongodb_principal::MongoPrincipalField::Password;
+            return match event.code {
+                KeyCode::Esc => Some(Action::MongoPrincipalMutationCancel),
+                KeyCode::Tab => Some(Action::MongoPrincipalMutationMoveField(1)),
+                KeyCode::BackTab => Some(Action::MongoPrincipalMutationMoveField(-1)),
+                KeyCode::Enter
+                    if draft.selected_field
+                        == crate::model::mongodb_principal::MongoPrincipalField::Operation =>
+                {
+                    Some(Action::MongoPrincipalMutationOperation("next".into()))
+                }
+                KeyCode::Enter => Some(Action::MongoPrincipalMutationConfirm),
+                KeyCode::Backspace if password => {
+                    Some(Action::MongoPrincipalMutationPasswordBackspace)
+                }
+                KeyCode::Delete if password => Some(Action::MongoPrincipalMutationPasswordDelete),
+                KeyCode::Left if password => Some(Action::MongoPrincipalMutationPasswordMove(-1)),
+                KeyCode::Right if password => Some(Action::MongoPrincipalMutationPasswordMove(1)),
+                KeyCode::Home if password => {
+                    Some(Action::MongoPrincipalMutationPasswordMove(isize::MIN))
+                }
+                KeyCode::End if password => {
+                    Some(Action::MongoPrincipalMutationPasswordMove(isize::MAX))
+                }
+                KeyCode::Backspace => Some(Action::MongoPrincipalMutationEdit(
+                    crate::model::text_input::TextInputEdit::Backspace,
+                )),
+                KeyCode::Delete => Some(Action::MongoPrincipalMutationEdit(
+                    crate::model::text_input::TextInputEdit::Delete,
+                )),
+                KeyCode::Left => Some(Action::MongoPrincipalMutationEdit(
+                    crate::model::text_input::TextInputEdit::MoveLeft,
+                )),
+                KeyCode::Right => Some(Action::MongoPrincipalMutationEdit(
+                    crate::model::text_input::TextInputEdit::MoveRight,
+                )),
+                KeyCode::Home => Some(Action::MongoPrincipalMutationEdit(
+                    crate::model::text_input::TextInputEdit::MoveHome,
+                )),
+                KeyCode::End => Some(Action::MongoPrincipalMutationEdit(
+                    crate::model::text_input::TextInputEdit::MoveEnd,
+                )),
+                KeyCode::Char('v') if event.modifiers.contains(KeyModifiers::CONTROL) => {
+                    Some(Action::MongoPrincipalMutationPaste(String::new()))
+                }
+                KeyCode::Char('v')
+                    if cfg!(target_os = "macos")
+                        && event.modifiers.contains(KeyModifiers::SUPER) =>
+                {
+                    Some(Action::MongoPrincipalMutationPaste(String::new()))
+                }
+                KeyCode::Char(ch) if event.modifiers.is_empty() && password => {
+                    Some(Action::MongoPrincipalMutationPasswordInsert(ch))
+                }
+                KeyCode::Char(ch)
+                    if event.modifiers.is_empty()
+                        && draft.selected_field
+                            != crate::model::mongodb_principal::MongoPrincipalField::Operation =>
+                {
+                    Some(Action::MongoPrincipalMutationEdit(
+                        crate::model::text_input::TextInputEdit::Insert(ch),
+                    ))
+                }
+                KeyCode::Char(ch)
+                    if event.modifiers.is_empty()
+                        && draft.selected_field
+                            == crate::model::mongodb_principal::MongoPrincipalField::Operation =>
+                {
+                    Some(Action::MongoPrincipalMutationOperation(ch.to_string()))
+                }
+                _ => None,
+            };
+        }
+        if matches!(
+            app.overlay,
+            Some(Overlay::MongoPrincipalConfirmation { .. })
+        ) {
+            self.pending = None;
+            return match event.code {
+                KeyCode::Esc => Some(Action::MongoPrincipalConfirmationCancel),
+                KeyCode::Enter => Some(Action::MongoPrincipalConfirmationConfirm),
+                KeyCode::Backspace => Some(Action::MongoPrincipalConfirmationBackspace),
+                KeyCode::Delete => Some(Action::MongoPrincipalConfirmationEdit(
+                    crate::model::text_input::TextInputEdit::Delete,
+                )),
+                KeyCode::Left => Some(Action::MongoPrincipalConfirmationEdit(
+                    crate::model::text_input::TextInputEdit::MoveLeft,
+                )),
+                KeyCode::Right => Some(Action::MongoPrincipalConfirmationEdit(
+                    crate::model::text_input::TextInputEdit::MoveRight,
+                )),
+                KeyCode::Home => Some(Action::MongoPrincipalConfirmationEdit(
+                    crate::model::text_input::TextInputEdit::MoveHome,
+                )),
+                KeyCode::End => Some(Action::MongoPrincipalConfirmationEdit(
+                    crate::model::text_input::TextInputEdit::MoveEnd,
+                )),
+                KeyCode::Char(ch) if event.modifiers.is_empty() => {
+                    Some(Action::MongoPrincipalConfirmationInsert(ch))
+                }
+                KeyCode::Char('v')
+                    if event.modifiers.contains(KeyModifiers::CONTROL)
+                        || (cfg!(target_os = "macos")
+                            && event.modifiers.contains(KeyModifiers::SUPER)) =>
+                {
+                    Some(Action::MongoPrincipalConfirmationPaste(String::new()))
+                }
+                _ => None,
+            };
+        }
         if matches!(app.overlay, Some(Overlay::PrincipalMutationForm(_))) {
             self.pending = None;
             return match (event.code, app.overlay.as_ref()) {
@@ -647,6 +883,21 @@ impl Keymap {
                 (KeyCode::Char('o'), _) => Some(Action::TogglePrincipalMutationFormOperation),
                 (KeyCode::Enter, _) => Some(Action::ConfirmPrincipalMutationForm),
                 (KeyCode::Esc | KeyCode::Char('q'), _) => Some(Action::CancelPrincipalMutationForm),
+                _ => None,
+            };
+        }
+        if matches!(
+            app.overlay,
+            Some(Overlay::MongoPrincipalConfirmation { .. })
+        ) {
+            self.pending = None;
+            return match event.code {
+                KeyCode::Esc => Some(Action::MongoPrincipalConfirmationCancel),
+                KeyCode::Enter => Some(Action::MongoPrincipalConfirmationConfirm),
+                KeyCode::Backspace => Some(Action::MongoPrincipalConfirmationBackspace),
+                KeyCode::Char(ch) if event.modifiers.is_empty() => {
+                    Some(Action::MongoPrincipalConfirmationInsert(ch))
+                }
                 _ => None,
             };
         }
@@ -1151,6 +1402,58 @@ impl Keymap {
             self.pending = None;
             return match event.code {
                 KeyCode::Esc => Some(Action::RedisDeleteCancel),
+                _ => None,
+            };
+        }
+        if let Some(Overlay::MongoManagement(draft)) = app.overlay.as_ref() {
+            if draft.confirmation_text.is_none() {
+                return match event.code {
+                    KeyCode::Esc => Some(Action::MongoManagementCancel),
+                    KeyCode::Enter if event.modifiers.contains(KeyModifiers::CONTROL) => {
+                        Some(Action::MongoManagementConfirm)
+                    }
+                    KeyCode::Backspace => Some(Action::MongoManagementEditText(
+                        crate::model::text_input::TextInputEdit::Backspace,
+                    )),
+                    KeyCode::Delete => Some(Action::MongoManagementEditText(
+                        crate::model::text_input::TextInputEdit::Delete,
+                    )),
+                    KeyCode::Left => Some(Action::MongoManagementEditText(
+                        crate::model::text_input::TextInputEdit::MoveLeft,
+                    )),
+                    KeyCode::Right => Some(Action::MongoManagementEditText(
+                        crate::model::text_input::TextInputEdit::MoveRight,
+                    )),
+                    KeyCode::Home => Some(Action::MongoManagementEditText(
+                        crate::model::text_input::TextInputEdit::MoveHome,
+                    )),
+                    KeyCode::End => Some(Action::MongoManagementEditText(
+                        crate::model::text_input::TextInputEdit::MoveEnd,
+                    )),
+                    KeyCode::Char('v') if event.modifiers == KeyModifiers::CONTROL => None,
+                    KeyCode::Char('c') if event.modifiers == KeyModifiers::CONTROL => None,
+                    KeyCode::Char(ch) if event.modifiers.is_empty() => {
+                        Some(Action::MongoManagementEditText(
+                            crate::model::text_input::TextInputEdit::Insert(ch),
+                        ))
+                    }
+                    _ => None,
+                };
+            }
+            self.pending = None;
+            return match event.code {
+                KeyCode::Enter if draft.confirmation_valid() => {
+                    Some(Action::MongoManagementConfirm)
+                }
+                KeyCode::Esc => Some(Action::MongoManagementCancel),
+                KeyCode::Backspace => Some(Action::MongoManagementBackspace),
+                KeyCode::Char(ch)
+                    if !event.modifiers.intersects(
+                        KeyModifiers::CONTROL | KeyModifiers::ALT | KeyModifiers::SUPER,
+                    ) =>
+                {
+                    Some(Action::MongoManagementChar(ch))
+                }
                 _ => None,
             };
         }
@@ -1762,6 +2065,61 @@ impl Keymap {
             self.set_pending(Pending::Window { count: 1 }, app);
             return None;
         }
+        if app.focus == Focus::Results
+            && event.modifiers == KeyModifiers::CONTROL
+            && event.code == KeyCode::Char('w')
+            && matches!(
+                app.tabs.get(app.active_tab),
+                Some(crate::model::tab::WorkspaceTab::MongoBrowser(_))
+            )
+        {
+            self.set_pending(Pending::Window { count: 1 }, app);
+            return None;
+        }
+        if app.focus == Focus::Results
+            && matches!(
+                app.tabs.get(app.active_tab),
+                Some(crate::model::tab::WorkspaceTab::MongoBrowser(_))
+            )
+        {
+            let Some(crate::model::tab::WorkspaceTab::MongoBrowser(tab)) =
+                app.tabs.get(app.active_tab)
+            else {
+                return None;
+            };
+            if tab.editing {
+                return match event.code {
+                    KeyCode::Esc => Some(Action::MongoDocumentCancelEdit),
+                    KeyCode::Enter if event.modifiers.contains(KeyModifiers::CONTROL) => {
+                        Some(Action::MongoDocumentSave)
+                    }
+                    KeyCode::Backspace => Some(Action::MongoDocumentEditText(
+                        crate::model::text_input::TextInputEdit::Backspace,
+                    )),
+                    KeyCode::Char(ch) if event.modifiers.is_empty() => {
+                        Some(Action::MongoDocumentEditText(
+                            crate::model::text_input::TextInputEdit::Insert(ch),
+                        ))
+                    }
+                    _ => None,
+                };
+            }
+            if matches!(
+                tab.page,
+                crate::model::mongodb_browser::MongoPageState::Failed(_)
+            ) && event.modifiers.is_empty()
+                && event.code == KeyCode::Char('r')
+            {
+                return Some(Action::MongoPageRetry);
+            }
+            return match event.code {
+                KeyCode::Char('j') | KeyCode::Down => Some(Action::MongoDocumentNext),
+                KeyCode::Char('k') | KeyCode::Up => Some(Action::MongoDocumentPrevious),
+                KeyCode::Char('e') => Some(Action::MongoDocumentEdit),
+                KeyCode::Char('l') => Some(Action::MongoPageNext),
+                _ => None,
+            };
+        }
 
         if app.focus == Focus::Results
             && matches!(
@@ -2372,6 +2730,19 @@ impl Keymap {
         {
             return Some(Action::ShowHelp);
         }
+        if matches!(
+            app.tabs.get(app.active_tab),
+            Some(crate::model::tab::WorkspaceTab::MongoConsole(_))
+        ) && event.modifiers.contains(KeyModifiers::ALT)
+        {
+            self.clear_pending();
+            return match event.code {
+                KeyCode::Char('b') => Some(Action::MongoTransactionBegin),
+                KeyCode::Char('c') => Some(Action::MongoTransactionCommit),
+                KeyCode::Char('a') => Some(Action::MongoTransactionAbort),
+                _ => None,
+            };
+        }
         if app.focus == Focus::Editor {
             return Some(Action::EditorKey(event));
         }
@@ -2915,6 +3286,112 @@ fn map_configured_navigation(
     bindings: &crate::config::KeyBindings,
 ) -> Option<Action> {
     if app.focus == Focus::Explorer {
+        if bindings.matches("explorer-create", event)
+            && let Some(crate::model::explorer::ExplorerNodeId::Mongo {
+                profile_id: _,
+                node,
+            }) = app.explorer.selected_id()
+        {
+            let operation = match node {
+                crate::db::mongodb::types::MongoExplorerNodeId::Database(database) => Some(
+                    crate::model::mongodb_management::MongoManagementOperation::CreateCollection {
+                        database: database.clone(),
+                    },
+                ),
+                crate::db::mongodb::types::MongoExplorerNodeId::Collection(namespace) => Some(
+                    crate::model::mongodb_management::MongoManagementOperation::CreateIndex {
+                        namespace: namespace.clone(),
+                    },
+                ),
+                _ => None,
+            };
+            if let Some(operation) = operation {
+                return Some(Action::MongoManagementOpen(operation));
+            }
+        }
+        if bindings.matches("explorer-edit", event) {
+            if let Some(crate::model::explorer::ExplorerNodeId::Mongo {
+                node: crate::db::mongodb::types::MongoExplorerNodeId::Database(database),
+                ..
+            }) = app.explorer.selected_id()
+            {
+                return Some(Action::MongoManagementOpen(
+                    crate::model::mongodb_management::MongoManagementOperation::CreateView {
+                        database: database.clone(),
+                    },
+                ));
+            }
+            if let Some(crate::model::explorer::ExplorerNodeId::Mongo {
+                profile_id: _,
+                node: crate::db::mongodb::types::MongoExplorerNodeId::Collection(namespace),
+            }) = app.explorer.selected_id()
+            {
+                return Some(Action::MongoManagementOpen(
+                    crate::model::mongodb_management::MongoManagementOperation::CollMod {
+                        namespace: namespace.clone(),
+                    },
+                ));
+            }
+            if let Some(crate::model::explorer::ExplorerNodeId::Mongo {
+                node: crate::db::mongodb::types::MongoExplorerNodeId::Index { namespace, name },
+                ..
+            }) = app.explorer.selected_id()
+            {
+                return Some(Action::MongoManagementOpen(
+                    crate::model::mongodb_management::MongoManagementOperation::DropIndex {
+                        namespace: namespace.clone(),
+                        name: name.clone(),
+                    },
+                ));
+            }
+        }
+        if bindings.matches("explorer-rename", event)
+            && let Some(crate::model::explorer::ExplorerNodeId::Mongo {
+                node: crate::db::mongodb::types::MongoExplorerNodeId::Collection(namespace),
+                ..
+            }) = app.explorer.selected_id()
+        {
+            return Some(Action::MongoManagementOpen(
+                crate::model::mongodb_management::MongoManagementOperation::RenameCollection {
+                    namespace: namespace.clone(),
+                },
+            ));
+        }
+        if bindings.matches("explorer-delete", event) {
+            if let Some(crate::model::explorer::ExplorerNodeId::Mongo {
+                profile_id,
+                node: crate::db::mongodb::types::MongoExplorerNodeId::Collection(namespace),
+            }) = app.explorer.selected_id()
+            {
+                let kind = app
+                    .explorer
+                    .normalized
+                    .profiles
+                    .get(profile_id)
+                    .and_then(|p| p.mongodb_collections.get(&namespace.database))
+                    .and_then(|items| items.iter().find(|item| item.namespace == *namespace))
+                    .map(|item| item.collection_type)
+                    .unwrap_or(crate::db::mongodb::types::MongoCollectionType::Collection);
+                return Some(Action::MongoManagementOpen(
+                    crate::model::mongodb_management::MongoManagementOperation::DropCollection {
+                        namespace: namespace.clone(),
+                        kind,
+                    },
+                ));
+            }
+            if let Some(crate::model::explorer::ExplorerNodeId::Mongo {
+                node: crate::db::mongodb::types::MongoExplorerNodeId::Index { namespace, name },
+                ..
+            }) = app.explorer.selected_id()
+            {
+                return Some(Action::MongoManagementOpen(
+                    crate::model::mongodb_management::MongoManagementOperation::DropIndex {
+                        namespace: namespace.clone(),
+                        name: name.clone(),
+                    },
+                ));
+            }
+        }
         if bindings.matches("explorer-copy-selection", event) {
             return Some(Action::CopyExplorerSelection);
         }
@@ -3810,6 +4287,18 @@ fn configured_command_action(command: &str, app: &App) -> Option<Action> {
 }
 
 pub fn map_paste(value: String, app: &App) -> Vec<Action> {
+    if let Some(Overlay::MongoPrincipalMutation(draft)) = app.overlay.as_ref() {
+        if draft.selected_field == crate::model::mongodb_principal::MongoPrincipalField::Password {
+            return vec![Action::MongoPrincipalMutationPasswordPaste(value)];
+        }
+        return vec![Action::MongoPrincipalMutationPaste(value)];
+    }
+    if matches!(
+        app.overlay,
+        Some(Overlay::MongoPrincipalConfirmation { .. })
+    ) {
+        return vec![Action::MongoPrincipalConfirmationPaste(value)];
+    }
     if app.omni.is_some() {
         return vec![Action::OmniPaste(value)];
     }
@@ -3891,6 +4380,17 @@ pub fn map_paste(value: String, app: &App) -> Vec<Action> {
     }
     if app.overlay.is_some() {
         return Vec::new();
+    }
+    if let Some(crate::model::tab::WorkspaceTab::MongoBrowser(tab)) = app.tabs.get(app.active_tab)
+        && app.focus == Focus::Results
+    {
+        if tab.query_field.is_some() {
+            return vec![Action::MongoQueryPaste(value)];
+        }
+        if tab.editing {
+            return vec![Action::MongoDocumentEditPaste(value)];
+        }
+        return vec![Action::MongoImportDraft(value)];
     }
     if matches!(
         app.tabs.get(app.active_tab),
@@ -4961,9 +5461,14 @@ fn active_data_query_has_focus(app: &App) -> bool {
     match app.tabs.get(app.active_tab) {
         Some(crate::model::tab::WorkspaceTab::Relation(tab)) => tab.query.focus.is_some(),
         Some(crate::model::tab::WorkspaceTab::Sql(tab)) => tab.query.focus.is_some(),
-        Some(crate::model::tab::WorkspaceTab::Dashboard(_)) => false,
+        Some(
+            crate::model::tab::WorkspaceTab::Dashboard(_)
+            | crate::model::tab::WorkspaceTab::MongoDashboard(_),
+        ) => false,
         Some(crate::model::tab::WorkspaceTab::RedisBrowser(_)) => false,
         Some(crate::model::tab::WorkspaceTab::PrincipalDdl(_)) => false,
+        Some(crate::model::tab::WorkspaceTab::MongoBrowser(_)) => false,
+        Some(crate::model::tab::WorkspaceTab::MongoConsole(_)) => false,
         None => false,
     }
 }

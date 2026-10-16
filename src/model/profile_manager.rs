@@ -380,6 +380,7 @@ pub struct ProfileDraft {
     pub password_storage: PasswordStorageChoice,
     pub sqlite_memory: bool,
     pub sqlite_path: TextInput,
+    pub mongodb_options: Option<crate::profile::MongoConnectionOptions>,
     pub original_credential_policy: CredentialPolicy,
     pub has_stored_credential: bool,
     pub catalog_scope: CatalogScope,
@@ -434,6 +435,7 @@ impl ProfileDraft {
             DatabaseKind::SqlServer => ("localhost", "1433", "dbo", SslMode::Prefer),
             DatabaseKind::Sqlite => ("", "", "main", SslMode::Disable),
             DatabaseKind::Redis => ("localhost", "6379", "", SslMode::Disable),
+            DatabaseKind::MongoDb => ("localhost", "27017", "", SslMode::Prefer),
         };
 
         let mut draft = Self {
@@ -462,6 +464,7 @@ impl ProfileDraft {
             password_storage: PasswordStorageChoice::LocalEncrypted,
             sqlite_memory: false,
             sqlite_path: TextInput::default(),
+            mongodb_options: None,
             original_credential_policy: CredentialPolicy::None,
             has_stored_credential: false,
             catalog_scope: CatalogScope::for_profile(kind, "", Some(schema)),
@@ -473,6 +476,16 @@ impl ProfileDraft {
         };
         if kind == DatabaseKind::Redis {
             draft.database.set("0");
+        }
+        if kind == DatabaseKind::MongoDb {
+            draft.mongodb_options = Some(crate::profile::MongoConnectionOptions {
+                seeds: vec![crate::profile::MongoSeed {
+                    host: host.to_owned(),
+                    port: Some(27017),
+                }],
+                srv: false,
+                uri_options: Vec::new(),
+            });
         }
         draft.refresh_url();
         draft
@@ -523,6 +536,7 @@ impl ProfileDraft {
                     .map(|port| port.to_string())
                     .unwrap_or_default(),
             ),
+            mongodb_options: profile.mongodb_options.clone(),
             user: TextInput::from(profile.user.clone().unwrap_or_default()),
             password: SecretTextInput::default(),
             database: TextInput::from(profile.database.clone().unwrap_or_default()),
@@ -712,6 +726,7 @@ impl ProfileDraft {
         self.kind = parsed.kind;
         self.automatic_port = None;
         self.url_format = parsed.format;
+        self.mongodb_options = parsed.mongodb_options.clone();
         self.host.set(parsed.host.unwrap_or_default());
         self.port
             .set(parsed.port.map(|port| port.to_string()).unwrap_or_default());
@@ -890,6 +905,39 @@ impl ProfileDraft {
         ) {
             self.invalidate_catalog_discovery();
         }
+        if self.kind == DatabaseKind::MongoDb
+            && matches!(field, ProfileField::Host | ProfileField::Port)
+            && self.mongodb_options.is_some()
+        {
+            // The host and port fields are a summary of the first seed for an
+            // imported multi-seed URI. Editing either explicitly switches to
+            // the simple single-seed form so the displayed URL cannot lie.
+            let srv = self.url_format == ConnectionUrlFormat::MongoDbSrv;
+            let host = self.host.value().trim().to_owned();
+            let port = self
+                .port
+                .value()
+                .trim()
+                .parse::<u16>()
+                .ok()
+                .filter(|port| *port > 0);
+            self.mongodb_options = Some(crate::profile::MongoConnectionOptions {
+                seeds: if host.is_empty() {
+                    Vec::new()
+                } else {
+                    vec![crate::profile::MongoSeed {
+                        host,
+                        port: if srv { None } else { port },
+                    }]
+                },
+                srv,
+                uri_options: self
+                    .mongodb_options
+                    .as_ref()
+                    .map(|options| options.uri_options.clone())
+                    .unwrap_or_default(),
+            });
+        }
         if matches!(
             field,
             ProfileField::Database | ProfileField::Schema | ProfileField::SqlitePath
@@ -966,6 +1014,7 @@ impl ProfileDraft {
             (DatabaseKind::MariaDb, _) => &MYSQL_FIELDS,
             (DatabaseKind::Oracle, _) => &ORACLE_FIELDS,
             (DatabaseKind::Redis, _) => &REDIS_FIELDS,
+            (DatabaseKind::MongoDb, _) => &MONGODB_FIELDS,
         }
     }
 
@@ -1009,130 +1058,188 @@ impl ProfileDraft {
             ));
         }
 
-        let (host, port, user, database, default_schema, sqlite_path, ssl_mode) = match self.kind {
-            DatabaseKind::Postgres
-            | DatabaseKind::MySql
-            | DatabaseKind::MariaDb
-            | DatabaseKind::SqlServer => {
-                let host = required(&self.host, ProfileField::Host, "host is required")?;
-                let port = self.port.value().trim().parse::<u16>().map_err(|_| {
-                    ProfileValidationError::new(
-                        ProfileField::Port,
-                        "port must be an integer from 1 to 65535",
-                    )
-                })?;
-                if port == 0 {
-                    return Err(ProfileValidationError::new(
-                        ProfileField::Port,
-                        "port must be an integer from 1 to 65535",
-                    ));
-                }
-                let database = required(
-                    &self.database,
-                    ProfileField::Database,
-                    "database is required",
-                )?;
-
-                (
-                    Some(host),
-                    Some(port),
-                    optional(&self.user),
-                    Some(database),
-                    matches!(self.kind, DatabaseKind::Postgres | DatabaseKind::SqlServer)
-                        .then(|| optional(&self.schema))
-                        .flatten(),
-                    None,
-                    self.ssl_mode,
-                )
-            }
-            DatabaseKind::Oracle => {
-                let host = required(&self.host, ProfileField::Host, "host is required")?;
-                let port = self.port.value().trim().parse::<u16>().map_err(|_| {
-                    ProfileValidationError::new(
-                        ProfileField::Port,
-                        "port must be an integer from 1 to 65535",
-                    )
-                })?;
-                if port == 0 {
-                    return Err(ProfileValidationError::new(
-                        ProfileField::Port,
-                        "port must be an integer from 1 to 65535",
-                    ));
-                }
-                let database = required(
-                    &self.database,
-                    ProfileField::Database,
-                    "service name is required",
-                )?;
-                (
-                    Some(host),
-                    Some(port),
-                    optional(&self.user),
-                    Some(database),
-                    None,
-                    None,
-                    self.ssl_mode,
-                )
-            }
-            DatabaseKind::Sqlite => {
-                let path = if self.sqlite_memory {
-                    None
-                } else {
-                    Some(PathBuf::from(required(
-                        &self.sqlite_path,
-                        ProfileField::SqlitePath,
-                        "SQLite path is required when memory mode is disabled",
-                    )?))
-                };
-                let database = path
-                    .as_ref()
-                    .map(|path| path.to_string_lossy().into_owned())
-                    .unwrap_or_else(|| ":memory:".to_owned());
-
-                (
-                    None,
-                    None,
-                    None,
-                    Some(database),
-                    Some("main".to_owned()),
-                    path,
-                    SslMode::Disable,
-                )
-            }
-            DatabaseKind::Redis => {
-                let database = required(
-                    &self.database,
-                    ProfileField::Database,
-                    "Redis database is required",
-                )?
-                .parse::<u32>()
-                .map_err(|_| {
-                    ProfileValidationError::new(
+        let (host, port, user, database, default_schema, sqlite_path, ssl_mode, mongodb_options) =
+            match self.kind {
+                DatabaseKind::Postgres
+                | DatabaseKind::MySql
+                | DatabaseKind::MariaDb
+                | DatabaseKind::SqlServer => {
+                    let host = required(&self.host, ProfileField::Host, "host is required")?;
+                    let port = self.port.value().trim().parse::<u16>().map_err(|_| {
+                        ProfileValidationError::new(
+                            ProfileField::Port,
+                            "port must be an integer from 1 to 65535",
+                        )
+                    })?;
+                    if port == 0 {
+                        return Err(ProfileValidationError::new(
+                            ProfileField::Port,
+                            "port must be an integer from 1 to 65535",
+                        ));
+                    }
+                    let database = required(
+                        &self.database,
                         ProfileField::Database,
-                        "Redis database must be a non-negative integer",
+                        "database is required",
+                    )?;
+
+                    (
+                        Some(host),
+                        Some(port),
+                        optional(&self.user),
+                        Some(database),
+                        matches!(self.kind, DatabaseKind::Postgres | DatabaseKind::SqlServer)
+                            .then(|| optional(&self.schema))
+                            .flatten(),
+                        None,
+                        self.ssl_mode,
+                        self.mongodb_options.clone(),
                     )
-                })?;
-                let port = self.port.value().trim().parse::<u16>().map_err(|_| {
-                    ProfileValidationError::new(
-                        ProfileField::Port,
-                        "port must be an integer from 1 to 65535",
+                }
+                DatabaseKind::Oracle => {
+                    let host = required(&self.host, ProfileField::Host, "host is required")?;
+                    let port = self.port.value().trim().parse::<u16>().map_err(|_| {
+                        ProfileValidationError::new(
+                            ProfileField::Port,
+                            "port must be an integer from 1 to 65535",
+                        )
+                    })?;
+                    if port == 0 {
+                        return Err(ProfileValidationError::new(
+                            ProfileField::Port,
+                            "port must be an integer from 1 to 65535",
+                        ));
+                    }
+                    let database = required(
+                        &self.database,
+                        ProfileField::Database,
+                        "service name is required",
+                    )?;
+                    (
+                        Some(host),
+                        Some(port),
+                        optional(&self.user),
+                        Some(database),
+                        None,
+                        None,
+                        self.ssl_mode,
+                        self.mongodb_options.clone(),
                     )
-                })?;
-                (
-                    Some(required(
-                        &self.host,
-                        ProfileField::Host,
-                        "host is required",
-                    )?),
-                    Some(port),
-                    optional(&self.user),
-                    Some(database.to_string()),
-                    None,
-                    None,
-                    self.ssl_mode,
-                )
-            }
-        };
+                }
+                DatabaseKind::Sqlite => {
+                    let path = if self.sqlite_memory {
+                        None
+                    } else {
+                        Some(PathBuf::from(required(
+                            &self.sqlite_path,
+                            ProfileField::SqlitePath,
+                            "SQLite path is required when memory mode is disabled",
+                        )?))
+                    };
+                    let database = path
+                        .as_ref()
+                        .map(|path| path.to_string_lossy().into_owned())
+                        .unwrap_or_else(|| ":memory:".to_owned());
+
+                    (
+                        None,
+                        None,
+                        None,
+                        Some(database),
+                        Some("main".to_owned()),
+                        path,
+                        SslMode::Disable,
+                        self.mongodb_options.clone(),
+                    )
+                }
+                DatabaseKind::Redis => {
+                    let database = required(
+                        &self.database,
+                        ProfileField::Database,
+                        "Redis database is required",
+                    )?
+                    .parse::<u32>()
+                    .map_err(|_| {
+                        ProfileValidationError::new(
+                            ProfileField::Database,
+                            "Redis database must be a non-negative integer",
+                        )
+                    })?;
+                    let port = self.port.value().trim().parse::<u16>().map_err(|_| {
+                        ProfileValidationError::new(
+                            ProfileField::Port,
+                            "port must be an integer from 1 to 65535",
+                        )
+                    })?;
+                    let host = required(&self.host, ProfileField::Host, "host is required")?;
+                    (
+                        Some(host),
+                        Some(port),
+                        optional(&self.user),
+                        Some(database.to_string()),
+                        None,
+                        None,
+                        self.ssl_mode,
+                        self.mongodb_options.clone(),
+                    )
+                }
+                DatabaseKind::MongoDb => {
+                    let host = required(&self.host, ProfileField::Host, "host is required")?;
+                    let port = if self.url_format == ConnectionUrlFormat::MongoDbSrv {
+                        None
+                    } else {
+                        Some(
+                            self.port
+                                .value()
+                                .trim()
+                                .parse::<u16>()
+                                .ok()
+                                .filter(|port| *port > 0)
+                                .ok_or_else(|| {
+                                    ProfileValidationError::new(
+                                        ProfileField::Port,
+                                        "port must be an integer from 1 to 65535",
+                                    )
+                                })?,
+                        )
+                    };
+                    let uri_options = self
+                        .mongodb_options
+                        .as_ref()
+                        .map(|options| options.uri_options.clone())
+                        .unwrap_or_default();
+                    let srv = self.url_format == ConnectionUrlFormat::MongoDbSrv;
+                    let profile_options = self
+                        .mongodb_options
+                        .as_ref()
+                        .filter(|options| {
+                            options.srv == srv
+                                && options
+                                    .seeds
+                                    .first()
+                                    .is_some_and(|seed| seed.host == host && seed.port == port)
+                        })
+                        .cloned()
+                        .unwrap_or_else(|| crate::profile::MongoConnectionOptions {
+                            seeds: vec![crate::profile::MongoSeed {
+                                host: host.clone(),
+                                port,
+                            }],
+                            srv,
+                            uri_options,
+                        });
+                    (
+                        Some(host),
+                        port,
+                        optional(&self.user),
+                        optional(&self.database),
+                        None,
+                        None,
+                        self.ssl_mode,
+                        Some(profile_options),
+                    )
+                }
+            };
 
         let credential = self.credential_update();
         let credential_policy = match &credential {
@@ -1175,6 +1282,7 @@ impl ProfileDraft {
                 database,
                 default_schema,
                 sqlite_path,
+                mongodb_options,
                 ssl_mode,
                 credential_policy,
                 read_only: self.read_only,
@@ -1228,6 +1336,7 @@ impl ProfileDraft {
                 Some("main".to_owned()),
             ),
             DatabaseKind::Redis => (self.database.value(), None),
+            DatabaseKind::MongoDb => (self.database.value(), None),
         };
         self.catalog_scope =
             CatalogScope::for_profile(self.kind, database, default_schema.as_deref());
@@ -1375,6 +1484,18 @@ impl ProfileDraft {
                 }
                 if self.ssl_mode == SslMode::Prefer {
                     self.ssl_mode = SslMode::Disable;
+                }
+            }
+            DatabaseKind::MongoDb => {
+                if self.host.value().trim().is_empty() {
+                    self.host.set("localhost");
+                }
+                if self.port.value().trim().is_empty() {
+                    self.port.set("27017");
+                    self.automatic_port = Some("27017".to_owned());
+                }
+                if self.ssl_mode == SslMode::Disable {
+                    self.ssl_mode = SslMode::Prefer;
                 }
             }
             DatabaseKind::Oracle => {
@@ -1551,6 +1672,37 @@ impl ProfileDraft {
                     path,
                 )
             }
+            DatabaseKind::MongoDb => {
+                let host = optional(&self.host).ok_or_else(|| {
+                    ProfileValidationError::new(ProfileField::Host, "host is required")
+                })?;
+                let port = if self.url_format == ConnectionUrlFormat::MongoDbSrv {
+                    None
+                } else {
+                    Some(
+                        self.port
+                            .value()
+                            .trim()
+                            .parse::<u16>()
+                            .ok()
+                            .filter(|port| *port > 0)
+                            .ok_or_else(|| {
+                                ProfileValidationError::new(
+                                    ProfileField::Port,
+                                    "port must be an integer from 1 to 65535",
+                                )
+                            })?,
+                    )
+                };
+                (
+                    Some(host),
+                    port,
+                    optional(&self.user),
+                    optional(&self.database),
+                    None,
+                    None,
+                )
+            }
         };
         Ok(ConnectionProfile {
             id: self.profile_id,
@@ -1565,6 +1717,7 @@ impl ProfileDraft {
             database,
             default_schema,
             sqlite_path,
+            mongodb_options: self.mongodb_options.clone(),
             ssl_mode: self.ssl_mode,
             credential_policy: CredentialPolicy::None,
             read_only: self.read_only,
@@ -2348,6 +2501,7 @@ fn default_port(kind: DatabaseKind) -> Option<u16> {
         DatabaseKind::SqlServer => Some(1433),
         DatabaseKind::Sqlite => None,
         DatabaseKind::Redis => Some(6379),
+        DatabaseKind::MongoDb => Some(27017),
     }
 }
 
@@ -2770,6 +2924,24 @@ const REDIS_FIELDS: [ProfileField; 16] = [
     ProfileField::Url,
     ProfileField::Test,
     ProfileField::Save,
+    ProfileField::Cancel,
+];
+
+const MONGODB_FIELDS: [ProfileField; 15] = [
+    ProfileField::DatabaseCategory,
+    ProfileField::Kind,
+    ProfileField::Name,
+    ProfileField::Host,
+    ProfileField::Port,
+    ProfileField::Database,
+    ProfileField::User,
+    ProfileField::Password,
+    ProfileField::PasswordStorage,
+    ProfileField::SslMode,
+    ProfileField::Environment,
+    ProfileField::ReadOnly,
+    ProfileField::Url,
+    ProfileField::Test,
     ProfileField::Cancel,
 ];
 

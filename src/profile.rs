@@ -19,6 +19,7 @@ pub enum DatabaseKind {
     SqlServer,
     Sqlite,
     Redis,
+    MongoDb,
 }
 
 impl DatabaseKind {
@@ -54,6 +55,8 @@ pub enum ConnectionUrlFormat {
     JdbcSqlite,
     Redis,
     RedisTls,
+    MongoDb,
+    MongoDbSrv,
 }
 
 impl ConnectionUrlFormat {
@@ -66,6 +69,7 @@ impl ConnectionUrlFormat {
             DatabaseKind::SqlServer => Self::SqlServer,
             DatabaseKind::Sqlite => Self::Sqlite,
             DatabaseKind::Redis => Self::Redis,
+            DatabaseKind::MongoDb => Self::MongoDb,
         }
     }
 
@@ -87,6 +91,7 @@ impl ConnectionUrlFormat {
                     DatabaseKind::Sqlite
                 )
                 | (Self::Redis | Self::RedisTls, DatabaseKind::Redis)
+                | (Self::MongoDb | Self::MongoDbSrv, DatabaseKind::MongoDb)
         )
     }
 
@@ -99,6 +104,7 @@ impl ConnectionUrlFormat {
             DatabaseKind::SqlServer => &[Self::SqlServer, Self::MsSql, Self::JdbcSqlServer],
             DatabaseKind::Sqlite => &[Self::Sqlite, Self::FileUri, Self::JdbcSqlite],
             DatabaseKind::Redis => &[Self::Redis, Self::RedisTls],
+            DatabaseKind::MongoDb => &[Self::MongoDb, Self::MongoDbSrv],
         }
     }
 }
@@ -434,6 +440,8 @@ pub struct ConnectionProfile {
     #[serde(default)]
     pub environment: Environment,
     pub catalog_scope: CatalogScope,
+    #[serde(default)]
+    pub mongodb_options: Option<MongoConnectionOptions>,
 }
 
 #[derive(Debug)]
@@ -488,6 +496,23 @@ pub struct ParsedConnectionUrl {
     pub ssl_mode: SslMode,
     pub read_only: bool,
     pub read_only_explicit: bool,
+    pub mongodb_options: Option<MongoConnectionOptions>,
+}
+
+/// MongoDB options which cannot be represented by the shared single-host
+/// connection fields. Credentials are deliberately excluded.
+#[derive(Clone, Debug, Default, Deserialize, Eq, PartialEq, Serialize)]
+#[serde(deny_unknown_fields)]
+pub struct MongoConnectionOptions {
+    pub seeds: Vec<MongoSeed>,
+    pub srv: bool,
+    pub uri_options: Vec<(String, String)>,
+}
+
+#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
+pub struct MongoSeed {
+    pub host: String,
+    pub port: Option<u16>,
 }
 
 pub fn parse_connection_url(input: &str) -> Result<ParsedConnectionUrl, ProfileError> {
@@ -528,6 +553,7 @@ pub fn parse_connection_url(input: &str) -> Result<ParsedConnectionUrl, ProfileE
             read_only,
             read_only_explicit: url::form_urlencoded::parse(query.as_bytes())
                 .any(|(key, _)| key.eq_ignore_ascii_case("mode")),
+            mongodb_options: None,
         });
     }
     if normalized.starts_with("sqlite:") || normalized.starts_with("file:") {
@@ -542,6 +568,13 @@ pub fn parse_connection_url(input: &str) -> Result<ParsedConnectionUrl, ProfileE
     }
     if jdbc && normalized.to_ascii_lowercase().starts_with("oracle:thin:@") {
         return parse_jdbc_oracle_url(normalized);
+    }
+    if normalized.to_ascii_lowercase().starts_with("mongodb://")
+        || normalized
+            .to_ascii_lowercase()
+            .starts_with("mongodb+srv://")
+    {
+        return parse_mongodb_url(normalized);
     }
 
     let url = Url::parse(normalized)?;
@@ -559,6 +592,197 @@ pub fn parse_connection_url(input: &str) -> Result<ParsedConnectionUrl, ProfileE
         (scheme, _) => return Err(ProfileError::UnsupportedScheme(scheme.to_owned())),
     };
     parse_server_url(url, kind, format)
+}
+
+fn parse_mongodb_url(input: &str) -> Result<ParsedConnectionUrl, ProfileError> {
+    let (srv, rest) = if input
+        .get(..14)
+        .is_some_and(|scheme| scheme.eq_ignore_ascii_case("mongodb+srv://"))
+    {
+        (true, &input[14..])
+    } else if input
+        .get(..10)
+        .is_some_and(|scheme| scheme.eq_ignore_ascii_case("mongodb://"))
+    {
+        (false, &input[10..])
+    } else {
+        return Err(ProfileError::UnsupportedScheme("mongodb".into()));
+    };
+    let authority_end = rest.find(['/', '?', '#']).unwrap_or(rest.len());
+    let authority = &rest[..authority_end];
+    let suffix = &rest[authority_end..];
+    if authority.is_empty() || suffix.contains('#') {
+        return Err(ProfileError::MissingHost);
+    }
+    let (credentials, seeds) = match authority.rsplit_once('@') {
+        Some((credentials, seeds)) => (Some(credentials), seeds),
+        None => (None, authority),
+    };
+    if seeds.is_empty() {
+        return Err(ProfileError::MissingHost);
+    }
+    let mut user = None;
+    let mut password = None;
+    if let Some(credentials) = credentials {
+        let (raw_user, raw_password) = credentials.split_once(':').unwrap_or((credentials, ""));
+        if raw_user.is_empty() {
+            return Err(ProfileError::InvalidQueryParameter("username".into()));
+        }
+        user = Some(decode(raw_user));
+        if credentials.contains(':') {
+            password = Some(SecretString::from(decode(raw_password)));
+        }
+    }
+    let mut parsed_seeds = Vec::new();
+    for seed in seeds.split(',') {
+        if seed.is_empty() {
+            return Err(ProfileError::MissingHost);
+        }
+        let (host, port) = if seed.starts_with('[') {
+            let end = seed.find(']').ok_or(ProfileError::MissingHost)?;
+            let host = &seed[1..end];
+            let suffix = &seed[end + 1..];
+            let port = if suffix.is_empty() {
+                None
+            } else {
+                Some(parse_mongo_port(
+                    suffix.strip_prefix(':').ok_or(ProfileError::MissingHost)?,
+                )?)
+            };
+            (host, port)
+        } else {
+            match seed.rsplit_once(':') {
+                Some((host, port)) if !host.contains(':') => (host, Some(parse_mongo_port(port)?)),
+                _ => (seed, None),
+            }
+        };
+        if host.is_empty() || (srv && (!parsed_seeds.is_empty() || port.is_some())) {
+            return Err(ProfileError::InvalidQueryParameter("host".into()));
+        }
+        parsed_seeds.push(MongoSeed {
+            host: host.to_owned(),
+            port,
+        });
+    }
+    let path_query = suffix.strip_prefix('/').unwrap_or(suffix);
+    let (database_raw, query) = path_query.split_once('?').unwrap_or((path_query, ""));
+    let database = (!database_raw.is_empty()).then(|| decode(database_raw));
+    let mut options = Vec::new();
+    let mut singleton = HashSet::new();
+    for pair in query.split('&').filter(|pair| !pair.is_empty()) {
+        let (key, value) = pair.split_once('=').unwrap_or((pair, ""));
+        let key = percent_decode_str(key)
+            .decode_utf8()
+            .map_err(|_| ProfileError::InvalidQueryParameter("option".into()))?
+            .into_owned();
+        let value = percent_decode_str(value)
+            .decode_utf8()
+            .map_err(|_| ProfileError::InvalidQueryParameter(key.clone()))?
+            .into_owned();
+        if key.eq_ignore_ascii_case("password")
+            || key.eq_ignore_ascii_case("tlsCertificateKeyFilePassword")
+            || key.to_ascii_lowercase().contains("token")
+        {
+            return Err(ProfileError::UnsupportedProperty(key));
+        }
+        let repeatable = key.eq_ignore_ascii_case("readPreferenceTags");
+        if !repeatable && !singleton.insert(key.to_ascii_lowercase()) {
+            return Err(ProfileError::ConflictingQueryParameter(key));
+        }
+        if !is_mongodb_uri_option(&key) {
+            return Err(ProfileError::UnknownQueryParameter(key));
+        }
+        options.push((key, value));
+    }
+    if srv
+        && options.iter().any(|(key, value)| {
+            key.eq_ignore_ascii_case("tls") && value.eq_ignore_ascii_case("false")
+        })
+    {
+        return Err(ProfileError::ConflictingQueryParameter("tls".into()));
+    }
+    let host = parsed_seeds.first().map(|seed| seed.host.clone());
+    let port = parsed_seeds.first().and_then(|seed| seed.port);
+    Ok(ParsedConnectionUrl {
+        kind: DatabaseKind::MongoDb,
+        format: if srv {
+            ConnectionUrlFormat::MongoDbSrv
+        } else {
+            ConnectionUrlFormat::MongoDb
+        },
+        host,
+        port,
+        user,
+        password,
+        database,
+        default_schema: None,
+        sqlite_path: None,
+        sqlite_memory: false,
+        ssl_mode: options
+            .iter()
+            .find(|(key, _)| key.eq_ignore_ascii_case("tls") || key.eq_ignore_ascii_case("ssl"))
+            .map(|(_, value)| {
+                if parse_bool(value, "tls").unwrap_or(false) {
+                    SslMode::Require
+                } else {
+                    SslMode::Disable
+                }
+            })
+            .unwrap_or(if srv {
+                SslMode::Require
+            } else {
+                SslMode::Prefer
+            }),
+        read_only: false,
+        read_only_explicit: false,
+        mongodb_options: Some(MongoConnectionOptions {
+            seeds: parsed_seeds,
+            srv,
+            uri_options: options,
+        }),
+    })
+}
+
+fn parse_mongo_port(value: &str) -> Result<u16, ProfileError> {
+    value
+        .parse::<u16>()
+        .ok()
+        .filter(|port| *port > 0)
+        .ok_or_else(|| ProfileError::InvalidQueryParameter("port".into()))
+}
+
+fn is_mongodb_uri_option(key: &str) -> bool {
+    [
+        "authSource",
+        "authMechanism",
+        "replicaSet",
+        "directConnection",
+        "appName",
+        "readPreference",
+        "readPreferenceTags",
+        "retryReads",
+        "retryWrites",
+        "w",
+        "wTimeoutMS",
+        "connectTimeoutMS",
+        "serverSelectionTimeoutMS",
+        "socketTimeoutMS",
+        "tls",
+        "ssl",
+        "tlsCAFile",
+        "tlsCertificateKeyFile",
+        "tlsAllowInvalidCertificates",
+        "tlsAllowInvalidHostnames",
+        "compressors",
+        "zlibCompressionLevel",
+        "loadBalanced",
+        "maxPoolSize",
+        "minPoolSize",
+        "maxIdleTimeMS",
+        "heartbeatFrequencyMS",
+    ]
+    .iter()
+    .any(|known| known.eq_ignore_ascii_case(key))
 }
 
 fn parse_jdbc_oracle_url(input: &str) -> Result<ParsedConnectionUrl, ProfileError> {
@@ -599,6 +823,7 @@ fn parse_jdbc_oracle_url(input: &str) -> Result<ParsedConnectionUrl, ProfileErro
         ssl_mode: SslMode::Prefer,
         read_only: false,
         read_only_explicit: false,
+        mongodb_options: None,
     })
 }
 
@@ -646,6 +871,7 @@ pub fn import_connection_url(
             read_only: parsed.read_only,
             environment: Environment::Development,
             catalog_scope,
+            mongodb_options: parsed.mongodb_options,
         },
         transient_password: parsed.password,
         read_only_explicit: parsed.read_only_explicit,
@@ -745,6 +971,7 @@ fn parse_server_url(
         DatabaseKind::SqlServer => 1433,
         DatabaseKind::Sqlite => unreachable!("server URL cannot be SQLite"),
         DatabaseKind::Redis => 6379,
+        DatabaseKind::MongoDb => unreachable!("MongoDB has its own multi-seed URL parser"),
     };
     Ok(ParsedConnectionUrl {
         kind,
@@ -760,6 +987,7 @@ fn parse_server_url(
         ssl_mode,
         read_only,
         read_only_explicit,
+        mongodb_options: None,
     })
 }
 
@@ -833,6 +1061,7 @@ fn parse_jdbc_sql_server_url(input: &str) -> Result<ParsedConnectionUrl, Profile
         ssl_mode: sql_server_ssl_mode(encrypt, trust_server_certificate)?,
         read_only: read_only.unwrap_or(false),
         read_only_explicit: read_only.is_some(),
+        mongodb_options: None,
     })
 }
 
@@ -951,6 +1180,7 @@ fn parse_sqlite_url(input: &str, jdbc: bool) -> Result<ParsedConnectionUrl, Prof
         read_only,
         read_only_explicit: url::form_urlencoded::parse(query.as_bytes())
             .any(|(key, _)| key.eq_ignore_ascii_case("mode")),
+        mongodb_options: None,
     })
 }
 
@@ -1007,6 +1237,9 @@ pub fn format_connection_url(
             output.push_str("?mode=ro");
         }
         return Ok(output);
+    }
+    if profile.kind == DatabaseKind::MongoDb {
+        return format_mongodb_url(profile, format);
     }
     if format == ConnectionUrlFormat::JdbcSqlServer {
         return format_jdbc_sql_server_url(profile);
@@ -1111,6 +1344,78 @@ pub fn format_connection_url(
     if !query.is_empty() {
         output.push('?');
         output.push_str(&query.join("&"));
+    }
+    Ok(output)
+}
+
+fn format_mongodb_url(
+    profile: &ConnectionProfile,
+    format: ConnectionUrlFormat,
+) -> Result<String, ProfileError> {
+    let fallback_options = MongoConnectionOptions {
+        seeds: vec![MongoSeed {
+            host: profile.host.clone().ok_or(ProfileError::MissingHost)?,
+            port: if format == ConnectionUrlFormat::MongoDbSrv {
+                None
+            } else {
+                Some(profile.port.unwrap_or(27017))
+            },
+        }],
+        srv: format == ConnectionUrlFormat::MongoDbSrv,
+        uri_options: Vec::new(),
+    };
+    let options = profile
+        .mongodb_options
+        .as_ref()
+        .unwrap_or(&fallback_options);
+    let scheme = match format {
+        ConnectionUrlFormat::MongoDb => "mongodb://",
+        ConnectionUrlFormat::MongoDbSrv => "mongodb+srv://",
+        _ => return Err(ProfileError::IncompatibleFormat),
+    };
+    if options.srv != (format == ConnectionUrlFormat::MongoDbSrv) {
+        return Err(ProfileError::IncompatibleFormat);
+    }
+    let seeds = if options.seeds.is_empty() {
+        &fallback_options.seeds
+    } else {
+        &options.seeds
+    };
+    let mut output = scheme.to_owned();
+    if let Some(user) = profile.user.as_deref().filter(|user| !user.is_empty()) {
+        output.push_str(&utf8_percent_encode(user, URL_COMPONENT).to_string());
+        output.push('@');
+    }
+    for (index, seed) in seeds.iter().enumerate() {
+        if index > 0 {
+            output.push(',');
+        }
+        if seed.host.contains(':') {
+            output.push('[');
+            output.push_str(&seed.host);
+            output.push(']');
+        } else {
+            output.push_str(&seed.host);
+        }
+        if let Some(port) = seed.port {
+            output.push(':');
+            output.push_str(&port.to_string());
+        }
+    }
+    if let Some(database) = profile.database.as_deref() {
+        output.push('/');
+        output.push_str(&utf8_percent_encode(database, URL_COMPONENT).to_string());
+    }
+    if !options.uri_options.is_empty() {
+        output.push('?');
+        for (index, (key, value)) in options.uri_options.iter().enumerate() {
+            if index > 0 {
+                output.push('&');
+            }
+            output.push_str(&utf8_percent_encode(key, QUERY_VALUE).to_string());
+            output.push('=');
+            output.push_str(&utf8_percent_encode(value, QUERY_VALUE).to_string());
+        }
     }
     Ok(output)
 }

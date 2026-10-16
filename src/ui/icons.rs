@@ -248,6 +248,7 @@ impl IconSet {
                 DatabaseKind::SqlServer => md::MD_DATABASE,
                 DatabaseKind::Sqlite => dev::DEV_SQLITE,
                 DatabaseKind::Redis => dev::DEV_REDIS,
+                DatabaseKind::MongoDb => "M",
             },
             IconMode::Unicode => match kind {
                 DatabaseKind::Postgres => "PG",
@@ -257,6 +258,7 @@ impl IconSet {
                 DatabaseKind::SqlServer => "MS",
                 DatabaseKind::Sqlite => "SQ",
                 DatabaseKind::Redis => "RD",
+                DatabaseKind::MongoDb => "MG",
             },
             IconMode::Ascii => match kind {
                 DatabaseKind::Postgres => "PG",
@@ -266,6 +268,7 @@ impl IconSet {
                 DatabaseKind::SqlServer => "MS",
                 DatabaseKind::Sqlite => "SQ",
                 DatabaseKind::Redis => "RD",
+                DatabaseKind::MongoDb => "MG",
             },
         }
     }
@@ -278,6 +281,7 @@ impl IconSet {
             DatabaseKind::SqlServer => ratatui::style::Color::Rgb(13, 127, 228),
             DatabaseKind::Sqlite => ratatui::style::Color::Rgb(68, 184, 214),
             DatabaseKind::Redis => ratatui::style::Color::Rgb(220, 45, 45),
+            DatabaseKind::MongoDb => ratatui::style::Color::Rgb(0, 150, 90),
         }
     }
 

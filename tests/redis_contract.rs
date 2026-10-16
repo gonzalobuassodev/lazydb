@@ -18,10 +18,18 @@ fn redis_uses_key_value_capabilities_and_has_no_sql_dialect() {
         interaction_model(DatabaseKind::Postgres),
         InteractionModel::Relational
     );
+    assert_eq!(
+        interaction_model(DatabaseKind::MongoDb),
+        InteractionModel::Document
+    );
     assert_eq!(SqlDialect::try_for_database_kind(DatabaseKind::Redis), None);
     assert_eq!(
         SqlDialect::try_for_database_kind(DatabaseKind::Postgres),
         Some(SqlDialect::Postgres)
+    );
+    assert_eq!(
+        SqlDialect::try_for_database_kind(DatabaseKind::MongoDb),
+        None
     );
 }
 

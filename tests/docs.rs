@@ -1,11 +1,23 @@
 #[test]
 fn keyboard_reference_is_dedicated_and_complete() {
     let readme = include_str!("../README.md");
+    let mongo = include_str!("../docs/mongodb.md");
     let keys = include_str!("../docs/keybindings.md");
 
     assert!(!readme.contains("## Essential Keys"));
     assert!(!readme.contains("| Action | Key |"));
     assert!(readme.contains("docs/keybindings.md"));
+    assert!(readme.contains("docs/mongodb.md"));
+    for term in [
+        "serverStatus",
+        "currentOp",
+        "five second",
+        "Users & Roles",
+        "Alt+B",
+        "read-only in this release",
+    ] {
+        assert!(mongo.contains(term), "MongoDB docs missing {term}");
+    }
     assert!(readme.contains("contextual controls"));
 
     for heading in [

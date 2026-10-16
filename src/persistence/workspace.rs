@@ -172,6 +172,15 @@ impl WorkspaceStore {
         Self { manifest, sql_dir }
     }
 
+    pub fn mongodb_store(&self) -> crate::persistence::mongodb_workspace::MongoWorkspaceStore {
+        crate::persistence::mongodb_workspace::MongoWorkspaceStore::new(
+            self.sql_dir
+                .parent()
+                .unwrap_or(&self.sql_dir)
+                .join("mongodb"),
+        )
+    }
+
     pub fn lock(&self) -> Result<WorkspaceLock, WorkspaceError> {
         if let Some(parent) = self.manifest.parent() {
             fs::create_dir_all(parent)?;

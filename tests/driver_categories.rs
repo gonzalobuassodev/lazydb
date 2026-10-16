@@ -13,7 +13,7 @@ fn categories_partition_the_registry_without_changing_machine_names() {
         drivers_in(DatabaseCategory::NonRelational)
             .map(|d| d.kind)
             .collect::<Vec<_>>(),
-        vec![DatabaseKind::Redis]
+        vec![DatabaseKind::Redis, DatabaseKind::MongoDb]
     );
     assert_eq!(
         DRIVERS.iter().map(|d| d.name).collect::<Vec<_>>(),
@@ -24,7 +24,8 @@ fn categories_partition_the_registry_without_changing_machine_names() {
             "oracle",
             "sqlserver",
             "sqlite",
-            "redis"
+            "redis",
+            "mongodb"
         ]
     );
 }
@@ -37,7 +38,10 @@ fn category_round_trip_remembers_driver_and_automatic_ports_cross_sqlite() {
     manager.cycle(1);
     assert_eq!(manager.draft.as_ref().unwrap().kind, DatabaseKind::Redis);
     assert_eq!(manager.draft.as_ref().unwrap().port.value(), "6379");
-    manager.cycle(-1);
+    manager.select_driver(DatabaseKind::MongoDb);
+    assert_eq!(manager.draft.as_ref().unwrap().kind, DatabaseKind::MongoDb);
+    manager.select_driver(DatabaseKind::Redis);
+    manager.select_driver(DatabaseKind::MySql);
     assert_eq!(manager.draft.as_ref().unwrap().kind, DatabaseKind::MySql);
     manager.select_driver(DatabaseKind::SqlServer);
     manager.select_driver(DatabaseKind::Sqlite);
@@ -53,9 +57,12 @@ fn custom_port_survives_category_switch_and_single_driver_cycle_is_a_noop() {
     manager.selected_field = ProfileField::DatabaseCategory;
     manager.cycle(1);
     assert_eq!(manager.draft.as_ref().unwrap().port.value(), "6380");
-    manager.selected_field = ProfileField::Kind;
-    manager.cycle(1);
+    manager.select_driver(DatabaseKind::Redis);
     assert_eq!(manager.draft.as_ref().unwrap().kind, DatabaseKind::Redis);
+    manager.select_driver(DatabaseKind::MongoDb);
+    assert_eq!(manager.draft.as_ref().unwrap().kind, DatabaseKind::MongoDb);
+    manager.select_driver(DatabaseKind::MongoDb);
+    assert_eq!(manager.draft.as_ref().unwrap().port.value(), "6380");
 }
 
 #[test]

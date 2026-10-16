@@ -69,6 +69,25 @@ fn tool_definitions_are_split_between_read_and_write_operations() {
         "describe_object"
     );
     assert_eq!(AgentMcpServer::query_tool_attr().name, "query");
+    assert_eq!(AgentMcpServer::mongo_query_tool_attr().name, "mongo_query");
+    assert_eq!(
+        AgentMcpServer::mongo_execute_change_tool_attr().name,
+        "mongo_execute_change"
+    );
+    assert_eq!(
+        AgentMcpServer::mongo_execute_change_tool_attr()
+            .annotations
+            .unwrap()
+            .destructive_hint,
+        Some(true)
+    );
+    assert_eq!(
+        AgentMcpServer::mongo_query_tool_attr()
+            .annotations
+            .unwrap()
+            .read_only_hint,
+        Some(true)
+    );
     assert_eq!(
         AgentMcpServer::execute_change_tool_attr().name,
         "execute_change"

@@ -30,6 +30,29 @@ pub struct QueryInput {
 }
 
 #[derive(Debug, Serialize, Deserialize, JsonSchema)]
+pub struct MongoQueryInput {
+    pub connection: Option<String>,
+    pub database: String,
+    /// One supported read-only Mongo command encoded as a single JSON object.
+    pub command: String,
+}
+
+#[derive(Debug, Serialize, Deserialize, JsonSchema)]
+pub struct MongoCollectionInput {
+    pub connection: Option<String>,
+    pub database: String,
+    pub collection: Option<String>,
+}
+
+#[derive(Debug, Serialize, Deserialize, JsonSchema)]
+pub struct MongoChangeInput {
+    pub connection: Option<String>,
+    pub database: String,
+    /// One supported Mongo insert, update, or delete command as ordered JSON text.
+    pub command: String,
+}
+
+#[derive(Debug, Serialize, Deserialize, JsonSchema)]
 pub struct ContextInput {
     pub connection: Option<String>,
 }
@@ -191,6 +214,72 @@ impl AgentMcpServer {
             .await
             .map_err(|error| error.message)?;
         serde_json::to_string(&result).map_err(|e| e.to_string())
+    }
+
+    /// Execute a supported read-only Mongo command and return Canonical EJSON.
+    #[tool(name = "mongo_query", annotations(read_only_hint = true))]
+    async fn mongo_query(&self, input: Parameters<MongoQueryInput>) -> Result<String, String> {
+        let input = input.0;
+        let result = self
+            .service
+            .mongo_query(input.connection.as_deref(), &input.database, &input.command)
+            .await
+            .map_err(|error| error.message)?;
+        serde_json::to_string(&result).map_err(|error| error.to_string())
+    }
+
+    /// Execute an explicitly authorized MongoDB change. Server write policy and profile restrictions always apply.
+    #[tool(
+        name = "mongo_execute_change",
+        annotations(read_only_hint = false, destructive_hint = true)
+    )]
+    async fn mongo_execute_change(
+        &self,
+        input: Parameters<MongoChangeInput>,
+    ) -> Result<String, String> {
+        let input = input.0;
+        let result = self
+            .service
+            .mongo_execute_change(
+                input.connection.as_deref(),
+                &input.database,
+                &input.command,
+                self.policy,
+            )
+            .await
+            .map_err(|error| error.message)?;
+        serde_json::to_string(&result).map_err(|error| error.to_string())
+    }
+
+    #[tool(name = "mongo_list_collections", annotations(read_only_hint = true))]
+    async fn mongo_list_collections(
+        &self,
+        input: Parameters<MongoCollectionInput>,
+    ) -> Result<String, String> {
+        let input = input.0;
+        let collections = self
+            .service
+            .mongo_list_collections(input.connection.as_deref(), &input.database)
+            .await
+            .map_err(|error| error.message)?;
+        serde_json::to_string(&collections).map_err(|error| error.to_string())
+    }
+
+    #[tool(name = "mongo_describe_collection", annotations(read_only_hint = true))]
+    async fn mongo_describe_collection(
+        &self,
+        input: Parameters<MongoCollectionInput>,
+    ) -> Result<String, String> {
+        let input = input.0;
+        let collection = input
+            .collection
+            .ok_or_else(|| "collection is required".to_owned())?;
+        let description = self
+            .service
+            .mongo_describe_collection(input.connection.as_deref(), &input.database, &collection)
+            .await
+            .map_err(|error| error.message)?;
+        serde_json::to_string(&description).map_err(|error| error.to_string())
     }
 
     /// Execute a SQL change subject to LazyDB write policy. Client approval

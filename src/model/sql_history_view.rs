@@ -41,6 +41,7 @@ pub struct SqlHistoryState {
     pub editor_session_id: Uuid,
     pub loaded_execution_id: Option<Uuid>,
     pub sql_offset: usize,
+    pub mongo_detail_text: Option<String>,
 }
 
 impl Default for SqlHistoryState {
@@ -69,6 +70,7 @@ impl SqlHistoryState {
             editor_session_id: Uuid::new_v4(),
             loaded_execution_id: None,
             sql_offset: 0,
+            mongo_detail_text: None,
         }
     }
 
@@ -90,6 +92,8 @@ impl SqlHistoryState {
         if changed {
             self.sql_offset = 0;
             self.loaded_execution_id = None;
+            self.mongo_detail_text = None;
+            self.mongo_detail_text = None;
         }
         true
     }
@@ -225,6 +229,8 @@ mod tests {
             profile_id: None,
             database: None,
             schema: None,
+            language: crate::model::sql_history::HistoryLanguage::Sql,
+            mongo_command: None,
         }
     }
 

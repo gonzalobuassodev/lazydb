@@ -23,6 +23,178 @@ fn key(code: KeyCode) -> KeyEvent {
     KeyEvent::new(code, KeyModifiers::NONE)
 }
 
+#[test]
+fn mongo_console_transaction_shortcuts_are_contextual() {
+    let mut app = App::new(vec![
+        import_connection_url("mongodb://localhost:27017/app", Some("mongo"))
+            .unwrap()
+            .profile,
+    ]);
+    let tab = lazydb::model::mongodb_console::MongoConsoleTab::new(app.profiles[0].id, "app");
+    app.tabs.push(WorkspaceTab::MongoConsole(tab));
+    app.active_tab = 0;
+    app.focus = Focus::Results;
+    let mut keymap = Keymap::default();
+    assert_eq!(
+        keymap.map(KeyEvent::new(KeyCode::Char('b'), KeyModifiers::ALT), &app),
+        Some(Action::MongoTransactionBegin)
+    );
+    assert_eq!(
+        keymap.map(KeyEvent::new(KeyCode::Char('c'), KeyModifiers::ALT), &app),
+        Some(Action::MongoTransactionCommit)
+    );
+    assert_eq!(
+        keymap.map(KeyEvent::new(KeyCode::Char('a'), KeyModifiers::ALT), &app),
+        Some(Action::MongoTransactionAbort)
+    );
+}
+
+#[test]
+fn mongo_principal_overlay_edits_secret_and_requires_exact_confirmation() {
+    let profile = import_connection_url("mongodb://localhost:27017/app", Some("mongo"))
+        .unwrap()
+        .profile;
+    let profile_id = profile.id;
+    let mut app = App::new(vec![profile]);
+    let target = lazydb::model::execution_target::ExecutionTarget::from_profile(&app.profiles[0]);
+    app.sessions.register_attempt(
+        target,
+        lazydb::identity::ConnectionIdentity {
+            profile_id,
+            generation: 8,
+        },
+    );
+    app.tabs.push(WorkspaceTab::MongoDashboard(Box::new(
+        lazydb::model::dashboard::MongoDashboardTab {
+            connection_generation: Some(8),
+            ..lazydb::model::dashboard::MongoDashboardTab::new(profile_id, "app")
+        },
+    )));
+    app.active_tab = 0;
+    app.update(Action::MongoPrincipalNewUser);
+    let mut keymap = Keymap::default();
+    assert!(matches!(
+        app.overlay,
+        Some(Overlay::MongoPrincipalMutation(_))
+    ));
+    app.update(Action::MongoPrincipalMutationMoveField(1));
+    for ch in "reader".chars() {
+        app.update(Action::MongoPrincipalMutationEdit(TextInputEdit::Insert(
+            ch,
+        )));
+    }
+    app.update(Action::MongoPrincipalMutationMoveField(1));
+    for ch in "top-secret".chars() {
+        app.update(Action::MongoPrincipalMutationPasswordInsert(ch));
+    }
+    if let Some(action) = keymap.map(
+        KeyEvent::new(KeyCode::Char('x'), KeyModifiers::CONTROL),
+        &app,
+    ) {
+        app.update(action);
+    }
+    let Some(Overlay::MongoPrincipalMutation(draft)) = app.overlay.as_ref() else {
+        panic!("draft should remain open")
+    };
+    assert_eq!(draft.password_value(), "top-secret");
+    assert!(!format!("{draft:?}").contains("top-secret"));
+    app.update(Action::MongoPrincipalMutationConfirm);
+    assert!(matches!(
+        app.overlay,
+        Some(Overlay::MongoPrincipalConfirmation { .. })
+    ));
+    for ch in "app:reader".chars() {
+        app.update(Action::MongoPrincipalConfirmationInsert(ch));
+    }
+    let commands = app.update(Action::MongoPrincipalConfirmationConfirm);
+    assert!(matches!(
+        commands.as_slice(),
+        [lazydb::action::Command::ExecuteMongoPrincipalMutation { .. }]
+    ));
+    assert_eq!(app.overlay, None);
+}
+
+#[test]
+fn mongo_principal_operation_requires_exact_target_and_open_generation() {
+    let profile = import_connection_url("mongodb://localhost:27017/app", Some("mongo"))
+        .unwrap()
+        .profile;
+    let profile_id = profile.id;
+    let mut app = App::new(vec![profile.clone()]);
+    let target = lazydb::model::execution_target::ExecutionTarget::from_profile(&profile);
+    let identity = lazydb::identity::ConnectionIdentity {
+        profile_id,
+        generation: 9,
+    };
+    app.sessions.register_attempt(target, identity);
+    app.tabs.push(WorkspaceTab::MongoDashboard(Box::new(
+        lazydb::model::dashboard::MongoDashboardTab {
+            connection_generation: Some(9),
+            ..lazydb::model::dashboard::MongoDashboardTab::new(profile_id, "app")
+        },
+    )));
+    app.active_tab = 0;
+    app.update(Action::MongoPrincipalNewUser);
+    app.update(Action::MongoPrincipalMutationMoveField(1));
+    for ch in "reader".chars() {
+        app.update(Action::MongoPrincipalMutationEdit(TextInputEdit::Insert(
+            ch,
+        )));
+    }
+    app.update(Action::MongoPrincipalMutationMoveField(1));
+    for ch in "secret".chars() {
+        app.update(Action::MongoPrincipalMutationPasswordInsert(ch));
+    }
+    app.update(Action::MongoPrincipalMutationConfirm);
+    for ch in "app:reader".chars() {
+        app.update(Action::MongoPrincipalConfirmationInsert(ch));
+    }
+    let commands = app.update(Action::MongoPrincipalConfirmationConfirm);
+    assert!(
+        matches!(commands.as_slice(), [lazydb::action::Command::ExecuteMongoPrincipalMutation { profile_id: id, connection_generation: 9, .. }] if *id == profile_id)
+    );
+}
+
+#[test]
+fn stale_mongo_principal_failure_does_not_clear_another_pending_target() {
+    let profile = import_connection_url("mongodb://localhost:27017/app", Some("mongo"))
+        .unwrap()
+        .profile;
+    let profile_id = profile.id;
+    let mut app = App::new(vec![profile.clone()]);
+    let target = lazydb::model::execution_target::ExecutionTarget::from_profile(&profile);
+    let identity = lazydb::identity::ConnectionIdentity {
+        profile_id,
+        generation: 9,
+    };
+    app.sessions.register_attempt(target, identity);
+    app.tabs.push(WorkspaceTab::MongoDashboard(Box::new(
+        lazydb::model::dashboard::MongoDashboardTab {
+            connection_generation: Some(9),
+            principal_pending_target: Some("app:reader".into()),
+            principal_pending_operation: Some("dropUser".into()),
+            principal_pending_connection_generation: Some(9),
+            ..lazydb::model::dashboard::MongoDashboardTab::new(profile_id, "app")
+        },
+    )));
+
+    app.update(Action::MongoPrincipalMutationFailed {
+        profile_id,
+        connection_generation: 9,
+        database: "other_db".into(),
+        command_name: "dropUser".into(),
+        target: "reader".into(),
+        confirmation_target: "other_db:reader".into(),
+        message: "stale failure".into(),
+    });
+
+    let Some(WorkspaceTab::MongoDashboard(tab)) = app.tabs.first() else {
+        panic!("Mongo dashboard should remain open")
+    };
+    assert_eq!(tab.principal_pending_target.as_deref(), Some("app:reader"));
+    assert_eq!(tab.principal_pending_operation.as_deref(), Some("dropUser"));
+}
+
 fn control(code: KeyCode) -> KeyEvent {
     KeyEvent::new(code, KeyModifiers::CONTROL)
 }
@@ -433,6 +605,136 @@ fn redis_keys_use_h_and_l_for_tree_depth_navigation() {
         keymap.map(key(KeyCode::Char('l')), &app),
         Some(Action::RedisExpandSelection)
     );
+}
+
+#[test]
+fn mongodb_document_editor_only_saves_on_control_enter_and_accepts_text() {
+    let mut app = App::new(Vec::new());
+    let mut tab = lazydb::model::mongodb_browser::MongoBrowserTab::new(
+        Uuid::from_u128(900),
+        lazydb::db::mongodb::types::MongoNamespace::collection("app", "items"),
+    );
+    let bson = mongodb::bson::doc! { "_id": 1_i32 };
+    tab.page = lazydb::model::mongodb_browser::MongoPageState::Ready(
+        lazydb::db::mongodb::types::MongoDocumentPage {
+            documents: vec![lazydb::db::mongodb::types::MongoDocument {
+                raw: mongodb::bson::raw::RawDocumentBuf::from_bytes(
+                    mongodb::bson::to_vec(&bson).unwrap(),
+                )
+                .unwrap(),
+                bson,
+                editable: true,
+            }],
+            next_offset: None,
+            truncated: false,
+            oversized_document: false,
+            bytes: 16,
+        },
+    );
+    app.tabs.clear();
+    app.tabs.push(WorkspaceTab::MongoBrowser(tab));
+    app.active_tab = 0;
+    app.focus = Focus::Results;
+    assert!(app.update(Action::MongoDocumentEdit).is_empty());
+    let mut keymap = Keymap::default();
+    assert!(matches!(app.tabs[0], WorkspaceTab::MongoBrowser(ref tab) if tab.editing));
+    assert_eq!(app.focus, Focus::Results);
+
+    assert_eq!(
+        keymap.map(key(KeyCode::Char('x')), &app),
+        Some(Action::MongoDocumentEditText(TextInputEdit::Insert('x')))
+    );
+    assert_eq!(keymap.map(key(KeyCode::Enter), &app), None);
+    assert_eq!(
+        keymap.map(control(KeyCode::Enter), &app),
+        Some(Action::MongoDocumentSave)
+    );
+    assert_eq!(
+        keymap.map(key(KeyCode::Esc), &app),
+        Some(Action::MongoDocumentCancelEdit)
+    );
+}
+
+#[test]
+fn mongo_management_drafts_open_for_create_view_index_and_rename() {
+    use lazydb::db::mongodb::types::{
+        MongoCollectionInfo, MongoCollectionType, MongoExplorerNodeId, MongoNamespace,
+    };
+    use lazydb::model::explorer::{ProfilePlacement, ProfileProvenance};
+
+    let namespace = MongoNamespace::collection("app", "items");
+    let mut app = App::new(Vec::new());
+    app.focus = Focus::Explorer;
+    app.profiles.clear();
+    let imported =
+        lazydb::profile::import_connection_url("mongodb://localhost/app", Some("mongo")).unwrap();
+    let profile = imported.profile;
+    let profile_id = profile.id;
+    app.profiles.push(profile);
+    app.explorer.normalized.profiles.insert(
+        profile_id,
+        lazydb::model::explorer::ExplorerProfileState::new(
+            profile_id,
+            "mongo".into(),
+            lazydb::profile::DatabaseKind::MongoDb,
+            "localhost".into(),
+            ProfileProvenance::Saved,
+            ProfilePlacement::Global,
+        ),
+    );
+    let mut keymap = Keymap::default();
+    app.explorer.normalized.selected = Some(ExplorerNodeId::Mongo {
+        profile_id,
+        node: MongoExplorerNodeId::Database("app".into()),
+    });
+    assert!(matches!(
+        keymap.map(key(KeyCode::Char('c')), &app),
+        Some(Action::MongoManagementOpen(
+            lazydb::model::mongodb_management::MongoManagementOperation::CreateCollection { .. }
+        ))
+    ));
+    assert!(matches!(
+        keymap.map(key(KeyCode::Char('e')), &app),
+        Some(Action::MongoManagementOpen(
+            lazydb::model::mongodb_management::MongoManagementOperation::CreateView { .. }
+        ))
+    ));
+    app.explorer
+        .normalized
+        .profiles
+        .get_mut(&profile_id)
+        .unwrap()
+        .mongodb_collections
+        .insert(
+            "app".into(),
+            vec![MongoCollectionInfo {
+                namespace: namespace.clone(),
+                collection_type: MongoCollectionType::Collection,
+                options_ejson: None,
+            }],
+        );
+    app.explorer.normalized.selected = Some(ExplorerNodeId::Mongo {
+        profile_id,
+        node: MongoExplorerNodeId::Collection(namespace.clone()),
+    });
+    assert!(matches!(
+        keymap.map(key(KeyCode::Char('c')), &app),
+        Some(Action::MongoManagementOpen(
+            lazydb::model::mongodb_management::MongoManagementOperation::CreateIndex { .. }
+        ))
+    ));
+    assert!(matches!(
+        keymap.map(key(KeyCode::Char('R')), &app),
+        Some(Action::MongoManagementOpen(
+            lazydb::model::mongodb_management::MongoManagementOperation::RenameCollection { .. }
+        ))
+    ));
+    assert!(matches!(
+        keymap.map(key(KeyCode::Char('d')), &app),
+        Some(Action::MongoManagementOpen(
+            lazydb::model::mongodb_management::MongoManagementOperation::DropCollection { .. }
+        ))
+    ));
 }
 
 #[test]

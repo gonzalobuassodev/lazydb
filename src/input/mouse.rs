@@ -831,6 +831,8 @@ pub fn map_mouse(event: MouseEvent, ui: &UiState, app: &App) -> Option<Action> {
                     column,
                 }),
                 HitTarget::RedisPreviewLoadMore(_) => Some(Action::RedisPreviewLoadNext),
+                HitTarget::MongoPageLoadMore(_) => Some(Action::MongoPageNext),
+                HitTarget::MongoQueryField(_, field) => Some(Action::MongoQueryField(field)),
                 HitTarget::RedisValueSaveAction(index) => {
                     Some(Action::RedisValueSaveActivate(index))
                 }
@@ -1593,6 +1595,8 @@ fn focus_at(ui: &UiState, column: u16, row: u16) -> Option<Focus> {
         HitTarget::RedisPreviewFocus(_) => Some(Focus::Results),
         HitTarget::RedisPreviewTableCell { .. } => Some(Focus::Results),
         HitTarget::RedisPreviewLoadMore(_) => Some(Focus::Results),
+        HitTarget::MongoPageLoadMore(_) => Some(Focus::Results),
+        HitTarget::MongoQueryField(_, _) => Some(Focus::Results),
         HitTarget::RedisValueSaveAction(_)
         | HitTarget::RedisUnsavedValueAction(_)
         | HitTarget::WorkspaceSaveAction(_) => None,

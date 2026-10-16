@@ -49,6 +49,31 @@ pub struct ExecutionHistory {
     pub profile_id: Option<Uuid>,
     pub database: Option<String>,
     pub schema: Option<String>,
+    #[doc(hidden)]
+    pub language: HistoryLanguage,
+    pub mongo_command: Option<String>,
+}
+
+#[derive(Clone, Copy, Debug, Default, Eq, PartialEq, serde::Deserialize, serde::Serialize)]
+#[serde(rename_all = "snake_case")]
+pub enum HistoryLanguage {
+    #[default]
+    Sql,
+    Mongo,
+}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct MongoCommandHistory {
+    pub execution_id: Uuid,
+    pub profile_id: Uuid,
+    pub database: String,
+    pub command_name: String,
+    pub status: HistoryExecutionStatus,
+    pub certainty: HistoryResultCertainty,
+    pub returned_documents: Option<usize>,
+    pub elapsed_millis: Option<u128>,
+    /// Sensitive principal and credential management payloads are never stored.
+    pub redacted: bool,
 }
 
 #[derive(Clone, Debug, Eq, PartialEq)]
@@ -145,6 +170,8 @@ mod tests {
             profile_id: None,
             database: None,
             schema: None,
+            language: HistoryLanguage::Sql,
+            mongo_command: None,
         });
         reducer.apply(HistoryEvent::Finished {
             status: HistoryExecutionStatus::Cancelled,

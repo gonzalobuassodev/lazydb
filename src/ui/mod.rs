@@ -9,6 +9,11 @@ mod footer;
 pub mod icons;
 pub mod layout;
 pub mod loading;
+pub mod mongodb_browser;
+pub mod mongodb_console;
+pub mod mongodb_dashboard;
+pub mod mongodb_management;
+pub mod mongodb_principal;
 pub mod notifications;
 mod omni;
 pub mod pagination;
@@ -129,6 +134,8 @@ pub enum HitTarget {
         column: usize,
     },
     RedisPreviewLoadMore(Uuid),
+    MongoPageLoadMore(Uuid),
+    MongoQueryField(Uuid, crate::model::mongodb_browser::MongoQueryField),
     RedisValueSaveAction(usize),
     RedisUnsavedValueAction(usize),
     WorkspaceSaveAction(usize),
@@ -1064,6 +1071,18 @@ fn render_with_state_at(
         app.tabs.get(app.active_tab),
         Some(WorkspaceTab::RedisBrowser(_))
     );
+    let is_mongodb_browser = matches!(
+        app.tabs.get(app.active_tab),
+        Some(WorkspaceTab::MongoBrowser(_))
+    );
+    let is_mongodb_console = matches!(
+        app.tabs.get(app.active_tab),
+        Some(WorkspaceTab::MongoConsole(_))
+    );
+    let is_mongodb_dashboard = matches!(
+        app.tabs.get(app.active_tab),
+        Some(WorkspaceTab::MongoDashboard(_))
+    );
     let is_principal = matches!(
         app.tabs.get(app.active_tab),
         Some(WorkspaceTab::PrincipalDdl(_))
@@ -1071,7 +1090,13 @@ fn render_with_state_at(
     let layout = AppLayout::calculate(
         area,
         app.focus,
-        is_relation || is_dashboard || is_redis_browser || is_principal,
+        is_relation
+            || is_dashboard
+            || is_redis_browser
+            || is_mongodb_browser
+            || is_mongodb_console
+            || is_mongodb_dashboard
+            || is_principal,
         app.pane_sizes,
         app.pane_maximized,
     );
@@ -1079,6 +1104,9 @@ fn render_with_state_at(
     let editor_rendered = !is_relation
         && !is_dashboard
         && !is_redis_browser
+        && !is_mongodb_browser
+        && !is_mongodb_console
+        && !is_mongodb_dashboard
         && !is_principal
         && empty_workspace.is_none()
         && layout.editor.is_some();
@@ -1170,6 +1198,39 @@ fn render_with_state_at(
             target: HitTarget::Help,
         });
         footer::render(frame, layout.footer, app, theme, sequence, state);
+    } else if is_mongodb_console {
+        if let Some(area) = layout.relation {
+            state.hit_regions.push(HitRegion {
+                area,
+                target: HitTarget::Focus(Focus::Editor),
+            });
+            let viewport = EditorViewport {
+                width: area.width.saturating_sub(2) as usize,
+                height: area.height.saturating_sub(2) as usize,
+            };
+            mongodb_console::render(frame, area, app, viewport);
+        }
+        state.hit_regions.push(HitRegion {
+            area: layout.footer,
+            target: HitTarget::Help,
+        });
+        footer::render(frame, layout.footer, app, theme, sequence, state);
+    } else if is_mongodb_dashboard {
+        if let Some(area) = layout.relation
+            && let Some(WorkspaceTab::MongoDashboard(tab)) = app.tabs.get(app.active_tab)
+        {
+            mongodb_dashboard::render(frame, area, tab);
+        }
+        footer::render(frame, layout.footer, app, theme, sequence, state);
+    } else if is_mongodb_browser {
+        if let Some(area) = layout.relation {
+            mongodb_browser::render(frame, area, app, theme, state);
+        }
+        state.hit_regions.push(HitRegion {
+            area: layout.footer,
+            target: HitTarget::Help,
+        });
+        footer::render(frame, layout.footer, app, theme, sequence, state);
     } else if is_dashboard {
         if let Some(area) = layout.explorer {
             state.hit_regions.push(HitRegion {
@@ -1188,6 +1249,7 @@ fn render_with_state_at(
                 .get(app.active_tab)
                 .and_then(|tab| match tab {
                     WorkspaceTab::Dashboard(tab) => tab.profile_id,
+                    WorkspaceTab::MongoDashboard(tab) => Some(tab.profile_id),
                     _ => None,
                 })
                 .and_then(|profile_id| app.profiles.iter().find(|profile| profile.id == profile_id))
@@ -1650,6 +1712,10 @@ fn overlay_key(overlay: &Overlay) -> animation::OverlayKey {
         Overlay::RedisObjectEditor(_) => animation::OverlayKey::CatalogEditor,
         Overlay::RedisTableEditor(_) => animation::OverlayKey::CatalogEditor,
         Overlay::RedisTableDeleteConfirm(_) => animation::OverlayKey::DeleteConsole,
+        Overlay::MongoManagement(_) => animation::OverlayKey::CatalogEditor,
+        Overlay::MongoPrincipalMutation(_) | Overlay::MongoPrincipalConfirmation { .. } => {
+            animation::OverlayKey::ExecutionConfirm
+        }
         Overlay::RedisValueSaveConfirm { .. } => animation::OverlayKey::Message,
         Overlay::RedisUnsavedValueConfirm { .. } => animation::OverlayKey::Message,
         Overlay::ProfileAccess { .. } => animation::OverlayKey::ProfileAccess,
@@ -1763,8 +1829,21 @@ fn animation_observation(app: &App) -> animation::AnimationObservation {
                     .insert(animation::LoadIdentity::Relation(request.clone()));
             }
         }
-        WorkspaceTab::Dashboard(_) => {}
+        WorkspaceTab::Dashboard(_) | WorkspaceTab::MongoDashboard(_) => {}
         WorkspaceTab::RedisBrowser(_) => {}
+        WorkspaceTab::MongoBrowser(_) => {}
+        WorkspaceTab::MongoConsole(tab) => {
+            if let crate::model::mongodb_console::MongoConsoleStatus::Running { generation } =
+                tab.status
+            {
+                observation
+                    .active_loads
+                    .insert(animation::LoadIdentity::Query {
+                        tab_id: tab.id,
+                        generation,
+                    });
+            }
+        }
         WorkspaceTab::PrincipalDdl(_) => {}
     }
     observation
@@ -2280,6 +2359,9 @@ fn tab_database_kind(app: &App, tab: &WorkspaceTab) -> Option<DatabaseKind> {
             .map(|connection| connection.profile_id)
             .or(tab.profile_id)?,
         WorkspaceTab::RedisBrowser(_) => return Some(DatabaseKind::Redis),
+        WorkspaceTab::MongoBrowser(_) => return Some(DatabaseKind::MongoDb),
+        WorkspaceTab::MongoConsole(_) => return Some(DatabaseKind::MongoDb),
+        WorkspaceTab::MongoDashboard(_) => return Some(DatabaseKind::MongoDb),
         WorkspaceTab::PrincipalDdl(tab) => tab.entry.id.profile_id,
     };
 
@@ -2420,6 +2502,24 @@ fn render_tabs(
                         .profiles
                         .iter()
                         .find(|profile| profile.id == redis.target.profile_id)
+                        .map(|profile| profile.name.clone())
+                        .unwrap_or_else(|| "Invalid target".to_owned()),
+                    WorkspaceTab::MongoDashboard(dashboard) => app
+                        .profiles
+                        .iter()
+                        .find(|profile| profile.id == dashboard.profile_id)
+                        .map(|profile| profile.name.clone())
+                        .unwrap_or_else(|| "Invalid target".to_owned()),
+                    WorkspaceTab::MongoBrowser(mongo) => app
+                        .profiles
+                        .iter()
+                        .find(|profile| profile.id == mongo.profile_id)
+                        .map(|profile| profile.name.clone())
+                        .unwrap_or_else(|| "Invalid target".to_owned()),
+                    WorkspaceTab::MongoConsole(mongo) => app
+                        .profiles
+                        .iter()
+                        .find(|profile| profile.id == mongo.profile_id)
                         .map(|profile| profile.name.clone())
                         .unwrap_or_else(|| "Invalid target".to_owned()),
                     WorkspaceTab::PrincipalDdl(principal) => app
@@ -4675,6 +4775,25 @@ fn render_overlay(
         Overlay::RedisTableDeleteConfirm(confirm) => {
             redis_table_editor::render_delete_confirm(frame, area, confirm, state, theme)
         }
+        Overlay::MongoManagement(draft) => {
+            mongodb_management::render(frame, area, draft, app, state, theme)
+        }
+        Overlay::MongoPrincipalMutation(draft) => {
+            mongodb_principal::render_mutation(frame, area, draft, theme, state)
+        }
+        Overlay::MongoPrincipalConfirmation {
+            mutation,
+            expected,
+            input,
+        } => mongodb_principal::render_confirmation(
+            frame,
+            area,
+            mutation,
+            expected,
+            input.value(),
+            theme,
+            state,
+        ),
         Overlay::RedisValueSaveConfirm {
             tab_id,
             revision,
@@ -6115,6 +6234,7 @@ fn render_transaction_exit_overlay(
         }
         let id = match target {
             crate::model::transaction::DeferredTransactionTarget::Console(id)
+            | crate::model::transaction::DeferredTransactionTarget::MongoConsole(id)
             | crate::model::transaction::DeferredTransactionTarget::Relation(id) => *id,
         };
         let tab = app.tabs.iter().find(|tab| tab.id() == id);
@@ -6131,6 +6251,12 @@ fn render_transaction_exit_overlay(
         );
     }
 
+    if let crate::model::transaction::DeferredTransactionTarget::MongoConsole(id) = prompt.target {
+        let unknown = app.tabs.iter().find(|tab| tab.id() == id)
+            .is_some_and(|tab| matches!(tab, WorkspaceTab::MongoConsole(console) if console.transaction == crate::model::mongodb_console::MongoConsoleTransactionState::OutcomeUnknown));
+        render_mongo_transaction_exit(frame, inner, choice, unknown, theme);
+        return;
+    }
     let current_console = app
         .tabs
         .iter()
@@ -6138,6 +6264,7 @@ fn render_transaction_exit_overlay(
             tab.id()
                 == match prompt.target {
                     crate::model::transaction::DeferredTransactionTarget::Console(id)
+                    | crate::model::transaction::DeferredTransactionTarget::MongoConsole(id)
                     | crate::model::transaction::DeferredTransactionTarget::Relation(id) => id,
                 }
         })
@@ -6236,6 +6363,56 @@ fn render_transaction_summary_row(
             ),
         ])),
         area,
+    );
+}
+
+fn render_mongo_transaction_exit(
+    frame: &mut Frame<'_>,
+    inner: Rect,
+    choice: crate::model::transaction::TransactionExitChoice,
+    unknown: bool,
+    theme: Theme,
+) {
+    use crate::model::transaction::TransactionExitChoice;
+    let actions: &[(&str, TransactionExitChoice)] = if unknown {
+        &[
+            ("[ Abandon ]", TransactionExitChoice::Abandon),
+            ("Cancel", TransactionExitChoice::Cancel),
+        ]
+    } else {
+        &[
+            ("[ Commit ]", TransactionExitChoice::Commit),
+            ("[ Rollback ]", TransactionExitChoice::Rollback),
+            ("Cancel", TransactionExitChoice::Cancel),
+        ]
+    };
+    let area = Rect::new(inner.x, inner.bottom().saturating_sub(2), inner.width, 1);
+    let spans = actions
+        .iter()
+        .flat_map(|(label, action)| {
+            let style = if *action == choice {
+                Style::new()
+                    .fg(theme.background)
+                    .bg(theme.accent)
+                    .add_modifier(Modifier::BOLD)
+            } else {
+                Style::new().fg(theme.text).bg(theme.surface)
+            };
+            [
+                Span::styled(format!("[ {label} ]"), style),
+                Span::raw("   "),
+            ]
+        })
+        .collect::<Vec<_>>();
+    frame.render_widget(
+        Paragraph::new(Line::from(spans)).alignment(Alignment::Center),
+        area,
+    );
+    frame.render_widget(
+        Paragraph::new("Tab/←/→ select   Enter confirm   Esc cancel")
+            .style(Style::new().fg(theme.muted).bg(theme.surface))
+            .alignment(Alignment::Center),
+        Rect::new(inner.x, inner.bottom().saturating_sub(1), inner.width, 1),
     );
 }
 

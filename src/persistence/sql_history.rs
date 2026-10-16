@@ -79,8 +79,8 @@ impl HistoryStore {
             "INSERT INTO history_executions
              (execution_id, operation_id, transaction_id, requested_at, sql, status,
               certainty, transaction_outcome, affected_rows, returned_rows, elapsed_millis,
-              profile_id, database_name, schema_name)
-             VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+               profile_id, database_name, schema_name, language, mongo_command)
+              VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, NULL)",
         )
         .bind(history.execution_id.to_string())
         .bind(history.operation_id.to_string())
@@ -96,8 +96,28 @@ impl HistoryStore {
         .bind(history.profile_id.map(|value| value.to_string()))
         .bind(history.database)
         .bind(history.schema)
+        .bind(language_name(history.language))
         .execute(&self.pool)
         .await?;
+        Ok(())
+    }
+
+    pub async fn insert_mongo_summary(
+        &self,
+        history: &crate::model::sql_history::MongoCommandHistory,
+    ) -> Result<(), HistoryStoreError> {
+        let summary = format!(
+            "{}{}",
+            history.command_name,
+            if history.redacted { " [redacted]" } else { "" }
+        );
+        sqlx::query("INSERT INTO history_executions (execution_id, operation_id, transaction_id, requested_at, sql, status, certainty, transaction_outcome, affected_rows, returned_rows, elapsed_millis, profile_id, database_name, schema_name, language, mongo_command) VALUES (?, ?, NULL, ?, ?, ?, ?, 'not_applicable', NULL, ?, ?, ?, ?, NULL, 'mongo', ?)")
+            .bind(history.execution_id.to_string()).bind(history.execution_id.to_string())
+            .bind(chrono::Utc::now().timestamp_millis()).bind(&summary)
+            .bind(status_name(history.status)).bind(certainty_name(history.certainty))
+            .bind(history.returned_documents.map(|n| n as i64)).bind(history.elapsed_millis.map(|n| n as i64))
+            .bind(history.profile_id.to_string()).bind(&history.database).bind(summary)
+            .execute(&self.pool).await?;
         Ok(())
     }
 
@@ -134,6 +154,19 @@ impl HistoryStore {
         Ok(())
     }
 
+    pub async fn finish_mongo_summary(
+        &self,
+        execution_id: Uuid,
+        status: HistoryExecutionStatus,
+        certainty: HistoryResultCertainty,
+        returned_documents: Option<usize>,
+        elapsed_millis: Option<u128>,
+    ) -> Result<(), HistoryStoreError> {
+        sqlx::query("UPDATE history_executions SET status = ?, certainty = ?, returned_rows = ?, elapsed_millis = ? WHERE execution_id = ? AND language = 'mongo'")
+            .bind(status_name(status)).bind(certainty_name(certainty)).bind(returned_documents.map(|n| n as i64)).bind(elapsed_millis.map(|n| n as i64)).bind(execution_id.to_string()).execute(&self.pool).await?;
+        Ok(())
+    }
+
     pub async fn resolve_transaction(
         &self,
         transaction_id: Uuid,
@@ -157,7 +190,7 @@ impl HistoryStore {
         let row = sqlx::query(
             "SELECT execution_id, operation_id, transaction_id, sql, status, certainty,
                     transaction_outcome, affected_rows, returned_rows, requested_at, elapsed_millis,
-                    profile_id, database_name, schema_name
+                    profile_id, database_name, schema_name, language, mongo_command
              FROM history_executions WHERE execution_id = ?",
         )
         .bind(execution_id.to_string())
@@ -175,7 +208,7 @@ impl HistoryStore {
         let mut query = QueryBuilder::<Sqlite>::new(
             "SELECT execution_id, operation_id, transaction_id, sql, status, certainty,
              transaction_outcome, affected_rows, returned_rows, requested_at, elapsed_millis,
-             profile_id, database_name, schema_name FROM history_executions WHERE 1 = 1",
+             profile_id, database_name, schema_name, language, mongo_command FROM history_executions WHERE 1 = 1",
         );
         if let Some(search) = request.search {
             query.push(" AND sql LIKE ").push_bind(format!(
@@ -221,7 +254,7 @@ impl HistoryStore {
                 sqlx::query(
                     "SELECT execution_id, operation_id, transaction_id, sql, status, certainty,
                         transaction_outcome, affected_rows, returned_rows, requested_at, elapsed_millis,
-                        profile_id, database_name, schema_name
+                        profile_id, database_name, schema_name, language, mongo_command
                  FROM history_executions
                  WHERE sql LIKE ? AND (requested_at < ? OR (requested_at = ? AND execution_id < ?))
                  ORDER BY requested_at DESC, execution_id DESC LIMIT ?",
@@ -241,7 +274,7 @@ impl HistoryStore {
                 sqlx::query(
                     "SELECT execution_id, operation_id, transaction_id, sql, status, certainty,
                         transaction_outcome, affected_rows, returned_rows, requested_at, elapsed_millis,
-                        profile_id, database_name, schema_name
+                        profile_id, database_name, schema_name, language, mongo_command
                  FROM history_executions
                  WHERE requested_at < ? OR (requested_at = ? AND execution_id < ?)
                  ORDER BY requested_at DESC, execution_id DESC LIMIT ?",
@@ -257,7 +290,7 @@ impl HistoryStore {
                 sqlx::query(
                     "SELECT execution_id, operation_id, transaction_id, sql, status, certainty,
                         transaction_outcome, affected_rows, returned_rows, requested_at, elapsed_millis,
-                        profile_id, database_name, schema_name
+                        profile_id, database_name, schema_name, language, mongo_command
                  FROM history_executions WHERE sql LIKE ?
                  ORDER BY requested_at DESC, execution_id DESC LIMIT ?",
                 )
@@ -273,7 +306,7 @@ impl HistoryStore {
                 sqlx::query(
                     "SELECT execution_id, operation_id, transaction_id, sql, status, certainty,
                         transaction_outcome, affected_rows, returned_rows, requested_at, elapsed_millis,
-                        profile_id, database_name, schema_name
+                        profile_id, database_name, schema_name, language, mongo_command
                  FROM history_executions ORDER BY requested_at DESC, execution_id DESC LIMIT ?",
                 )
                 .bind(limit)
@@ -322,6 +355,14 @@ async fn migrate_columns(pool: &SqlitePool) -> Result<(), HistoryStoreError> {
             "schema_name",
             "ALTER TABLE history_executions ADD COLUMN schema_name TEXT",
         ),
+        (
+            "language",
+            "ALTER TABLE history_executions ADD COLUMN language TEXT NOT NULL DEFAULT 'sql'",
+        ),
+        (
+            "mongo_command",
+            "ALTER TABLE history_executions ADD COLUMN mongo_command TEXT",
+        ),
     ] {
         if !columns.contains(column) {
             sqlx::query(query).execute(pool).await?;
@@ -358,7 +399,26 @@ fn row_to_history(row: sqlx::sqlite::SqliteRow) -> Result<ExecutionHistory, Hist
             .transpose()?,
         database: row.try_get("database_name")?,
         schema: row.try_get("schema_name")?,
+        language: parse_language(row.try_get("language")?)?,
+        mongo_command: row.try_get("mongo_command")?,
     })
+}
+
+fn language_name(language: crate::model::sql_history::HistoryLanguage) -> &'static str {
+    match language {
+        crate::model::sql_history::HistoryLanguage::Sql => "sql",
+        crate::model::sql_history::HistoryLanguage::Mongo => "mongo",
+    }
+}
+
+fn parse_language(
+    value: String,
+) -> Result<crate::model::sql_history::HistoryLanguage, HistoryStoreError> {
+    match value.as_str() {
+        "sql" => Ok(crate::model::sql_history::HistoryLanguage::Sql),
+        "mongo" => Ok(crate::model::sql_history::HistoryLanguage::Mongo),
+        _ => Err(HistoryStoreError::InvalidEnum(value)),
+    }
 }
 
 fn parse_id(value: String) -> Result<Uuid, HistoryStoreError> {

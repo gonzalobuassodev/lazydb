@@ -103,6 +103,10 @@ fn stdio_server_negotiates_and_lists_tools_without_database_io() {
             "execute_file",
             "get_context",
             "list_connections",
+            "mongo_describe_collection",
+            "mongo_execute_change",
+            "mongo_list_collections",
+            "mongo_query",
             "query",
             "search_schema",
         ]
