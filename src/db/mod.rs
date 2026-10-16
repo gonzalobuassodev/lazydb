@@ -3,6 +3,7 @@ pub mod catalog;
 pub mod catalog_change_set;
 pub mod catalog_drop;
 pub mod catalog_mutation;
+pub mod clickhouse;
 pub mod column_type;
 pub(crate) mod ddl;
 pub mod descriptor;
@@ -42,6 +43,7 @@ use self::{
     },
     catalog_mutation::CatalogMutationCapabilities,
     catalog_mutation::{CatalogObjectDefinition, CatalogObjectDefinitionRequest},
+    clickhouse::ClickHouseAdapter,
     mssql::MsSqlAdapter,
     mysql::MySqlAdapter,
     oracle::OracleAdapter,
@@ -291,6 +293,7 @@ pub enum DatabaseConnection {
     SqlServer(MsSqlAdapter),
     Redis(RedisAdapter),
     MongoDb(mongodb::MongoAdapter),
+    ClickHouse(ClickHouseAdapter),
 }
 
 impl DatabaseConnection {
@@ -300,9 +303,9 @@ impl DatabaseConnection {
             Self::MySql(_) | Self::MariaDb(_) | Self::SqlServer(_) | Self::Oracle(_) => {
                 principal::PrincipalCapability::DdlOnly
             }
-            Self::Sqlite(_) | Self::Redis(_) | Self::MongoDb(_) => {
-                principal::PrincipalCapability::Unsupported
-            }
+            Self::Sqlite(_) | Self::Redis(_) => principal::PrincipalCapability::Unsupported,
+            Self::MongoDb(_) => principal::PrincipalCapability::Unsupported,
+            Self::ClickHouse(_) => ClickHouseAdapter::principal_capability(),
         }
     }
 
@@ -339,6 +342,7 @@ impl DatabaseConnection {
                     memberships: false,
                 }
             }
+            Self::ClickHouse(_) => ClickHouseAdapter::principal_mutation_capabilities(),
         }
     }
 
@@ -353,6 +357,7 @@ impl DatabaseConnection {
             Self::MongoDb(_) => Err(DatabaseError::unsupported(
                 "MongoDB uses document principals",
             )),
+            Self::ClickHouse(adapter) => adapter.list_principals().await,
         }
     }
 
@@ -370,6 +375,7 @@ impl DatabaseConnection {
             Self::MongoDb(_) => Err(DatabaseError::unsupported(
                 "MongoDB uses document principals",
             )),
+            Self::ClickHouse(adapter) => adapter.principal_ddl(principal).await,
         }
     }
 
@@ -388,6 +394,7 @@ impl DatabaseConnection {
             Self::Sqlite(_) | Self::Redis(_) | Self::MongoDb(_) => Err(DatabaseError::unsupported(
                 "This database does not support SQL principal permission details",
             )),
+            Self::ClickHouse(adapter) => adapter.principal_details(principal, target).await,
         }
     }
 
@@ -410,6 +417,9 @@ impl DatabaseConnection {
             }
             Self::Oracle(_) => {
                 oracle::plan_principal_mutation(principal, connection, database, mutation)
+            }
+            Self::ClickHouse(adapter) => {
+                adapter.plan_principal_mutation(principal, connection, database, mutation)
             }
             _ => Err(DatabaseError::unsupported(
                 "principal mutations are DDL-only for this adapter (structured mutations are not implemented)",
@@ -438,6 +448,7 @@ impl DatabaseConnection {
             Self::MongoDb(_) => Err(DatabaseError::unsupported(
                 "MongoDB monitor integration is not implemented yet",
             )),
+            Self::ClickHouse(adapter) => adapter.load_monitor_snapshot().await,
         }
     }
 
@@ -451,6 +462,7 @@ impl DatabaseConnection {
             Self::Sqlite(_) => Ok(monitor::MonitorMetadata::default()),
             Self::Redis(_) => Ok(monitor::MonitorMetadata::default()),
             Self::MongoDb(_) => Ok(monitor::MonitorMetadata::default()),
+            Self::ClickHouse(_) => Ok(monitor::MonitorMetadata::default()),
         }
     }
 
@@ -481,6 +493,7 @@ impl DatabaseConnection {
             Self::MongoDb(_) => Err(DatabaseError::unsupported(
                 "MongoDB process list is not implemented yet",
             )),
+            Self::ClickHouse(adapter) => adapter.load_process_snapshot().await,
         }
     }
 
@@ -531,6 +544,9 @@ impl DatabaseConnection {
             Self::MongoDb(_) => Err(DatabaseError::configuration(
                 "MongoDB uses session transactions",
             )),
+            Self::ClickHouse(_) => Err(DatabaseError::unsupported(
+                "ClickHouse does not support manual SQL transactions",
+            )),
         }
     }
 
@@ -561,6 +577,9 @@ impl DatabaseConnection {
             DatabaseKind::MongoDb => mongodb::MongoAdapter::connect(profile, password)
                 .await
                 .map(Self::MongoDb),
+            DatabaseKind::ClickHouse => ClickHouseAdapter::connect(profile, password)
+                .await
+                .map(Self::ClickHouse),
         }
     }
 
@@ -585,6 +604,7 @@ impl DatabaseConnection {
             Self::SqlServer(_) => DatabaseKind::SqlServer,
             Self::Redis(_) => DatabaseKind::Redis,
             Self::MongoDb(_) => DatabaseKind::MongoDb,
+            Self::ClickHouse(_) => DatabaseKind::ClickHouse,
         }
     }
 
@@ -640,6 +660,7 @@ impl DatabaseConnection {
                 },
                 supports_lazy_children: false,
             },
+            Self::ClickHouse(_) => crate::db::clickhouse::ClickHouseAdapter::catalog_capabilities(),
         }
     }
 
@@ -653,6 +674,7 @@ impl DatabaseConnection {
             Self::SqlServer(_) => MsSqlAdapter::catalog_mutation_capabilities(),
             Self::Redis(_) => CatalogMutationCapabilities::default(),
             Self::MongoDb(_) => CatalogMutationCapabilities::default(),
+            Self::ClickHouse(_) => ClickHouseAdapter::catalog_mutation_capabilities(),
         }
     }
 
@@ -686,6 +708,7 @@ impl DatabaseConnection {
                 kind: entry.kind,
                 reason: "MongoDB does not expose SQL catalog objects".to_owned(),
             }),
+            Self::ClickHouse(_) => ClickHouseAdapter::plan_catalog_drop(request, entry),
         }
     }
 
@@ -714,11 +737,6 @@ impl DatabaseConnection {
             }
             Self::Sqlite(_) => SqliteAdapter::plan_catalog_mutation(request, draft, baseline),
             Self::SqlServer(_) => MsSqlAdapter::plan_catalog_mutation(request, draft, baseline),
-            /*
-                catalog_mutation::CatalogMutationError::UnsupportedOperation {
-                    object_type: request.object_type,
-                },
-            ),*/
             Self::Oracle(_) => OracleAdapter::plan_catalog_mutation(request, draft, baseline),
             Self::Redis(_) => Err(
                 catalog_mutation::CatalogMutationError::UnsupportedOperation {
@@ -729,6 +747,12 @@ impl DatabaseConnection {
                 catalog_mutation::CatalogMutationError::UnsupportedOperation {
                     object_type: request.object_type,
                 },
+            ),
+            Self::ClickHouse(adapter) => ClickHouseAdapter::plan_catalog_mutation(
+                request,
+                draft,
+                baseline,
+                adapter.server_database(),
             ),
         }
     }
@@ -751,6 +775,7 @@ impl DatabaseConnection {
             Self::MongoDb(_) => Err(DatabaseError::unsupported(
                 "MongoDB does not support SQL catalog mutation",
             )),
+            Self::ClickHouse(adapter) => adapter.execute_catalog_mutation(plan).await,
         }
     }
 
@@ -823,6 +848,7 @@ impl DatabaseConnection {
             Self::SqlServer(adapter) => adapter.probe().await,
             Self::Redis(adapter) => adapter.probe().await,
             Self::MongoDb(adapter) => adapter.probe().await,
+            Self::ClickHouse(adapter) => adapter.probe().await,
         }
     }
 
@@ -857,6 +883,9 @@ impl DatabaseConnection {
             Self::MongoDb(_) => Err(DatabaseError::unsupported(
                 "MongoDB uses document namespace discovery",
             )),
+            Self::ClickHouse(_) => Err(DatabaseError::unsupported(
+                "ClickHouse catalog scope is profile-defined",
+            )),
         }
     }
 
@@ -872,6 +901,7 @@ impl DatabaseConnection {
             | Self::SqlServer(_) => Ok(None),
             Self::Redis(_) => Ok(None),
             Self::MongoDb(_) => Ok(None),
+            Self::ClickHouse(_) => Ok(None),
         }
     }
 
@@ -892,6 +922,7 @@ impl DatabaseConnection {
             Self::MongoDb(_) => Err(DatabaseError::unsupported(
                 "MongoDB does not expose SQL catalog pages",
             )),
+            Self::ClickHouse(adapter) => adapter.load_catalog_page(request).await,
         }
     }
 
@@ -908,6 +939,7 @@ impl DatabaseConnection {
             | Self::SqlServer(_) => Ok(None),
             Self::Redis(_) => Ok(None),
             Self::MongoDb(_) => Ok(None),
+            Self::ClickHouse(adapter) => adapter.resolve_relation_identity(relation).await,
         }
     }
 
@@ -929,6 +961,11 @@ impl DatabaseConnection {
             | Self::SqlServer(_) => Ok(None),
             Self::Redis(_) => Ok(None),
             Self::MongoDb(_) => Ok(None),
+            Self::ClickHouse(adapter) => {
+                let mut adapter = adapter.clone();
+                adapter.catalog_scope = scope.clone();
+                adapter.resolve_relation_identity(relation).await
+            }
         }
     }
 
@@ -950,6 +987,7 @@ impl DatabaseConnection {
             Self::MongoDb(_) => Err(DatabaseError::unsupported(
                 "MongoDB has no SQL catalog object definitions",
             )),
+            Self::ClickHouse(adapter) => adapter.load_catalog_object_definition(request).await,
         }
     }
 
@@ -966,6 +1004,7 @@ impl DatabaseConnection {
             | Self::SqlServer(_) => Ok(None),
             Self::Redis(_) => Ok(None),
             Self::MongoDb(_) => Ok(None),
+            Self::ClickHouse(_) => Ok(None),
         }
     }
 
@@ -988,6 +1027,7 @@ impl DatabaseConnection {
             Self::MongoDb(_) => Err(DatabaseError::unsupported(
                 "MongoDB does not support SQL catalog search",
             )),
+            Self::ClickHouse(adapter) => adapter.search_catalog(request).await,
         }
     }
 
@@ -1007,6 +1047,7 @@ impl DatabaseConnection {
             Self::Oracle(adapter) => adapter.execute_pool_with_budget(sql, budget).await,
             Self::Sqlite(adapter) => adapter.execute_pool_with_budget(sql, budget).await,
             Self::SqlServer(adapter) => adapter.execute_pool_with_budget(sql, budget).await,
+            Self::ClickHouse(adapter) => adapter.execute_with_budget(sql, budget).await,
             Self::Redis(_) => Err(DatabaseError::configuration(
                 "Redis commands do not use SQL execution",
             )),
@@ -1035,6 +1076,20 @@ impl DatabaseConnection {
             Self::MongoDb(_) => Err(DatabaseError::unsupported(
                 "MongoDB does not support SQL relation previews",
             )),
+            Self::ClickHouse(adapter) => {
+                adapter
+                    .preview_relation_with_scope(
+                        relation,
+                        &crate::profile::CatalogScope::for_profile(
+                            DatabaseKind::ClickHouse,
+                            "default",
+                            None,
+                        ),
+                        options,
+                        page,
+                    )
+                    .await
+            }
         }
     }
 
@@ -1078,6 +1133,11 @@ impl DatabaseConnection {
             Self::MongoDb(_) => Err(DatabaseError::unsupported(
                 "MongoDB does not support SQL relation previews",
             )),
+            Self::ClickHouse(adapter) => {
+                adapter
+                    .preview_relation_with_scope(relation, scope, options, page)
+                    .await
+            }
         }
     }
 
@@ -1095,6 +1155,18 @@ impl DatabaseConnection {
             Self::MongoDb(_) => Err(DatabaseError::unsupported(
                 "MongoDB does not support SQL relation DDL",
             )),
+            Self::ClickHouse(adapter) => {
+                adapter
+                    .relation_ddl_with_scope(
+                        relation,
+                        &crate::profile::CatalogScope::for_profile(
+                            DatabaseKind::ClickHouse,
+                            "default",
+                            None,
+                        ),
+                    )
+                    .await
+            }
         }
     }
 
@@ -1116,6 +1188,7 @@ impl DatabaseConnection {
             Self::MongoDb(_) => Err(DatabaseError::unsupported(
                 "MongoDB does not support SQL relation DDL",
             )),
+            Self::ClickHouse(adapter) => adapter.relation_ddl_with_scope(relation, scope).await,
         }
     }
 
@@ -1134,6 +1207,7 @@ impl DatabaseConnection {
             Self::SqlServer(adapter) => adapter.object_ddl(kind, schema, name).await,
             Self::Redis(_) => Ok(None),
             Self::MongoDb(_) => Ok(None),
+            Self::ClickHouse(_) => Ok(None),
         }
     }
 
@@ -1147,6 +1221,7 @@ impl DatabaseConnection {
             Self::SqlServer(adapter) => adapter.quote_identifier(value),
             Self::Redis(_) => value.to_owned(),
             Self::MongoDb(_) => value.to_owned(),
+            Self::ClickHouse(_) => format!("`{}`", value.replace('`', "``")),
         }
     }
 
@@ -1160,6 +1235,7 @@ impl DatabaseConnection {
             Self::SqlServer(adapter) => adapter.close().await,
             Self::Redis(adapter) => adapter.close().await,
             Self::MongoDb(adapter) => adapter.close().await,
+            Self::ClickHouse(adapter) => adapter.close().await,
         }
     }
 }

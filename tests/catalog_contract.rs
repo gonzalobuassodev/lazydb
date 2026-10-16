@@ -256,6 +256,73 @@ fn catalog_targets_validate_their_hierarchy_level() {
     assert!(CatalogTarget::groups(database.clone()).is_err());
     assert!(CatalogTarget::objects(table.clone(), ObjectGroup::Tables).is_err());
     assert!(CatalogTarget::relation_children(column).is_err());
+    assert!(CatalogTarget::projection_children(table.clone()).is_ok());
+    assert!(CatalogTarget::projection_children(schema.clone()).is_err());
+}
+
+#[test]
+fn projection_catalog_entry_uses_table_identity_and_never_claims_uniqueness() {
+    let profile_id = Uuid::new_v4();
+    let table = CatalogId::new(profile_id, CatalogKind::Table, ["db", "db", "events"]);
+    let projection = CatalogEntry::projection(
+        CatalogId::new(
+            profile_id,
+            CatalogKind::Projection,
+            ["db", "db", "events", "by_id"],
+        ),
+        table.clone(),
+        QualifiedName {
+            database: Some("db".into()),
+            schema: Some("db".into()),
+            object: "by_id".into(),
+        },
+        "PROJECTION",
+        IndexMetadata {
+            columns: vec!["id".into()],
+            unique: false,
+        },
+    )
+    .unwrap();
+    assert_eq!(projection.parent_id.as_ref(), Some(&table));
+    assert_eq!(projection.owning_relation_id(), Some(&table));
+    assert_eq!(projection.kind, CatalogKind::Projection);
+    assert!(matches!(
+        projection.metadata,
+        CatalogMetadata::Index(IndexMetadata { unique: false, .. })
+    ));
+    assert!(CatalogTarget::relation_children(table).is_ok());
+}
+
+#[test]
+fn projection_entry_rejects_wrong_table_identity_and_scope() {
+    let profile_id = Uuid::new_v4();
+    let table = CatalogId::new(profile_id, CatalogKind::Table, ["db", "db", "events"]);
+    let entry = CatalogEntry::projection(
+        CatalogId::new(
+            profile_id,
+            CatalogKind::Projection,
+            ["db", "db", "other", "by_id"],
+        ),
+        table,
+        QualifiedName {
+            database: Some("db".into()),
+            schema: Some("db".into()),
+            object: "by_id".into(),
+        },
+        "PROJECTION",
+        IndexMetadata {
+            columns: vec!["id".into()],
+            unique: false,
+        },
+    );
+    assert!(entry.is_err());
+}
+
+#[test]
+fn column_metadata_defaults_new_optional_fields_to_unsupported() {
+    let metadata = ColumnMetadata::new(1, "UInt64", false);
+    assert_eq!(metadata.comment, OptionalMetadata::Unsupported);
+    assert_eq!(metadata.storage_statistics, OptionalMetadata::Unsupported);
 }
 
 #[test]

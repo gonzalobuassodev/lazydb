@@ -99,6 +99,8 @@ pub enum CatalogKind {
     Table,
     View,
     MaterializedView,
+    Dictionary,
+    Projection,
     Column,
     Index,
     PrimaryKey,
@@ -110,6 +112,7 @@ pub enum CatalogKind {
     Trigger,
     Sequence,
     Type,
+    UserDefinedFunction,
 }
 
 impl CatalogKind {
@@ -162,6 +165,8 @@ pub enum ObjectGroup {
     Tables,
     Views,
     MaterializedViews,
+    Dictionaries,
+    UserDefinedFunctions,
     Sequences,
     Functions,
     Procedures,
@@ -176,6 +181,8 @@ impl ObjectGroup {
             (Self::Tables, CatalogKind::Table)
                 | (Self::Views, CatalogKind::View)
                 | (Self::MaterializedViews, CatalogKind::MaterializedView)
+                | (Self::Dictionaries, CatalogKind::Dictionary)
+                | (Self::UserDefinedFunctions, CatalogKind::UserDefinedFunction)
                 | (Self::Sequences, CatalogKind::Sequence)
                 | (Self::Functions, CatalogKind::Function)
                 | (Self::Procedures, CatalogKind::Procedure)
@@ -281,6 +288,8 @@ pub struct ColumnMetadata {
     pub type_family: OptionalMetadata<String>,
     pub nullable: bool,
     pub default_expression: OptionalMetadata<String>,
+    pub comment: OptionalMetadata<String>,
+    pub storage_statistics: OptionalMetadata<String>,
     pub identity: OptionalMetadata<bool>,
     pub auto_increment: OptionalMetadata<bool>,
     pub generated_expression: OptionalMetadata<String>,
@@ -301,6 +310,8 @@ impl ColumnMetadata {
             type_family: OptionalMetadata::Unsupported,
             nullable,
             default_expression: OptionalMetadata::Unsupported,
+            comment: OptionalMetadata::Unsupported,
+            storage_statistics: OptionalMetadata::Unsupported,
             identity: OptionalMetadata::Unsupported,
             auto_increment: OptionalMetadata::Unsupported,
             generated_expression: OptionalMetadata::Unsupported,
@@ -577,6 +588,8 @@ impl CatalogEntry {
                 | CatalogKind::Procedure
                 | CatalogKind::Sequence
                 | CatalogKind::Type
+                | CatalogKind::Dictionary
+                | CatalogKind::UserDefinedFunction
         ) {
             return Err(CatalogValidationError::InvalidKind {
                 expected: "schema-level non-relation object",
@@ -612,7 +625,11 @@ impl CatalogEntry {
             "relation-owned schema object",
         )?;
         require_kind(schema.kind, CatalogKind::Schema, "schema parent")?;
-        require_relation(relation.kind, "owning relation")?;
+        if id.kind == CatalogKind::Projection {
+            require_kind(relation.kind, CatalogKind::Table, "projection table")?;
+        } else {
+            require_relation(relation.kind, "owning relation")?;
+        }
         require_same_profile(&id, &schema)?;
         require_same_profile(&id, &relation)?;
         Self::new(
@@ -660,6 +677,35 @@ impl CatalogEntry {
         )
     }
 
+    pub fn projection(
+        id: CatalogId,
+        table: CatalogId,
+        qualified_name: QualifiedName,
+        native_kind: impl Into<String>,
+        metadata: IndexMetadata,
+    ) -> Result<Self, CatalogValidationError> {
+        require_kind(id.kind, CatalogKind::Projection, "projection")?;
+        require_kind(table.kind, CatalogKind::Table, "projection table")?;
+        require_same_profile(&id, &table)?;
+        if id.native_path.len() != table.native_path.len() + 1
+            || !id.native_path.starts_with(&table.native_path)
+        {
+            return Err(CatalogValidationError::NativeIdentityMismatch { id });
+        }
+        Self::new(
+            id,
+            qualified_name,
+            native_kind,
+            OptionalMetadata::Unsupported,
+            CatalogEntryShape {
+                parent_id: Some(table.clone()),
+                relation_id: Some(table),
+                metadata: CatalogMetadata::Index(metadata),
+                ..CatalogEntryShape::default()
+            },
+        )
+    }
+
     pub fn owning_relation_id(&self) -> Option<&CatalogId> {
         self.relation_id.as_ref()
     }
@@ -702,6 +748,9 @@ pub enum CatalogTarget {
         schema: CatalogId,
         group: ObjectGroup,
     },
+    ProjectionChildren {
+        table: CatalogId,
+    },
     RelationChildren {
         relation: CatalogId,
     },
@@ -728,11 +777,17 @@ impl CatalogTarget {
         Ok(Self::RelationChildren { relation })
     }
 
+    pub fn projection_children(table: CatalogId) -> Result<Self, CatalogValidationError> {
+        require_kind(table.kind, CatalogKind::Table, "projection table target")?;
+        Ok(Self::ProjectionChildren { table })
+    }
+
     pub const fn profile_id(&self) -> Option<Uuid> {
         match self {
             Self::Databases => None,
             Self::Schemas { database } => Some(database.profile_id()),
             Self::Groups { schema } | Self::Objects { schema, .. } => Some(schema.profile_id()),
+            Self::ProjectionChildren { table } => Some(table.profile_id()),
             Self::RelationChildren { relation } => Some(relation.profile_id()),
         }
     }
@@ -743,6 +798,7 @@ impl CatalogTarget {
             Self::Schemas { .. } => "schemas",
             Self::Groups { .. } => "groups",
             Self::Objects { .. } => "objects",
+            Self::ProjectionChildren { .. } => "projection children",
             Self::RelationChildren { .. } => "relation children",
         }
     }
@@ -764,6 +820,12 @@ impl CatalogTarget {
                 require_kind(schema.kind, CatalogKind::Schema, "schema target")?;
                 require_profile(schema, profile_id)?;
                 let (database_name, schema_name) = schema_path(schema)?;
+                require_target_scope(self, scope.allows_schema(database_name, schema_name))
+            }
+            Self::ProjectionChildren { table } => {
+                require_kind(table.kind, CatalogKind::Table, "projection table target")?;
+                require_profile(table, profile_id)?;
+                let (database_name, schema_name) = relation_target_path(table)?;
                 require_target_scope(self, scope.allows_schema(database_name, schema_name))
             }
             Self::RelationChildren { relation } => {
@@ -1358,7 +1420,7 @@ fn validate_page_entry(
             id: entry.id.clone(),
         });
     }
-    if entry.kind.is_relation_child() {
+    if entry.kind.is_relation_child() || entry.kind == CatalogKind::Projection {
         validate_metadata(entry.kind, &entry.metadata)?;
     } else if entry.metadata != CatalogMetadata::None {
         return Err(CatalogValidationError::MetadataKindMismatch { kind: entry.kind });
@@ -1378,6 +1440,20 @@ fn validate_page_entry(
             entry.kind == CatalogKind::Schema && entry.parent_id.as_ref() == Some(database)
         }
         CatalogTarget::Groups { .. } => false,
+        CatalogTarget::ProjectionChildren { table } => {
+            entry.kind == CatalogKind::Projection
+                && entry.parent_id.as_ref() == Some(table)
+                && entry.relation_id.as_ref() == Some(table)
+                && entry.id.native_path.len() == table.native_path.len() + 1
+                && entry.id.native_path.starts_with(&table.native_path)
+                && entry.qualified_name.object
+                    == entry
+                        .id
+                        .native_path
+                        .last()
+                        .map(String::as_str)
+                        .unwrap_or_default()
+        }
         CatalogTarget::Objects { schema, group } => {
             group.contains_kind(entry.kind) && entry.parent_id.as_ref() == Some(schema)
         }
@@ -1414,10 +1490,18 @@ fn valid_entry_shape(entry: &CatalogEntry) -> bool {
                 .is_some_and(|parent| parent.kind == CatalogKind::Schema)
                 && entry.relation_id.as_ref() == Some(&entry.id)
         }
+        CatalogKind::Dictionary => {
+            entry
+                .parent_id
+                .as_ref()
+                .is_some_and(|parent| parent.kind == CatalogKind::Schema)
+                && entry.relation_id.is_none()
+        }
         CatalogKind::Function
         | CatalogKind::Procedure
         | CatalogKind::Sequence
-        | CatalogKind::Type => {
+        | CatalogKind::Type
+        | CatalogKind::UserDefinedFunction => {
             entry
                 .parent_id
                 .as_ref()
@@ -1444,6 +1528,13 @@ fn valid_entry_shape(entry: &CatalogEntry) -> bool {
                 return false;
             };
             parent.kind.is_relation() && entry.relation_id.as_ref() == Some(parent)
+        }
+        CatalogKind::Projection => {
+            entry
+                .parent_id
+                .as_ref()
+                .is_some_and(|parent| parent.kind == CatalogKind::Table)
+                && entry.relation_id.as_ref() == entry.parent_id.as_ref()
         }
     }
 }
@@ -1473,6 +1564,39 @@ fn validate_entry_scope(
         });
     }
 
+    if entry.kind == CatalogKind::Projection {
+        let table =
+            entry
+                .parent_id
+                .as_ref()
+                .ok_or_else(|| CatalogValidationError::InvalidEntryShape {
+                    id: entry.id.clone(),
+                })?;
+        if table.kind != CatalogKind::Table || entry.relation_id.as_ref() != Some(table) {
+            return Err(CatalogValidationError::InvalidEntryShape {
+                id: entry.id.clone(),
+            });
+        }
+        let (native_database, native_schema, native_table) = object_path(table)?;
+        if entry.id.native_path.len() != table.native_path.len() + 1
+            || !entry.id.native_path.starts_with(&table.native_path)
+            || native_database != database
+            || native_schema != entry.qualified_name.schema.as_deref().unwrap_or_default()
+            || native_table.is_empty()
+            || entry.qualified_name.object
+                != entry
+                    .id
+                    .native_path
+                    .last()
+                    .map(String::as_str)
+                    .unwrap_or_default()
+        {
+            return Err(CatalogValidationError::NativeIdentityMismatch {
+                id: entry.id.clone(),
+            });
+        }
+        return Ok(());
+    }
     if entry.kind == CatalogKind::Database {
         if entry.qualified_name.schema.is_some() || entry.qualified_name.object != database {
             return Err(CatalogValidationError::InvalidQualifiedNameShape {
@@ -1557,6 +1681,9 @@ fn validate_entry_namespace(entry: &CatalogEntry) -> Result<(), CatalogValidatio
             CatalogKind::Database => database_path(parent)? == database,
             CatalogKind::Schema => schema_path(parent)? == expected,
             kind if kind.is_relation() => object_namespace(parent)? == expected,
+            CatalogKind::Table if entry.kind == CatalogKind::Projection => {
+                object_namespace(parent)? == expected
+            }
             _ => false,
         };
         if !parent_matches {
@@ -1567,14 +1694,17 @@ fn validate_entry_namespace(entry: &CatalogEntry) -> Result<(), CatalogValidatio
     }
 
     if let Some(relation) = entry.relation_id.as_ref()
-        && (!relation.kind.is_relation() || object_namespace(relation)? != expected)
+        && (!(relation.kind.is_relation()
+            || entry.kind == CatalogKind::Projection && relation.kind == CatalogKind::Table)
+            || object_namespace(relation)? != expected)
     {
         return Err(CatalogValidationError::NativeNamespaceMismatch {
             id: entry.id.clone(),
         });
     }
     if let Some(parent) = entry.parent_id.as_ref()
-        && parent.kind.is_relation()
+        && (parent.kind.is_relation()
+            || (entry.kind == CatalogKind::Projection && parent.kind == CatalogKind::Table))
         && !strictly_extends_native_path(&entry.id, parent)
     {
         return Err(CatalogValidationError::NativeIdentityMismatch {
@@ -1717,6 +1847,7 @@ fn validate_metadata(
         (kind, metadata),
         (CatalogKind::Column, CatalogMetadata::Column(_))
             | (CatalogKind::Index, CatalogMetadata::Index(_))
+            | (CatalogKind::Projection, CatalogMetadata::Index(_))
             | (
                 CatalogKind::PrimaryKey,
                 CatalogMetadata::Constraint(ConstraintMetadata::PrimaryKey { .. })

@@ -108,11 +108,7 @@ impl QueryOutcomeAccumulator {
     pub(crate) fn row(&mut self, columns: Vec<ColumnMeta>, row: Vec<CellValue>) {
         self.mark_event();
         self.fetched_rows = self.fetched_rows.saturating_add(1);
-        self.current.get_or_insert_with(|| ResultSet {
-            columns,
-            rows: Vec::new(),
-            affected_rows: 0,
-        });
+        self.metadata(columns);
         if self.truncated {
             return;
         }
@@ -137,6 +133,27 @@ impl QueryOutcomeAccumulator {
             .expect("result metadata was initialized above")
             .rows
             .push(row);
+    }
+
+    pub(crate) fn metadata(&mut self, columns: Vec<ColumnMeta>) {
+        self.mark_event();
+        self.current.get_or_insert_with(|| ResultSet {
+            columns,
+            rows: Vec::new(),
+            affected_rows: 0,
+        });
+    }
+
+    pub(crate) fn budget_exhausted(&self) -> bool {
+        self.truncated
+    }
+
+    pub(crate) fn mark_truncated(&mut self) {
+        self.truncated = true;
+    }
+
+    pub(crate) fn finish_truncated(self) -> QueryOutcome {
+        self.finish()
     }
 
     pub(crate) fn done(&mut self, affected_rows: u64) {

@@ -2934,6 +2934,9 @@ fn explorer_list_item(
         crate::model::explorer::ExplorerNodeId::Group { group, .. } => {
             icons.group(*group, expanded)
         }
+        crate::model::explorer::ExplorerNodeId::ProjectionGroup(_) => {
+            icons.group(crate::db::catalog::ObjectGroup::Tables, expanded)
+        }
         crate::model::explorer::ExplorerNodeId::PrincipalGroup { .. } => {
             icons.principal(crate::db::principal::PrincipalDisplayKind::Group)
         }
@@ -3265,6 +3268,9 @@ fn render_explorer_search(
             let icon = match &row.id {
                 crate::model::explorer::ExplorerNodeId::Group { group, .. } => {
                     icons.group(*group, expanded)
+                }
+                crate::model::explorer::ExplorerNodeId::ProjectionGroup(_) => {
+                    icons.group(crate::db::catalog::ObjectGroup::Tables, expanded)
                 }
                 crate::model::explorer::ExplorerNodeId::PrincipalGroup { .. } => {
                     icons.principal(crate::db::principal::PrincipalDisplayKind::Group)

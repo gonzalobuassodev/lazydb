@@ -94,6 +94,8 @@ impl CatalogObjectType {
             Self::Catalog(CatalogKind::Table) => "Table",
             Self::Catalog(CatalogKind::View) => "View",
             Self::Catalog(CatalogKind::MaterializedView) => "Materialized View",
+            Self::Catalog(CatalogKind::Dictionary) => "Dictionary",
+            Self::Catalog(CatalogKind::Projection) => "Projection",
             Self::Catalog(CatalogKind::Column) => "Column",
             Self::Catalog(CatalogKind::Index) => "Index",
             Self::Catalog(CatalogKind::PrimaryKey) => "Primary Key",
@@ -105,6 +107,7 @@ impl CatalogObjectType {
             Self::Catalog(CatalogKind::Trigger) => "Trigger",
             Self::Catalog(CatalogKind::Sequence) => "Sequence",
             Self::Catalog(CatalogKind::Type) => "Type",
+            Self::Catalog(CatalogKind::UserDefinedFunction) => "User defined function",
             Self::LoginRole => "Login Role",
             Self::Role => "Role",
         }
@@ -219,6 +222,7 @@ impl CatalogMutationCapabilities {
                         vec![
                             CatalogObjectType::Catalog(CatalogKind::Table),
                             CatalogObjectType::Catalog(CatalogKind::View),
+                            CatalogObjectType::Catalog(CatalogKind::MaterializedView),
                         ]
                     }
                     CatalogKind::Database => vec![CatalogObjectType::Catalog(CatalogKind::Schema)],
@@ -226,6 +230,7 @@ impl CatalogMutationCapabilities {
                         CatalogObjectType::Catalog(CatalogKind::Table),
                         CatalogObjectType::Catalog(CatalogKind::View),
                         CatalogObjectType::Catalog(CatalogKind::MaterializedView),
+                        CatalogObjectType::Catalog(CatalogKind::Dictionary),
                         CatalogObjectType::Catalog(CatalogKind::Sequence),
                     ],
                     CatalogKind::Table => vec![
@@ -235,6 +240,7 @@ impl CatalogMutationCapabilities {
                         CatalogObjectType::Catalog(CatalogKind::UniqueConstraint),
                         CatalogObjectType::Catalog(CatalogKind::ForeignKey),
                         CatalogObjectType::Catalog(CatalogKind::CheckConstraint),
+                        CatalogObjectType::Catalog(CatalogKind::Projection),
                     ],
                     CatalogKind::MaterializedView => {
                         vec![CatalogObjectType::Catalog(CatalogKind::Index)]
@@ -252,6 +258,8 @@ impl CatalogMutationCapabilities {
                 }
                 let kind = match group {
                     ObjectGroup::Tables => CatalogKind::Table,
+                    ObjectGroup::Dictionaries => CatalogKind::Dictionary,
+                    ObjectGroup::UserDefinedFunctions => CatalogKind::UserDefinedFunction,
                     ObjectGroup::Views => CatalogKind::View,
                     ObjectGroup::MaterializedViews => CatalogKind::MaterializedView,
                     ObjectGroup::Sequences => CatalogKind::Sequence,
@@ -298,6 +306,16 @@ impl CatalogMutationCapabilities {
         object_type: CatalogObjectType,
     ) -> Option<CatalogMutationAvailability> {
         self.option(object_type, true)
+            .map(|option| option.availability)
+    }
+
+    pub fn profile_create_availability(
+        &self,
+        object_type: CatalogObjectType,
+    ) -> Option<CatalogMutationAvailability> {
+        self.profile_create
+            .iter()
+            .find(|option| option.object_type == object_type)
             .map(|option| option.availability)
     }
 
@@ -418,6 +436,36 @@ impl CatalogObjectDefinitionRequest {
     }
 
     pub fn validate(&self) -> Result<(), CatalogMutationError> {
+        if self.object.kind == CatalogKind::Table
+            && self.object.native_path.len() == 3
+            && self.object.native_path[0] == self.object.native_path[1]
+        {
+            validate_object_profile(&self.object, self.connection.profile_id)?;
+            if self.target.profile_id != self.connection.profile_id
+                || self.target.database != self.object.native_path[0]
+            {
+                return Err(CatalogMutationError::InvalidAnchor {
+                    reason: "table definition target does not match its database identity",
+                });
+            }
+            return Ok(());
+        }
+        if matches!(
+            self.object.kind,
+            CatalogKind::View | CatalogKind::MaterializedView
+        ) && self.object.native_path.len() == 3
+            && self.object.native_path[0] == self.object.native_path[1]
+        {
+            validate_object_profile(&self.object, self.connection.profile_id)?;
+            if self.target.profile_id != self.connection.profile_id
+                || self.target.database != self.object.native_path[0]
+            {
+                return Err(CatalogMutationError::InvalidAnchor {
+                    reason: "view definition target does not match its database identity",
+                });
+            }
+            return Ok(());
+        }
         if self.is_role() {
             if let Some(principal) = &self.principal
                 && (principal.id.profile_id != self.connection.profile_id
@@ -547,6 +595,68 @@ pub struct TableDefinition {
 }
 
 #[derive(Clone, Debug, Eq, PartialEq)]
+pub struct ClickHouseTableDefinition {
+    pub database: String,
+    pub name: String,
+    pub engine: String,
+    pub columns: Vec<ClickHouseColumnDefinition>,
+    pub canonical_ddl: String,
+    pub baseline_fingerprint: String,
+    pub comment: OptionalMetadata<String>,
+}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct ClickHouseViewDefinition {
+    pub database: String,
+    pub name: String,
+    pub canonical_ddl: String,
+    pub query: String,
+    pub comment: OptionalMetadata<String>,
+    pub baseline_fingerprint: String,
+}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct ClickHouseMaterializedViewDefinition {
+    pub database: String,
+    pub name: String,
+    pub canonical_ddl: String,
+    pub query: String,
+    pub target: Option<String>,
+    pub engine: String,
+    pub comment: OptionalMetadata<String>,
+    pub baseline_fingerprint: String,
+}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct ClickHouseDictionaryDefinition {
+    pub database: String,
+    pub name: String,
+    pub canonical_ddl: String,
+    pub source_type: String,
+    pub layout: String,
+    pub lifetime: String,
+    pub primary_key: Vec<String>,
+    pub has_external_secrets: bool,
+    pub baseline_fingerprint: String,
+}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub enum ClickHouseRelationDefinition {
+    View(ClickHouseViewDefinition),
+    MaterializedView(ClickHouseMaterializedViewDefinition),
+}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct ClickHouseColumnDefinition {
+    pub name: String,
+    pub ordinal_position: u32,
+    pub native_type: String,
+    pub default_kind: String,
+    pub default_expression: String,
+    pub comment: OptionalMetadata<String>,
+}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
 pub struct ViewDefinition {
     pub database: String,
     pub schema: String,
@@ -559,6 +669,7 @@ pub struct ViewDefinition {
     pub security_invoker: ViewOption<bool>,
     pub check_option: ViewOption<String>,
     pub baseline_fingerprint: String,
+    pub clickhouse_native: Option<ClickHouseViewDefinition>,
 }
 
 #[derive(Clone, Debug, Eq, PartialEq)]
@@ -572,6 +683,7 @@ pub struct MaterializedViewDefinition {
     pub tablespace: OptionalMetadata<String>,
     pub populated: bool,
     pub baseline_fingerprint: String,
+    pub clickhouse_native: Option<ClickHouseMaterializedViewDefinition>,
 }
 
 #[derive(Clone, Debug, Eq, PartialEq)]
@@ -678,6 +790,7 @@ pub enum CatalogObjectDefinition {
     Role(RoleDefinition),
     Schema(SchemaDefinition),
     Table(TableDefinition),
+    ClickHouseTable(ClickHouseTableDefinition),
     Index(IndexDefinition),
     Constraint(ConstraintDefinition),
     View(ViewDefinition),
@@ -1029,6 +1142,25 @@ impl CatalogMutationPlan {
             }
         }
         Ok(())
+    }
+
+    pub fn baseline_matches_definition(&self, definition: &CatalogObjectDefinition) -> bool {
+        let Some(expected) = self.baseline_fingerprint.as_deref() else {
+            return true;
+        };
+        let actual = match definition {
+            CatalogObjectDefinition::Database(value) => &value.baseline_fingerprint,
+            CatalogObjectDefinition::Schema(value) => &value.baseline_fingerprint,
+            CatalogObjectDefinition::Table(value) => &value.baseline_fingerprint,
+            CatalogObjectDefinition::ClickHouseTable(value) => &value.baseline_fingerprint,
+            CatalogObjectDefinition::Index(value) => &value.baseline_fingerprint,
+            CatalogObjectDefinition::Constraint(value) => &value.baseline_fingerprint,
+            CatalogObjectDefinition::View(value) => &value.baseline_fingerprint,
+            CatalogObjectDefinition::MaterializedView(value) => &value.baseline_fingerprint,
+            CatalogObjectDefinition::Sequence(value) => &value.baseline_fingerprint,
+            CatalogObjectDefinition::Role(value) => &value.baseline_fingerprint,
+        };
+        actual == expected
     }
 
     pub fn with_impact(mut self, impact: CatalogMutationImpact) -> Self {

@@ -781,6 +781,7 @@ impl SqliteAdapter {
                     "SQLite view check option mapping is not implemented",
                 ),
                 baseline_fingerprint: format!("sqlite:view:{ddl}:{query}"),
+                clickhouse_native: None,
             }));
         }
         let foreign_keys = self
@@ -1284,6 +1285,9 @@ impl SqliteAdapter {
                 self.load_object_page(&mut connection, request, schema, *group)
                     .await
             }
+            CatalogTarget::ProjectionChildren { .. } => Err(DatabaseError::unsupported(
+                "projection catalog target is not supported by SQLite",
+            )),
             CatalogTarget::RelationChildren { relation } => {
                 self.load_relation_children_page(&mut connection, request, relation)
                     .await
@@ -3104,6 +3108,8 @@ where
 fn group_sort_key(group: ObjectGroup) -> &'static str {
     match group {
         ObjectGroup::Tables => "00:tables",
+        ObjectGroup::Dictionaries => "08:dictionaries",
+        ObjectGroup::UserDefinedFunctions => "09:user_defined_functions",
         ObjectGroup::Views => "01:views",
         ObjectGroup::Triggers => "02:triggers",
         ObjectGroup::MaterializedViews => "03:materialized_views",
@@ -3148,6 +3154,9 @@ const fn catalog_kind_rank(kind: CatalogKind) -> u8 {
         CatalogKind::Procedure => 13,
         CatalogKind::Sequence => 14,
         CatalogKind::Type => 15,
+        CatalogKind::Dictionary => 16,
+        CatalogKind::Projection => 17,
+        CatalogKind::UserDefinedFunction => 18,
     }
 }
 

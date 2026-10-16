@@ -398,6 +398,12 @@ fn selection_target_contains(target: &CatalogTarget, selection: &CatalogSelectio
                 && object.native_path.len() == schema.native_path.len() + 1
                 && group.contains_kind(object.kind)
         }
+        CatalogTarget::ProjectionChildren { table } => {
+            object.native_path.len() == table.native_path.len()
+                && object.native_path.get(..table.native_path.len())
+                    == Some(table.native_path.as_slice())
+                && object.kind == crate::db::catalog::CatalogKind::Projection
+        }
         CatalogTarget::RelationChildren { relation } => {
             object.native_path.starts_with(&relation.native_path)
                 && object.native_path.len() == relation.native_path.len() + 1
@@ -467,6 +473,14 @@ fn definition_matches_request(
                 && table.name == object.native_path.get(2).cloned().unwrap_or_default()
         }
         (
+            crate::db::catalog::CatalogKind::Table,
+            crate::db::catalog_mutation::CatalogObjectDefinition::ClickHouseTable(table),
+        ) => {
+            table.database == object.native_path.first().cloned().unwrap_or_default()
+                && table.database == object.native_path.get(1).cloned().unwrap_or_default()
+                && table.name == object.native_path.get(2).cloned().unwrap_or_default()
+        }
+        (
             crate::db::catalog::CatalogKind::Index,
             crate::db::catalog_mutation::CatalogObjectDefinition::Index(index),
         ) => {
@@ -497,17 +511,29 @@ fn definition_matches_request(
             crate::db::catalog::CatalogKind::View,
             crate::db::catalog_mutation::CatalogObjectDefinition::View(view),
         ) => {
-            view.database == object.native_path.first().cloned().unwrap_or_default()
-                && view.schema == object.native_path.get(1).cloned().unwrap_or_default()
-                && view.name == object.native_path.get(2).cloned().unwrap_or_default()
+            if let Some(native) = &view.clickhouse_native {
+                native.database == object.native_path.first().cloned().unwrap_or_default()
+                    && native.database == object.native_path.get(1).cloned().unwrap_or_default()
+                    && native.name == object.native_path.get(2).cloned().unwrap_or_default()
+            } else {
+                view.database == object.native_path.first().cloned().unwrap_or_default()
+                    && view.schema == object.native_path.get(1).cloned().unwrap_or_default()
+                    && view.name == object.native_path.get(2).cloned().unwrap_or_default()
+            }
         }
         (
             crate::db::catalog::CatalogKind::MaterializedView,
             crate::db::catalog_mutation::CatalogObjectDefinition::MaterializedView(view),
         ) => {
-            view.database == object.native_path.first().cloned().unwrap_or_default()
-                && view.schema == object.native_path.get(1).cloned().unwrap_or_default()
-                && view.name == object.native_path.get(2).cloned().unwrap_or_default()
+            if let Some(native) = &view.clickhouse_native {
+                native.database == object.native_path.first().cloned().unwrap_or_default()
+                    && native.database == object.native_path.get(1).cloned().unwrap_or_default()
+                    && native.name == object.native_path.get(2).cloned().unwrap_or_default()
+            } else {
+                view.database == object.native_path.first().cloned().unwrap_or_default()
+                    && view.schema == object.native_path.get(1).cloned().unwrap_or_default()
+                    && view.name == object.native_path.get(2).cloned().unwrap_or_default()
+            }
         }
         _ => false,
     }
@@ -715,6 +741,9 @@ impl App {
             | DatabaseKind::Oracle => crate::db::principal::PrincipalCapability::DdlOnly,
             DatabaseKind::Sqlite | DatabaseKind::Redis | DatabaseKind::MongoDb => {
                 crate::db::principal::PrincipalCapability::Unsupported
+            }
+            DatabaseKind::ClickHouse => {
+                crate::db::clickhouse::ClickHouseAdapter::principal_capability()
             }
         })
     }
@@ -2090,6 +2119,7 @@ impl App {
                 DatabaseKind::Sqlite => SqlDialect::Sqlite,
                 DatabaseKind::SqlServer => SqlDialect::SqlServer,
                 DatabaseKind::Redis | DatabaseKind::MongoDb => SqlDialect::Generic,
+                DatabaseKind::ClickHouse => SqlDialect::ClickHouse,
             })
             .unwrap_or_else(|| self.sql_dialect());
         self.editor.render_snapshot_with_dialect_and_statement(
@@ -6485,6 +6515,7 @@ impl App {
                 tab.profile_id = Some(connection.profile_id);
                 tab.connection = Some(connection);
                 tab.redis_details = snapshot.redis_details.clone();
+                tab.visibility = snapshot.visibility;
                 let raw = crate::model::dashboard::RawSample {
                     at_millis: snapshot.server_time_millis,
                     server_generation: snapshot.server_generation,
@@ -8421,10 +8452,18 @@ impl App {
                             self.notify_warning("Catalog", "The selected catalog entry is invalid");
                             return Vec::new();
                         }
-                        if !session
-                            .mutation_capabilities
-                            .can_edit(&anchor, Some(entry))
-                            .unwrap_or(false)
+                        let clickhouse_table_edit = profile.kind
+                            == crate::profile::DatabaseKind::ClickHouse
+                            && object.kind == crate::db::catalog::CatalogKind::Table;
+                        let clickhouse_relation_edit = profile.kind
+                            == crate::profile::DatabaseKind::ClickHouse
+                            && object.kind == crate::db::catalog::CatalogKind::View;
+                        if !clickhouse_table_edit
+                            && !clickhouse_relation_edit
+                            && !session
+                                .mutation_capabilities
+                                .can_edit(&anchor, Some(entry))
+                                .unwrap_or(false)
                         {
                             self.notify_warning(
                                 "Catalog",
@@ -8436,8 +8475,22 @@ impl App {
                             self.notify_warning("Catalog", "The selected catalog ID is invalid");
                             return Vec::new();
                         };
-                        let target = session.target.clone();
-                        if !(object.kind == crate::db::catalog::CatalogKind::Database
+                        let target = if clickhouse_table_edit || clickhouse_relation_edit {
+                            crate::model::execution_target::ExecutionTarget {
+                                profile_id,
+                                database: database.clone(),
+                                schema: Some(database.clone()),
+                            }
+                        } else {
+                            session.target.clone()
+                        };
+                        if !(profile.kind == crate::profile::DatabaseKind::ClickHouse
+                            && matches!(
+                                object.kind,
+                                crate::db::catalog::CatalogKind::Table
+                                    | crate::db::catalog::CatalogKind::View
+                            )
+                            || object.kind == crate::db::catalog::CatalogKind::Database
                             || object
                                 .native_path
                                 .first()
@@ -8530,7 +8583,11 @@ impl App {
                     let dirty = self
                         .catalog_editor
                         .as_ref()
-                        .and_then(CatalogEditorState::table_change_summary)
+                        .and_then(|editor| {
+                            editor
+                                .clickhouse_table_change_summary()
+                                .or_else(|| editor.table_change_summary())
+                        })
                         .is_some_and(|summary| summary.is_dirty());
                     if dirty {
                         self.overlay = Some(Overlay::CatalogEditorDiscardConfirm {
@@ -8708,7 +8765,7 @@ impl App {
                                  },
                              ),
                              crate::db::catalog_mutation::CatalogObjectDefinition::Database(database) => crate::model::catalog_editor::CatalogDraft::Database(crate::model::catalog_editor::DatabaseDraft::from_definition(&database)),
-                            crate::db::catalog_mutation::CatalogObjectDefinition::Table(table) => {
+                             crate::db::catalog_mutation::CatalogObjectDefinition::Table(table) => {
                                 let mut draft =
                                     crate::model::catalog_editor::TableDraft::from_definition(
                                         &table,
@@ -8748,8 +8805,13 @@ impl App {
                                         ));
                                     }
                                 }
-                                crate::model::catalog_editor::CatalogDraft::Table(draft)
-                            }
+                                 crate::model::catalog_editor::CatalogDraft::Table(draft)
+                             }
+                              crate::db::catalog_mutation::CatalogObjectDefinition::ClickHouseTable(table) => {
+                                  crate::model::catalog_editor::CatalogDraft::Table(
+                                      crate::model::catalog_editor::TableDraft::from_clickhouse_definition(&table),
+                                  )
+                              }
                             crate::db::catalog_mutation::CatalogObjectDefinition::Index(index) => {
                                 crate::model::catalog_editor::CatalogDraft::Index(
                                     crate::model::catalog_editor::IndexDraft::from_definition(
@@ -8766,12 +8828,20 @@ impl App {
                             ),
                             crate::db::catalog_mutation::CatalogObjectDefinition::View(view) => {
                                 crate::model::catalog_editor::CatalogDraft::View(
-                                    crate::model::catalog_editor::ViewDraft::from_definition(&view),
+                                    if let Some(native) = &view.clickhouse_native {
+                                        crate::model::catalog_editor::ViewDraft::from_clickhouse_native(native)
+                                    } else {
+                                        crate::model::catalog_editor::ViewDraft::from_definition(&view)
+                                    },
                                 )
                             }
                              crate::db::catalog_mutation::CatalogObjectDefinition::MaterializedView(view) => {
                                 crate::model::catalog_editor::CatalogDraft::MaterializedView(
-                                    crate::model::catalog_editor::MaterializedViewDraft::from_definition(&view),
+                                    if let Some(native) = &view.clickhouse_native {
+                                        crate::model::catalog_editor::MaterializedViewDraft::from_clickhouse_native(native)
+                                    } else {
+                                        crate::model::catalog_editor::MaterializedViewDraft::from_definition(&view)
+                                    },
                                 )
                              }
                               crate::db::catalog_mutation::CatalogObjectDefinition::Sequence(sequence) => crate::model::catalog_editor::CatalogDraft::Sequence(crate::model::catalog_editor::SequenceDraft::from_definition(&sequence)),
@@ -9754,6 +9824,11 @@ impl App {
                 };
                 if let Err(error) = match &draft {
                     crate::model::catalog_editor::CatalogDraft::Schema(draft) => draft.validate(),
+                    crate::model::catalog_editor::CatalogDraft::Table(draft)
+                        if draft.database_kind == crate::profile::DatabaseKind::ClickHouse =>
+                    {
+                        Ok(())
+                    }
                     crate::model::catalog_editor::CatalogDraft::Table(draft) => draft.validate(),
                     crate::model::catalog_editor::CatalogDraft::Index(draft) => draft.validate(),
                     crate::model::catalog_editor::CatalogDraft::Constraint(draft) => {
@@ -10034,7 +10109,11 @@ impl App {
                 self.explorer.refresh_frontend_search();
                 self.commands_for_catalog_targets(profile_id, &plan.refresh)
             }
-            Action::CatalogMutationFailed { plan, message } => {
+            Action::CatalogMutationFailed {
+                plan,
+                message,
+                outcome_unknown,
+            } => {
                 let identity_matches = self.session_is_connected(plan.request.connection);
                 let epoch_matches = self
                     .explorer
@@ -10046,12 +10125,27 @@ impl App {
                     && epoch_matches
                     && self.catalog_editor.as_mut().is_some_and(|editor| {
                         editor.plan.as_ref() == Some(&plan)
-                            && editor.apply_failed(plan.request.request_id, message.clone())
+                            && editor.apply_failed_with_outcome(
+                                plan.request.request_id,
+                                message.clone(),
+                                outcome_unknown,
+                            )
                     });
                 if applied {
                     self.notify_error("Catalog", message);
                 }
-                Vec::new()
+                if identity_matches && epoch_matches {
+                    for target in &plan.refresh {
+                        self.explorer
+                            .invalidate_catalog_target(plan.request.connection.profile_id, target);
+                    }
+                    self.commands_for_catalog_targets(
+                        plan.request.connection.profile_id,
+                        &plan.refresh,
+                    )
+                } else {
+                    Vec::new()
+                }
             }
             Action::ProfileRequestDelete { profile_id } => {
                 self.request_profile_delete(profile_id);
@@ -18464,11 +18558,15 @@ impl App {
                 }
                 DatabaseKind::Redis => Default::default(),
                 DatabaseKind::MongoDb => Default::default(),
+                DatabaseKind::ClickHouse => {
+                    crate::db::clickhouse::ClickHouseAdapter::catalog_mutation_capabilities()
+                }
             };
             let namespace_model = match profile.kind {
                 DatabaseKind::MySql | DatabaseKind::MariaDb => {
                     crate::db::catalog::NamespaceModel::DatabaseIsSchema
                 }
+                DatabaseKind::ClickHouse => crate::db::catalog::NamespaceModel::DatabaseIsSchema,
                 _ => crate::db::catalog::NamespaceModel::DatabaseAndSchema,
             };
             let options = capabilities
@@ -20708,6 +20806,7 @@ impl App {
                         entry.qualified_name.schema.clone()
                     }
                     DatabaseKind::Redis | DatabaseKind::MongoDb => None,
+                    DatabaseKind::ClickHouse => Some(database.clone()),
                 };
                 let candidate = ExecutionTarget {
                     profile_id: profile.id,
@@ -20905,6 +21004,7 @@ impl App {
                     DatabaseKind::Sqlite => Some("main".to_owned()),
                     DatabaseKind::Postgres | DatabaseKind::SqlServer | DatabaseKind::Oracle => None,
                     DatabaseKind::Redis | DatabaseKind::MongoDb => None,
+                    DatabaseKind::ClickHouse => Some(database.clone()),
                 },
                 database,
             })
@@ -21856,6 +21956,7 @@ impl App {
             DatabaseKind::Sqlite => SqlDialect::Sqlite,
             DatabaseKind::SqlServer => SqlDialect::SqlServer,
             DatabaseKind::Redis | DatabaseKind::MongoDb => SqlDialect::Generic,
+            DatabaseKind::ClickHouse => SqlDialect::ClickHouse,
         }
     }
 
@@ -21867,6 +21968,7 @@ impl App {
             Some(DatabaseKind::Sqlite) => SqlDialect::Sqlite,
             Some(DatabaseKind::SqlServer) => SqlDialect::SqlServer,
             Some(DatabaseKind::Redis | DatabaseKind::MongoDb) => SqlDialect::Generic,
+            Some(DatabaseKind::ClickHouse) => SqlDialect::ClickHouse,
             None => SqlDialect::Generic,
         }
     }
@@ -21887,6 +21989,7 @@ impl App {
             Some(DatabaseKind::Sqlite) => SqlDialect::Sqlite,
             Some(DatabaseKind::SqlServer) => SqlDialect::SqlServer,
             Some(DatabaseKind::Redis | DatabaseKind::MongoDb) | None => SqlDialect::Generic,
+            Some(DatabaseKind::ClickHouse) => SqlDialect::ClickHouse,
         }
     }
 
@@ -23488,6 +23591,18 @@ impl App {
                     .map(|()| Vec::new())
                     .map_err(|error| error.to_string())
                 }
+                CatalogTarget::ProjectionChildren { table } => {
+                    let catalog = &mut next_explorer.profiles.get_mut(&profile_id).unwrap().catalog;
+                    if request.key.cursor.is_some() {
+                        catalog.append_projections(table, page.entries.clone())
+                    } else {
+                        catalog
+                            .replace_projections(table, page.entries.clone())
+                            .map(|_| ())
+                    }
+                    .map(|()| Vec::new())
+                    .map_err(|error| error.to_string())
+                }
                 _ if request.key.cursor.is_some() => next_explorer
                     .profiles
                     .get_mut(&profile_id)
@@ -23532,11 +23647,26 @@ impl App {
             }
         }
         if !removed.is_empty() {
+            let removed_tables = removed
+                .iter()
+                .filter(|id| id.kind == crate::db::catalog::CatalogKind::Table)
+                .cloned()
+                .collect::<Vec<_>>();
+            for removed_id in &removed_tables {
+                if removed_id.kind == crate::db::catalog::CatalogKind::Table {
+                    let projection_owner = ExplorerOwnerId::Projections(removed_id.clone());
+                    state.load_states.remove(&projection_owner);
+                    state.pending_requests.remove(&projection_owner);
+                    state.previous_load_states.remove(&projection_owner);
+                    state.load_errors.remove(&projection_owner);
+                }
+            }
             let references_removed = |candidate: &ExplorerOwnerId| {
                 candidate != &owner
                     && match candidate {
                         ExplorerOwnerId::Profile(_) => false,
                         ExplorerOwnerId::Catalog(id) => removed.contains(id),
+                        ExplorerOwnerId::Projections(id) => removed.contains(id),
                         ExplorerOwnerId::Group { parent, .. } => removed.contains(parent),
                     }
             };
@@ -23552,6 +23682,12 @@ impl App {
             state
                 .load_errors
                 .retain(|candidate, _| !references_removed(candidate));
+            for removed_id in removed_tables {
+                self.explorer
+                    .normalized
+                    .expanded
+                    .remove(&ExplorerNodeId::ProjectionGroup(removed_id));
+            }
         }
         state.pending_requests.remove(&owner);
         state.previous_load_states.remove(&owner);
@@ -23683,7 +23819,9 @@ impl App {
                     ));
                 }
             }
-            CatalogTarget::Objects { .. } | CatalogTarget::RelationChildren { .. } => {}
+            CatalogTarget::Objects { .. }
+            | CatalogTarget::ProjectionChildren { .. }
+            | CatalogTarget::RelationChildren { .. } => {}
         }
         if self.active_console_opt().is_some()
             && self.completion_request_is_current()
@@ -23756,6 +23894,12 @@ impl App {
             ExplorerOwnerId::Catalog(id) => {
                 !state.catalog.children(id).is_empty() || !state.catalog.groups(id).is_empty()
             }
+            ExplorerOwnerId::Projections(id) => state.catalog.children(id).iter().any(|child| {
+                state
+                    .catalog
+                    .get(child)
+                    .is_some_and(|entry| entry.kind == crate::db::catalog::CatalogKind::Projection)
+            }),
             ExplorerOwnerId::Group { parent, group } => {
                 !state.catalog.group_children(parent, *group).is_empty()
             }
@@ -24451,6 +24595,13 @@ impl App {
                 kind if kind.is_relation() => CatalogTarget::relation_children(id.clone()).ok(),
                 _ => None,
             },
+            ExplorerNodeId::ProjectionGroup(table) => self
+                .explorer
+                .normalized
+                .profiles
+                .get(&table.profile_id())
+                .filter(|profile| profile.kind == DatabaseKind::ClickHouse)
+                .and_then(|_| CatalogTarget::projection_children(table.clone()).ok()),
             ExplorerNodeId::Group { parent, group } => {
                 CatalogTarget::objects(parent.clone(), *group).ok()
             }
@@ -24478,6 +24629,17 @@ impl App {
                 kind if kind.is_relation() => CatalogTarget::relation_children(id.clone()).ok(),
                 _ => None,
             },
+            ExplorerOwnerId::Projections(id) => {
+                let is_clickhouse = self
+                    .explorer
+                    .normalized
+                    .profiles
+                    .get(&id.profile_id())
+                    .is_some_and(|profile| profile.kind == DatabaseKind::ClickHouse);
+                is_clickhouse
+                    .then(|| CatalogTarget::projection_children(id.clone()).ok())
+                    .flatten()
+            }
             ExplorerOwnerId::Group { parent, group } => {
                 CatalogTarget::objects(parent.clone(), *group).ok()
             }
@@ -24507,6 +24669,21 @@ impl App {
                 .map_or_else(Vec::new, |target| {
                     self.start_catalog_request(target, None, CatalogRequestIntent::Explicit)
                 }),
+            ExplorerNodeId::ProjectionGroup(_) => {
+                let Some(target) = self.target_for_node(&selected) else {
+                    return Vec::new();
+                };
+                let expanded = self.explorer.normalized.expanded.contains(&selected);
+                self.explorer.toggle_selected();
+                if expanded {
+                    return Vec::new();
+                }
+                if self.target_needs_load(&target) {
+                    self.start_catalog_request(target, None, CatalogRequestIntent::Explicit)
+                } else {
+                    Vec::new()
+                }
+            }
             ExplorerNodeId::Catalog(_) | ExplorerNodeId::Group { .. } => {
                 let expanded = self.explorer.normalized.expanded.contains(&selected);
                 self.explorer.toggle_selected();
@@ -24515,11 +24692,31 @@ impl App {
                 }
                 self.target_for_node(&selected)
                     .map_or_else(Vec::new, |target| {
-                        if self.target_needs_load(&target) {
+                        let commands = if self.target_needs_load(&target) {
                             self.start_catalog_request(target, None, CatalogRequestIntent::Explicit)
                         } else {
                             Vec::new()
+                        };
+                        let mut commands = commands;
+                        if let ExplorerNodeId::Catalog(id) = &selected
+                            && id.kind == crate::db::catalog::CatalogKind::Table
+                            && self
+                                .explorer
+                                .normalized
+                                .profiles
+                                .get(&id.profile_id())
+                                .is_some_and(|profile| profile.kind == DatabaseKind::ClickHouse)
+                            && let Ok(projection_target) =
+                                CatalogTarget::projection_children(id.clone())
+                            && self.target_needs_load(&projection_target)
+                        {
+                            commands.extend(self.start_catalog_request(
+                                projection_target,
+                                None,
+                                CatalogRequestIntent::Explicit,
+                            ));
                         }
+                        commands
                     })
             }
             ExplorerNodeId::Profile(profile_id) => {
@@ -28979,6 +29176,12 @@ fn add_explorer_profile(
                 .map_or_else(|| host.to_owned(), |port| format!("{host}:{port}"))
         }
         DatabaseKind::MongoDb => profile.host.clone().unwrap_or_default(),
+        DatabaseKind::ClickHouse => {
+            let host = profile.host.as_deref().unwrap_or_default();
+            profile
+                .port
+                .map_or_else(|| host.to_owned(), |port| format!("{host}:{port}"))
+        }
     };
     explorer.normalized.add_profile_with_placement(
         profile.id,
@@ -31898,6 +32101,7 @@ mod tests {
         dashboard.processes = vec![
             crate::model::dashboard::ProcessRow {
                 id: 1,
+                native_id: None,
                 user: "alice".into(),
                 database: None,
                 client: None,
@@ -31909,6 +32113,7 @@ mod tests {
             },
             crate::model::dashboard::ProcessRow {
                 id: 2,
+                native_id: None,
                 user: "bob".into(),
                 database: None,
                 client: None,

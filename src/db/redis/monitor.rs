@@ -128,6 +128,7 @@ pub fn parse_info(raw: &str, at_millis: u64) -> (MonitorSnapshot, RedisMonitorDe
             server_generation: 1,
             values,
             redis_details: None,
+            visibility: crate::db::monitor::MonitorVisibility::Unknown,
         },
         details,
     )

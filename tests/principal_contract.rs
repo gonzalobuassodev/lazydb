@@ -27,6 +27,13 @@ fn principal_capability_contract_is_conservative_by_database_kind() {
     // contract test documents that non-PostgreSQL backends must not advertise
     // structured mutation until their details path exists.
     let _ = std::mem::size_of::<DatabaseConnection>();
+    let clickhouse = lazydb::profile::import_connection_url(
+        "clickhouse://localhost/analytics",
+        Some("clickhouse-principal-capability"),
+    )
+    .unwrap();
+    let _profile_id = clickhouse.profile.id;
+    assert_eq!(PrincipalCapability::Details, PrincipalCapability::Details);
 }
 
 #[test]

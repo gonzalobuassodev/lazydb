@@ -139,6 +139,7 @@ impl DatabaseKindLabel for DatabaseKind {
             DatabaseKind::SqlServer => "SQL Server",
             DatabaseKind::Redis => "Redis",
             DatabaseKind::MongoDb => "MongoDB",
+            DatabaseKind::ClickHouse => "ClickHouse",
         }
     }
 }

@@ -6,6 +6,7 @@ pub enum SqlDialect {
     SqlServer,
     Sqlite,
     Oracle,
+    ClickHouse,
     #[default]
     Generic,
 }
@@ -28,6 +29,7 @@ impl SqlDialect {
             crate::profile::DatabaseKind::Oracle => Self::Oracle,
             crate::profile::DatabaseKind::Redis => Self::Generic,
             crate::profile::DatabaseKind::MongoDb => Self::Generic,
+            crate::profile::DatabaseKind::ClickHouse => Self::ClickHouse,
         }
     }
 }
@@ -40,5 +42,28 @@ pub(crate) fn parser_dialect(dialect: SqlDialect) -> &'static dyn sqlparser::dia
         SqlDialect::Sqlite => &sqlparser::dialect::SQLiteDialect {},
         SqlDialect::Generic => &sqlparser::dialect::GenericDialect {},
         SqlDialect::Oracle => &sqlparser::dialect::GenericDialect {},
+        SqlDialect::ClickHouse => &sqlparser::dialect::ClickHouseDialect {},
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{SqlDialect, parser_dialect};
+    use sqlparser::parser::Parser;
+
+    #[test]
+    fn clickhouse_dialect_parses_native_select_clauses() {
+        let sql = [
+            "SELECT number FROM numbers(4) ARRAY JOIN items AS item",
+            "SELECT number FROM numbers(4) PREWHERE number > 0 LIMIT 1 BY number",
+            "SELECT arrayMap(x -> x + 1, [1, 2])",
+        ];
+        for statement in sql {
+            let parsed = Parser::parse_sql(parser_dialect(SqlDialect::ClickHouse), statement);
+            assert!(
+                parsed.is_ok(),
+                "ClickHouse dialect rejected {statement}: {parsed:?}"
+            );
+        }
     }
 }

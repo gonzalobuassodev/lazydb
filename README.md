@@ -7,6 +7,7 @@ without leaving your terminal. It is written in Rust and supports PostgreSQL,
 MySQL, MariaDB, Oracle, SQL Server, SQLite, Redis, and MongoDB. MongoDB uses a
 document explorer, bounded JSON console, and native BSON/EJSON handling; see the
 [MongoDB guide](docs/mongodb.md) for current scope and verification limits.
+MySQL, MariaDB, Oracle, SQL Server, SQLite, Redis, and ClickHouse.
 
 > **Project status:** LazyDB is currently in beta. The core database workspace,
 > connection management, SQL execution, and coding-agent interfaces are usable,
@@ -231,9 +232,24 @@ single-line machine-readable report.
 
 ## Features
 
+### ClickHouse
+
+ClickHouse profiles use the HTTP interface: `clickhouse://host[:8123]/database`
+or verified HTTPS via `clickhouses://host[:8443]/database`. User credentials
+are sent in HTTP headers. The adapter supports SQL execution, typed results,
+catalog browsing/search, bounded monitoring/process inspection, and the
+documented catalog mutation slices. It does not provide manual transactions or
+general row editing; unsupported principal mutations remain gated. See the
+[database capability matrix](docs/database-capabilities.md#clickhouse) and
+[configuration reference](docs/configuration.md#clickhouse-profiles).
+For an isolated local ClickHouse server and the required live test command, see
+the [ClickHouse test database guide](docs/clickhouse-test-database.md).
+
 - **Database Explorer:** Browse databases, schemas, tables, views, indexes,
   foreign keys, triggers, routines, sequences, and types where supported by the
-  driver. Redis uses a dedicated key-space browser rather than a SQL catalog.
+  driver. ClickHouse supports database/schema navigation, tables, views,
+  materialized views, dictionaries, functions, and projections. Redis uses a
+  dedicated key-space browser rather than a SQL catalog.
 - **Users & Roles:** Relational connections end their first explorer level with
   a `Users & Roles` group listing database users and roles with distinct icons
   and colours across the Nerd Font, Unicode, and ASCII icon modes. Pressing
@@ -249,8 +265,9 @@ single-line machine-readable report.
   and `e` edits directly selected objects. PostgreSQL exposes the broadest
   catalog editor (schema, table, column, index, constraints, views,
   materialized views, sequences, databases, and roles); Oracle, MySQL,
-  MariaDB, SQL Server, and SQLite expose their currently implemented table/view
-  and driver-specific mutation slices. Unsupported operations stay hidden.
+  MariaDB, SQL Server, SQLite, and ClickHouse expose their currently implemented
+  table/view and driver-specific mutation slices. Unsupported operations stay
+  hidden.
 - **Catalog reconciliation:** Explorer `r` refreshes only the selected target;
   PostgreSQL relation identities can be rebound after an external table rename,
   while SQL catalog changes trigger a conservative database-catalog sync.
@@ -266,7 +283,8 @@ single-line machine-readable report.
 - **Relation workspaces:** Preview relation data with a bounded 500-row limit,
   switch between Data and DDL, open DDL in a separate tab, and use staged
   relation editing where the selected driver advertises it. PostgreSQL, MySQL,
-  MariaDB, SQL Server, and SQLite have adapter mutation paths with operation-
+  MariaDB, SQL Server, SQLite, and a constrained ClickHouse table-edit subset
+  have adapter mutation paths with operation-
   level checks; Oracle relation-grid mutation is not advertised. Existing-row
   update/delete requires reliable primary-key metadata, while insert support
   depends on the driver's returning/output/lookup strategy.
@@ -275,10 +293,10 @@ single-line machine-readable report.
   metadata, and perform native key/value, collection, and TTL mutations where
   supported.
 - **Connection profiles:** Create, test, save, edit, delete, disconnect, and
-  switch PostgreSQL, MySQL, MariaDB, Oracle, SQL Server, SQLite, and Redis
+  switch PostgreSQL, MySQL, MariaDB, Oracle, SQL Server, SQLite, Redis, and ClickHouse
   profiles. Profiles can be saved, ad hoc, or scoped to the current project.
 - **Monitoring dashboard:** Inspect read-only status metrics and bounded process
-  data for PostgreSQL, MySQL, and MariaDB, plus Redis instance metrics. SQLite
+  data for PostgreSQL, MySQL, MariaDB, and ClickHouse, plus Redis instance metrics. SQLite
   and Oracle do not yet expose dashboard metrics; Redis process rows are not
   available; SQL Server dashboard and process metrics are gated.
 - **Credential protection:** Use local authenticated encryption by default, or

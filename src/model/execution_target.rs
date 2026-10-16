@@ -196,7 +196,9 @@ impl ExecutionTarget {
             })
             .unwrap_or_default();
         let schema = match profile.kind {
-            DatabaseKind::MySql | DatabaseKind::MariaDb => Some(database.clone()),
+            DatabaseKind::MySql | DatabaseKind::MariaDb | DatabaseKind::ClickHouse => {
+                Some(database.clone())
+            }
             DatabaseKind::Sqlite => Some("main".to_owned()),
             DatabaseKind::Postgres | DatabaseKind::SqlServer | DatabaseKind::Oracle => {
                 profile.default_schema.clone()
@@ -235,6 +237,12 @@ impl ExecutionTarget {
                 .as_deref()
                 .is_none_or(|schema| profile.catalog_scope.allows_schema(&self.database, schema)),
             DatabaseKind::Redis | DatabaseKind::MongoDb => self.schema.is_none(),
+            DatabaseKind::ClickHouse => {
+                self.schema.as_deref() == Some(self.database.as_str())
+                    && profile
+                        .catalog_scope
+                        .allows_schema(&self.database, &self.database)
+            }
         }
     }
 
@@ -248,7 +256,7 @@ impl ExecutionTarget {
                 configured.database = Some(self.database.clone());
                 configured.default_schema = self.schema.clone();
             }
-            DatabaseKind::MySql | DatabaseKind::MariaDb => {
+            DatabaseKind::MySql | DatabaseKind::MariaDb | DatabaseKind::ClickHouse => {
                 configured.database = Some(self.database.clone());
                 configured.default_schema = Some(self.database.clone());
             }

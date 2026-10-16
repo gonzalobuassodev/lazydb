@@ -6,7 +6,8 @@ use sqlparser::{
         Visitor,
     },
     dialect::{
-        Dialect, GenericDialect, MsSqlDialect, MySqlDialect, PostgreSqlDialect, SQLiteDialect,
+        ClickHouseDialect, Dialect, GenericDialect, MsSqlDialect, MySqlDialect, PostgreSqlDialect,
+        SQLiteDialect,
     },
     parser::Parser,
     tokenizer::{Token, TokenWithSpan, Tokenizer, Whitespace},
@@ -846,5 +847,6 @@ fn dialect_ref(dialect: SqlDialect) -> &'static dyn Dialect {
         SqlDialect::SqlServer => &MsSqlDialect {},
         SqlDialect::Sqlite => &SQLiteDialect {},
         SqlDialect::Generic | SqlDialect::Oracle => &GenericDialect {},
+        SqlDialect::ClickHouse => &ClickHouseDialect {},
     }
 }

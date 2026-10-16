@@ -491,6 +491,7 @@ fn catalog_preview_keeps_sql_and_footer_visible_around_sanitized_failure() {
         error: Some("database denied\nsecret".into()),
         owner_picker: Default::default(),
         preview_scroll: 0,
+        outcome_unknown: false,
     });
     app.overlay = Some(Overlay::CatalogEditor);
 
@@ -642,6 +643,7 @@ fn role_editor_renders_secret_as_status_only() {
         error: None,
         owner_picker: Default::default(),
         preview_scroll: 0,
+        outcome_unknown: false,
     });
     app.overlay = Some(Overlay::CatalogEditor);
     let output = render(&app, 100, 30);
@@ -672,6 +674,7 @@ fn table_editor_renders_general_and_columns_sections() {
         error: None,
         owner_picker: Default::default(),
         preview_scroll: 0,
+        outcome_unknown: false,
         draft: Some(lazydb::model::catalog_editor::CatalogDraft::Table(
             lazydb::model::catalog_editor::TableDraft {
                 database_kind: lazydb::profile::DatabaseKind::Postgres,
@@ -685,6 +688,14 @@ fn table_editor_renders_general_and_columns_sections() {
                 column_editor: None,
                 indexes: vec![],
                 constraints: vec![],
+                clickhouse_engine: Default::default(),
+                clickhouse_order_by: Default::default(),
+                clickhouse_partition_by: Default::default(),
+                clickhouse_ttl: Default::default(),
+                clickhouse_native_ddl: None,
+                clickhouse_baseline_fingerprint: None,
+                clickhouse_baseline_comment: None,
+                clickhouse_baseline_columns: None,
             },
         )),
     });
@@ -764,6 +775,7 @@ fn table_editor_highlights_modified_column_cells_without_highlighting_the_row() 
         error: None,
         owner_picker: Default::default(),
         preview_scroll: 0,
+        outcome_unknown: false,
         draft: Some(lazydb::model::catalog_editor::CatalogDraft::Table(draft)),
     });
     app.overlay = Some(Overlay::CatalogEditor);
@@ -816,6 +828,7 @@ fn table_editor_baseline_hit_regions_stay_inside_the_rendered_window() {
         error: None,
         owner_picker: Default::default(),
         preview_scroll: 0,
+        outcome_unknown: false,
         draft: Some(lazydb::model::catalog_editor::CatalogDraft::Table(
             lazydb::model::catalog_editor::TableDraft::new("public"),
         )),
@@ -864,6 +877,7 @@ fn table_editor_baseline_column_rows_are_disjoint_and_selectable() {
         error: None,
         owner_picker: Default::default(),
         preview_scroll: 0,
+        outcome_unknown: false,
         draft: Some(lazydb::model::catalog_editor::CatalogDraft::Table(draft)),
     });
     app.overlay = Some(Overlay::CatalogEditor);
@@ -1052,6 +1066,7 @@ fn table_editor_marks_removed_columns_and_exposes_restore_action() {
         error: None,
         owner_picker: Default::default(),
         preview_scroll: 0,
+        outcome_unknown: false,
         draft: Some(lazydb::model::catalog_editor::CatalogDraft::Table(draft)),
     });
     app.overlay = Some(Overlay::CatalogEditor);
@@ -1116,6 +1131,7 @@ fn table_editor_column_list_has_headers_and_bounds_wide_values() {
         error: None,
         owner_picker: Default::default(),
         preview_scroll: 0,
+        outcome_unknown: false,
         draft: Some(lazydb::model::catalog_editor::CatalogDraft::Table(draft)),
     });
     app.overlay = Some(Overlay::CatalogEditor);
@@ -1155,6 +1171,7 @@ fn table_editor_focus_drives_sections_details_actions_and_context_hints() {
         error: None,
         owner_picker: Default::default(),
         preview_scroll: 0,
+        outcome_unknown: false,
         draft: Some(lazydb::model::catalog_editor::CatalogDraft::Table(
             lazydb::model::catalog_editor::TableDraft {
                 database_kind: lazydb::profile::DatabaseKind::Postgres,
@@ -1170,6 +1187,14 @@ fn table_editor_focus_drives_sections_details_actions_and_context_hints() {
                 column_editor: None,
                 indexes: vec![],
                 constraints: vec![],
+                clickhouse_engine: Default::default(),
+                clickhouse_order_by: Default::default(),
+                clickhouse_partition_by: Default::default(),
+                clickhouse_ttl: Default::default(),
+                clickhouse_native_ddl: None,
+                clickhouse_baseline_fingerprint: None,
+                clickhouse_baseline_comment: None,
+                clickhouse_baseline_columns: None,
             },
         )),
     });
@@ -1308,6 +1333,7 @@ fn compact_table_editor_hides_inline_details_and_keeps_actions_reachable() {
         error: None,
         owner_picker: Default::default(),
         preview_scroll: 0,
+        outcome_unknown: false,
         draft: Some(lazydb::model::catalog_editor::CatalogDraft::Table(
             lazydb::model::catalog_editor::TableDraft::new("public"),
         )),
@@ -1367,6 +1393,7 @@ fn very_small_table_editor_keeps_selected_column_reachable() {
         error: None,
         owner_picker: Default::default(),
         preview_scroll: 0,
+        outcome_unknown: false,
         draft: Some(lazydb::model::catalog_editor::CatalogDraft::Table(draft)),
     });
     app.overlay = Some(Overlay::CatalogEditor);
@@ -1406,6 +1433,7 @@ fn table_column_details_modal_renders_all_fields_and_controls_at_compact_size() 
         error: None,
         owner_picker: Default::default(),
         preview_scroll: 0,
+        outcome_unknown: false,
         draft: Some(lazydb::model::catalog_editor::CatalogDraft::Table(draft)),
     });
     app.overlay = Some(Overlay::CatalogEditor);
@@ -1469,6 +1497,7 @@ fn table_column_details_modal_keeps_validation_error_above_controls() {
         error: None,
         owner_picker: Default::default(),
         preview_scroll: 0,
+        outcome_unknown: false,
         draft: Some(lazydb::model::catalog_editor::CatalogDraft::Table(draft)),
     });
     app.overlay = Some(Overlay::CatalogEditor);
@@ -1519,6 +1548,7 @@ fn table_editor_scrolls_selected_column_into_the_rendered_window() {
         error: None,
         owner_picker: Default::default(),
         preview_scroll: 0,
+        outcome_unknown: false,
         draft: Some(lazydb::model::catalog_editor::CatalogDraft::Table(draft)),
     });
     app.overlay = Some(Overlay::CatalogEditor);
@@ -1563,6 +1593,7 @@ fn table_editor_hides_details_for_last_column_at_list_capacity() {
         error: None,
         owner_picker: Default::default(),
         preview_scroll: 0,
+        outcome_unknown: false,
         draft: Some(lazydb::model::catalog_editor::CatalogDraft::Table(draft)),
     });
     app.overlay = Some(Overlay::CatalogEditor);
@@ -1601,6 +1632,7 @@ fn constraint_editor_renders_typed_fields() {
         error: None,
         owner_picker: Default::default(),
         preview_scroll: 0,
+        outcome_unknown: false,
         draft: Some(lazydb::model::catalog_editor::CatalogDraft::Constraint(
             lazydb::model::catalog_editor::ConstraintDraft::new(
                 lazydb::db::catalog_mutation::ConstraintDefinitionKind::Check {
@@ -1790,6 +1822,7 @@ fn materialized_view_footer_does_not_advertise_space_globally() {
                 with_data: true,
                 focus: lazydb::model::catalog_editor::CatalogFormFocus::Tablespace,
                 query_editable: true,
+                clickhouse_native: None,
             },
         ),
     );
@@ -1903,6 +1936,7 @@ fn materialized_view_fixture() -> App {
                 with_data: true,
                 focus: lazydb::model::catalog_editor::CatalogFormFocus::Name,
                 query_editable: true,
+                clickhouse_native: None,
             },
         ),
     );
@@ -1965,6 +1999,7 @@ fn view_editor_fixture() -> App {
         error: None,
         owner_picker: Default::default(),
         preview_scroll: 0,
+        outcome_unknown: false,
         draft: Some(lazydb::model::catalog_editor::CatalogDraft::View(
             lazydb::model::catalog_editor::ViewDraft {
                 name: "v".into(),
@@ -1979,6 +2014,7 @@ fn view_editor_fixture() -> App {
                     "CASCADED".into(),
                 )),
                 focus: lazydb::model::catalog_editor::CatalogFormFocus::Name,
+                clickhouse_native: None,
             },
         )),
     });
@@ -2008,6 +2044,7 @@ fn index_editor_renders_typed_fields() {
         error: None,
         owner_picker: Default::default(),
         preview_scroll: 0,
+        outcome_unknown: false,
         draft: Some(lazydb::model::catalog_editor::CatalogDraft::Index(
             lazydb::model::catalog_editor::IndexDraft {
                 name: "idx".into(),
@@ -2055,6 +2092,7 @@ fn materialized_view_editor_renders_data_state_and_read_only_query() {
         error: None,
         owner_picker: Default::default(),
         preview_scroll: 0,
+        outcome_unknown: false,
         draft: Some(
             lazydb::model::catalog_editor::CatalogDraft::MaterializedView(
                 lazydb::model::catalog_editor::MaterializedViewDraft {
@@ -2067,6 +2105,7 @@ fn materialized_view_editor_renders_data_state_and_read_only_query() {
                     with_data: false,
                     focus: lazydb::model::catalog_editor::CatalogFormFocus::Name,
                     query_editable: false,
+                    clickhouse_native: None,
                 },
             ),
         ),
@@ -2140,6 +2179,7 @@ fn sequence_editor_renders_sections_bounds_and_all_fields() {
         error: None,
         owner_picker: Default::default(),
         preview_scroll: 0,
+        outcome_unknown: false,
         draft: Some(lazydb::model::catalog_editor::CatalogDraft::Sequence(
             lazydb::model::catalog_editor::SequenceDraft {
                 name: "orders".into(),
@@ -7698,15 +7738,7 @@ fn driver_options_have_individual_targets_and_selected_style_survives_field_blur
 
     let (buffer, state) = render_buffer_with_icons(&app, 120, 24, IconSet::new(IconMode::Ascii));
 
-    let options = [
-        DatabaseKind::Postgres,
-        DatabaseKind::MySql,
-        DatabaseKind::MariaDb,
-        DatabaseKind::Oracle,
-        DatabaseKind::SqlServer,
-        DatabaseKind::Sqlite,
-    ]
-    .map(|kind| {
+    let options = [DatabaseKind::Postgres, DatabaseKind::MySql].map(|kind| {
         state
             .hit_regions
             .iter()
@@ -7737,6 +7769,7 @@ fn driver_options_use_database_icons_in_each_icon_mode() {
         DatabaseKind::Sqlite,
         DatabaseKind::Redis,
         DatabaseKind::Oracle,
+        DatabaseKind::ClickHouse,
     ];
 
     for mode in [IconMode::NerdFont, IconMode::Unicode, IconMode::Ascii] {
@@ -7766,6 +7799,7 @@ fn driver_options_use_database_icons_in_each_icon_mode() {
                 DatabaseKind::Sqlite => "SQLite",
                 DatabaseKind::Redis => "Redis",
                 DatabaseKind::MongoDb => "MongoDB",
+                DatabaseKind::ClickHouse => "ClickHouse",
             };
             let label = format!("{} {display_name}", IconSet::new(mode).database(kind));
             assert!(

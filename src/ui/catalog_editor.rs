@@ -383,9 +383,21 @@ fn form(
         );
     }
     if let Some(error) = editor.error.as_deref() {
+        let prefix = if editor.outcome_unknown {
+            "? OUTCOME UNCONFIRMED: "
+        } else {
+            "× "
+        };
         frame.render_widget(
-            Paragraph::new(format!("× {}", sanitize_terminal_text(error)))
-                .style(Style::new().fg(theme.error).bg(theme.surface)),
+            Paragraph::new(format!("{prefix}{}", sanitize_terminal_text(error))).style(
+                Style::new()
+                    .fg(if editor.outcome_unknown {
+                        theme.warning
+                    } else {
+                        theme.error
+                    })
+                    .bg(theme.surface),
+            ),
             chunks[2],
         );
     } else if matches!(editor.draft.as_ref(), Some(CatalogDraft::Table(_))) {
@@ -1793,7 +1805,17 @@ fn render_table(
     );
     // Fall back to the compact layout before the full layout can starve the
     // column list of its selected row.
-    let full_list_capacity = area.height.saturating_sub(16);
+    let general_field_count = if draft.database_kind == crate::profile::DatabaseKind::ClickHouse {
+        if draft.clickhouse_native_ddl.is_some() {
+            4
+        } else {
+            8
+        }
+    } else {
+        4
+    };
+    let columns_section_offset = general_field_count as u16 + 2;
+    let full_list_capacity = area.height.saturating_sub(columns_section_offset + 9);
     let compact = area.height <= 10 || full_list_capacity == 0;
     let general_heading = Rect::new(area.x, area.y, area.width, 1);
     render_catalog_section_heading(frame, general_heading, "GENERAL", general_focus, theme);
@@ -1804,7 +1826,7 @@ fn render_table(
         )),
     });
     if !compact {
-        let general = [
+        let mut general = vec![
             (
                 TableEditorFocus::General(TableGeneralField::Name),
                 "Name",
@@ -1826,6 +1848,32 @@ fn render_table(
                 &draft.comment,
             ),
         ];
+        if draft.database_kind == crate::profile::DatabaseKind::ClickHouse
+            && draft.clickhouse_native_ddl.is_none()
+        {
+            general.extend([
+                (
+                    TableEditorFocus::General(TableGeneralField::ClickHouseEngine),
+                    "Engine",
+                    &draft.clickhouse_engine,
+                ),
+                (
+                    TableEditorFocus::General(TableGeneralField::ClickHouseOrderBy),
+                    "ORDER BY",
+                    &draft.clickhouse_order_by,
+                ),
+                (
+                    TableEditorFocus::General(TableGeneralField::ClickHousePartitionBy),
+                    "PARTITION BY",
+                    &draft.clickhouse_partition_by,
+                ),
+                (
+                    TableEditorFocus::General(TableGeneralField::ClickHouseTtl),
+                    "TTL",
+                    &draft.clickhouse_ttl,
+                ),
+            ]);
+        }
         for (offset, (field, label, input)) in general.into_iter().enumerate() {
             render_table_text_field(
                 frame,
@@ -1860,6 +1908,26 @@ fn render_table(
                 TableEditorFocus::General(TableGeneralField::Comment),
                 "Comment",
                 &draft.comment,
+            ),
+            TableEditorFocus::General(TableGeneralField::ClickHouseEngine) => (
+                TableEditorFocus::General(TableGeneralField::ClickHouseEngine),
+                "Engine",
+                &draft.clickhouse_engine,
+            ),
+            TableEditorFocus::General(TableGeneralField::ClickHouseOrderBy) => (
+                TableEditorFocus::General(TableGeneralField::ClickHouseOrderBy),
+                "ORDER BY",
+                &draft.clickhouse_order_by,
+            ),
+            TableEditorFocus::General(TableGeneralField::ClickHousePartitionBy) => (
+                TableEditorFocus::General(TableGeneralField::ClickHousePartitionBy),
+                "PARTITION BY",
+                &draft.clickhouse_partition_by,
+            ),
+            TableEditorFocus::General(TableGeneralField::ClickHouseTtl) => (
+                TableEditorFocus::General(TableGeneralField::ClickHouseTtl),
+                "TTL",
+                &draft.clickhouse_ttl,
             ),
             _ => (
                 TableEditorFocus::General(TableGeneralField::Name),
@@ -1906,18 +1974,65 @@ fn render_table(
     let content_bottom = footer
         .content_separator
         .map_or(footer.status_and_actions.y, |separator| separator.y);
+    if let Some(ddl) = draft.clickhouse_native_ddl.as_deref() {
+        let preview = Rect::new(area.x, area.y.saturating_add(1), area.width, 2);
+        frame.render_widget(
+            Paragraph::new(format!(
+                "Native baseline: {}",
+                truncate_cells(
+                    sanitize_terminal_text(ddl),
+                    usize::from(area.width.saturating_sub(17))
+                )
+            ))
+            .style(Style::new().fg(theme.muted)),
+            preview,
+        );
+    }
+    let clickhouse_baseline = match baseline {
+        Some(crate::db::catalog_mutation::CatalogObjectDefinition::ClickHouseTable(definition)) => {
+            Some(definition)
+        }
+        _ => None,
+    };
     let baseline = match baseline {
         Some(crate::db::catalog_mutation::CatalogObjectDefinition::Table(definition)) => {
             Some(definition)
         }
         _ => None,
     };
-    let summary = draft.change_summary(baseline);
+    let summary = if draft.clickhouse_native_ddl.is_some() {
+        crate::model::catalog_editor::TableChangeSummary {
+            properties_changed: clickhouse_baseline.is_some_and(|definition| {
+                draft.name.value() != definition.name
+                    || match &definition.comment {
+                        crate::db::catalog::OptionalMetadata::Unsupported => {
+                            !draft.comment.value().is_empty()
+                        }
+                        crate::db::catalog::OptionalMetadata::Supported(value) => {
+                            draft.comment.value() != value.as_deref().unwrap_or_default()
+                        }
+                    }
+            }),
+            added_columns: draft
+                .columns
+                .iter()
+                .filter(|column| {
+                    matches!(
+                        column.state,
+                        crate::model::catalog_editor::DraftRowState::Added
+                    )
+                })
+                .count(),
+            ..Default::default()
+        }
+    } else {
+        draft.change_summary(baseline)
+    };
     let list_bottom = content_bottom;
     let columns_y = if compact {
         area.y.saturating_add(if columns_focus { 1 } else { 2 })
     } else {
-        area.y.saturating_add(7)
+        area.y.saturating_add(columns_section_offset)
     };
     if columns_y < content_bottom {
         render_catalog_section_heading(
@@ -2915,7 +3030,9 @@ fn preview(
         Some(crate::db::catalog_mutation::CatalogObjectDefinition::Table(
             _
         ))
-    ) && let Some(summary) = editor.table_change_summary()
+    ) && let Some(summary) = editor
+        .clickhouse_table_change_summary()
+        .or_else(|| editor.table_change_summary())
     {
         lines.push(Line::raw(format!(
             "changes: {} added, {} modified, {} removed",
@@ -2954,6 +3071,7 @@ fn preview(
             crate::profile::DatabaseKind::Redis | crate::profile::DatabaseKind::MongoDb => {
                 SqlDialect::Generic
             }
+            crate::profile::DatabaseKind::ClickHouse => SqlDialect::ClickHouse,
         })
         .unwrap_or(SqlDialect::Generic);
     lines.push(Line::raw(""));
@@ -3010,6 +3128,8 @@ fn target_label(editor: &CatalogEditorState) -> String {
         crate::db::catalog_mutation::CatalogMutationAnchor::Group { schema, group } => {
             let label = match group {
                 crate::db::catalog::ObjectGroup::Tables => "Tables",
+                crate::db::catalog::ObjectGroup::Dictionaries => "Dictionaries",
+                crate::db::catalog::ObjectGroup::UserDefinedFunctions => "User defined functions",
                 crate::db::catalog::ObjectGroup::Views => "Views",
                 crate::db::catalog::ObjectGroup::MaterializedViews => "Materialized Views",
                 crate::db::catalog::ObjectGroup::Sequences => "Sequences",

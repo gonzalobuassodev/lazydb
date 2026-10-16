@@ -123,6 +123,54 @@ fn builtin_current_timestamp_is_available_in_select_expression() {
 }
 
 #[test]
+fn clickhouse_builtin_functions_and_types_are_available_offline() {
+    let sql = "SELECT arrayJ";
+    let candidates = complete(
+        sql,
+        sql.len(),
+        SqlDialect::ClickHouse,
+        &CompletionIndex::default(),
+        CompletionContext::default(),
+    );
+    assert!(
+        candidates
+            .iter()
+            .any(|candidate| candidate.label == "arrayJoin"),
+        "{candidates:?}"
+    );
+    let sql = "CREATE TABLE events (value Nullable";
+    let candidates = complete(
+        sql,
+        sql.len(),
+        SqlDialect::ClickHouse,
+        &CompletionIndex::default(),
+        CompletionContext::default(),
+    );
+    assert!(
+        candidates
+            .iter()
+            .any(|candidate| candidate.label == "Nullable"
+                && candidate.kind == CompletionKind::DataType),
+        "{candidates:?}"
+    );
+    let sql = "CREATE TABLE events (id UInt";
+    let candidates = complete(
+        sql,
+        sql.len(),
+        SqlDialect::ClickHouse,
+        &CompletionIndex::default(),
+        CompletionContext::default(),
+    );
+    assert!(
+        candidates
+            .iter()
+            .any(|candidate| candidate.label == "UInt64"
+                && candidate.kind == CompletionKind::DataType),
+        "{candidates:?}"
+    );
+}
+
+#[test]
 fn builtin_select_expression_match_is_case_insensitive() {
     let sql = "SELECT current_tim";
     let candidates = complete(

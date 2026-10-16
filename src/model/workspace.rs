@@ -1184,6 +1184,24 @@ impl ExplorerState {
                             None,
                         )
                     }
+                    ExplorerNodeId::ProjectionGroup(table) => (
+                        "Projections".to_owned(),
+                        profile
+                            .and_then(|profile| profile.catalog.get(table))
+                            .map(|_| "Table projections".to_owned()),
+                        None,
+                        Some(CatalogKind::Projection),
+                        None,
+                        None,
+                        None,
+                        None,
+                        None,
+                        profile.is_some_and(|profile| {
+                            profile.kind == DatabaseKind::ClickHouse
+                                && profile.catalog.is_projection_table(table)
+                        }),
+                        None,
+                    ),
                     ExplorerNodeId::ConnectionGroup { group_id, region } => (
                         self.normalized
                             .groups
@@ -1573,6 +1591,7 @@ impl ExplorerState {
                 | ExplorerNodeId::Others
                 | ExplorerNodeId::Profile(_)
                 | ExplorerNodeId::Catalog(_)
+                | ExplorerNodeId::ProjectionGroup(_)
                 | ExplorerNodeId::Group { .. }
                 | ExplorerNodeId::PrincipalGroup { .. }
         ) {
@@ -1615,6 +1634,7 @@ fn search_object_group(kind: CatalogKind) -> Option<crate::db::catalog::ObjectGr
         CatalogKind::Table => Some(ObjectGroup::Tables),
         CatalogKind::View => Some(ObjectGroup::Views),
         CatalogKind::MaterializedView => Some(ObjectGroup::MaterializedViews),
+        CatalogKind::Dictionary => Some(ObjectGroup::Dictionaries),
         CatalogKind::Sequence => Some(ObjectGroup::Sequences),
         CatalogKind::Function => Some(ObjectGroup::Functions),
         CatalogKind::Procedure => Some(ObjectGroup::Procedures),
@@ -1734,6 +1754,8 @@ fn group_label(group: crate::db::catalog::ObjectGroup) -> &'static str {
         ObjectGroup::Tables => "Tables",
         ObjectGroup::Views => "Views",
         ObjectGroup::MaterializedViews => "Materialized views",
+        ObjectGroup::Dictionaries => "Dictionaries",
+        ObjectGroup::UserDefinedFunctions => "User defined functions",
         ObjectGroup::Sequences => "Sequences",
         ObjectGroup::Functions => "Functions",
         ObjectGroup::Procedures => "Procedures",

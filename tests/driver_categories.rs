@@ -8,7 +8,7 @@ use lazydb::{
 
 #[test]
 fn categories_partition_the_registry_without_changing_machine_names() {
-    assert_eq!(drivers_in(DatabaseCategory::Relational).count(), 6);
+    assert_eq!(drivers_in(DatabaseCategory::Relational).count(), 7);
     assert_eq!(
         drivers_in(DatabaseCategory::NonRelational)
             .map(|d| d.kind)
@@ -25,7 +25,8 @@ fn categories_partition_the_registry_without_changing_machine_names() {
             "sqlserver",
             "sqlite",
             "redis",
-            "mongodb"
+            "mongodb",
+            "clickhouse"
         ]
     );
 }

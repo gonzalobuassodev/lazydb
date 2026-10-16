@@ -417,9 +417,9 @@ fn render_processes(
         tab.process_result_set().rows.len(),
         tab.processes.len(),
         if tab.process_truncated {
-            "  ·  truncated at 2000"
+            format!("  ·  truncated at {}", crate::db::monitor::MAX_PROCESS_ROWS)
         } else {
-            ""
+            String::new()
         },
         tab.process_error
             .as_deref()
@@ -511,6 +511,7 @@ fn render_history(
         tab,
         "Statement activity · last 10 minutes",
         &[
+            (MetricKey::Queries, "queries/s", theme.accent),
             (MetricKey::Selects, "select activity/s", theme.action),
             (MetricKey::Inserts, "insert activity/s", theme.success),
             (MetricKey::Updates, "update activity/s", theme.warning),

@@ -411,6 +411,7 @@ fn oracle_view_edit_plan_replaces_the_definition() {
         security_invoker: lazydb::db::catalog_mutation::ViewOption::unavailable("not applicable"),
         check_option: lazydb::db::catalog_mutation::ViewOption::unavailable("not applicable"),
         focus: lazydb::model::catalog_editor::CatalogFormFocus::Name,
+        clickhouse_native: None,
     };
     view.query.set("SELECT 2 FROM dual");
     let baseline = lazydb::db::catalog_mutation::CatalogObjectDefinition::View(
@@ -430,6 +431,7 @@ fn oracle_view_edit_plan_replaces_the_definition() {
             ),
             check_option: lazydb::db::catalog_mutation::ViewOption::unavailable("not applicable"),
             baseline_fingerprint: "old".into(),
+            clickhouse_native: None,
         },
     );
     let plan =
@@ -662,6 +664,7 @@ fn mysql_view_edit_plan_renames_and_replaces_the_definition() {
         ),
         check_option: lazydb::db::catalog_mutation::ViewOption::unavailable("not mapped for MySQL"),
         focus: lazydb::model::catalog_editor::CatalogFormFocus::Name,
+        clickhouse_native: None,
     };
     let baseline = lazydb::db::catalog_mutation::CatalogObjectDefinition::View(
         lazydb::db::catalog_mutation::ViewDefinition {
@@ -682,6 +685,7 @@ fn mysql_view_edit_plan_renames_and_replaces_the_definition() {
                 "not mapped for MySQL",
             ),
             baseline_fingerprint: "old".into(),
+            clickhouse_native: None,
         },
     );
     let plan =
@@ -892,6 +896,7 @@ fn sql_server_view_edit_plan_renames_and_alters_the_definition() {
             "not mapped for SQL Server",
         ),
         focus: lazydb::model::catalog_editor::CatalogFormFocus::Name,
+        clickhouse_native: None,
     };
     let baseline = lazydb::db::catalog_mutation::CatalogObjectDefinition::View(
         lazydb::db::catalog_mutation::ViewDefinition {
@@ -912,6 +917,7 @@ fn sql_server_view_edit_plan_renames_and_alters_the_definition() {
                 "not mapped for SQL Server",
             ),
             baseline_fingerprint: "old".into(),
+            clickhouse_native: None,
         },
     );
     let plan =

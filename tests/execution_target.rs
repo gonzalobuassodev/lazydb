@@ -62,6 +62,23 @@ fn mysql_schema_is_the_selected_database() {
 }
 
 #[test]
+fn clickhouse_target_uses_database_as_read_only_schema_alias() {
+    let mut profile = profile(DatabaseKind::ClickHouse);
+    profile.default_schema = Some("app".into());
+    let target = ExecutionTarget::from_profile(&profile);
+    assert_eq!(target.schema.as_deref(), Some("app"));
+    assert!(target.is_valid(&profile));
+
+    let mut different_schema = target.clone();
+    different_schema.schema = Some("other".into());
+    assert!(!different_schema.is_valid(&profile));
+
+    let configured = target.apply_to_profile(&profile).unwrap();
+    assert_eq!(configured.database.as_deref(), Some("app"));
+    assert_eq!(configured.default_schema.as_deref(), Some("app"));
+}
+
+#[test]
 fn sqlite_rejects_unknown_schema_aliases() {
     let profile = profile(DatabaseKind::Sqlite);
     let mut target = ExecutionTarget::from_profile(&profile);

@@ -436,6 +436,7 @@ impl ProfileDraft {
             DatabaseKind::Sqlite => ("", "", "main", SslMode::Disable),
             DatabaseKind::Redis => ("localhost", "6379", "", SslMode::Disable),
             DatabaseKind::MongoDb => ("localhost", "27017", "", SslMode::Prefer),
+            DatabaseKind::ClickHouse => ("localhost", "8123", "", SslMode::Disable),
         };
 
         let mut draft = Self {
@@ -476,6 +477,9 @@ impl ProfileDraft {
         };
         if kind == DatabaseKind::Redis {
             draft.database.set("0");
+        } else if kind == DatabaseKind::ClickHouse {
+            draft.database.set("default");
+            draft.user.set("default");
         }
         if kind == DatabaseKind::MongoDb {
             draft.mongodb_options = Some(crate::profile::MongoConnectionOptions {
@@ -578,7 +582,8 @@ impl ProfileDraft {
     }
 
     pub fn url_display(&self) -> String {
-        redact_url_query_passwords(&redact_url_password(self.url.value()).0)
+        let display = redact_url_password(self.url.value()).0;
+        redact_url_query_passwords(&display)
     }
 
     pub fn oracle_url_preview(&self) -> Option<String> {
@@ -724,7 +729,11 @@ impl ProfileDraft {
         self.recent_drivers[usize::from(self.category() == DatabaseCategory::NonRelational)] =
             Some(self.kind);
         self.kind = parsed.kind;
-        self.automatic_port = None;
+        self.automatic_port = match parsed.kind {
+            DatabaseKind::ClickHouse if parsed.port == Some(8123) => Some("8123".to_owned()),
+            DatabaseKind::ClickHouse if parsed.port == Some(8443) => Some("8443".to_owned()),
+            _ => None,
+        };
         self.url_format = parsed.format;
         self.mongodb_options = parsed.mongodb_options.clone();
         self.host.set(parsed.host.unwrap_or_default());
@@ -1015,6 +1024,7 @@ impl ProfileDraft {
             (DatabaseKind::Oracle, _) => &ORACLE_FIELDS,
             (DatabaseKind::Redis, _) => &REDIS_FIELDS,
             (DatabaseKind::MongoDb, _) => &MONGODB_FIELDS,
+            (DatabaseKind::ClickHouse, _) => &MYSQL_FIELDS,
         }
     }
 
@@ -1063,6 +1073,7 @@ impl ProfileDraft {
                 DatabaseKind::Postgres
                 | DatabaseKind::MySql
                 | DatabaseKind::MariaDb
+                | DatabaseKind::Oracle
                 | DatabaseKind::SqlServer => {
                     let host = required(&self.host, ProfileField::Host, "host is required")?;
                     let port = self.port.value().trim().parse::<u16>().map_err(|_| {
@@ -1091,36 +1102,6 @@ impl ProfileDraft {
                         matches!(self.kind, DatabaseKind::Postgres | DatabaseKind::SqlServer)
                             .then(|| optional(&self.schema))
                             .flatten(),
-                        None,
-                        self.ssl_mode,
-                        self.mongodb_options.clone(),
-                    )
-                }
-                DatabaseKind::Oracle => {
-                    let host = required(&self.host, ProfileField::Host, "host is required")?;
-                    let port = self.port.value().trim().parse::<u16>().map_err(|_| {
-                        ProfileValidationError::new(
-                            ProfileField::Port,
-                            "port must be an integer from 1 to 65535",
-                        )
-                    })?;
-                    if port == 0 {
-                        return Err(ProfileValidationError::new(
-                            ProfileField::Port,
-                            "port must be an integer from 1 to 65535",
-                        ));
-                    }
-                    let database = required(
-                        &self.database,
-                        ProfileField::Database,
-                        "service name is required",
-                    )?;
-                    (
-                        Some(host),
-                        Some(port),
-                        optional(&self.user),
-                        Some(database),
-                        None,
                         None,
                         self.ssl_mode,
                         self.mongodb_options.clone(),
@@ -1239,6 +1220,48 @@ impl ProfileDraft {
                         Some(profile_options),
                     )
                 }
+                DatabaseKind::ClickHouse => {
+                    let host = required(&self.host, ProfileField::Host, "host is required")?;
+                    let port = self
+                        .port
+                        .value()
+                        .trim()
+                        .parse::<u16>()
+                        .ok()
+                        .filter(|port| *port > 0)
+                        .ok_or_else(|| {
+                            ProfileValidationError::new(
+                                ProfileField::Port,
+                                "port must be an integer from 1 to 65535",
+                            )
+                        })?;
+                    let database = required(
+                        &self.database,
+                        ProfileField::Database,
+                        "database is required",
+                    )?;
+                    let tls = self.url_format == ConnectionUrlFormat::ClickHouseTls;
+                    if tls == (self.ssl_mode == SslMode::Disable) {
+                        return Err(ProfileValidationError::new(
+                            ProfileField::SslMode,
+                            "ClickHouse URL format and SSL mode must select the same transport",
+                        ));
+                    }
+                    (
+                        Some(host),
+                        Some(port),
+                        Some(if self.user.value().trim().is_empty() {
+                            "default".to_owned()
+                        } else {
+                            self.user.value().trim().to_owned()
+                        }),
+                        Some(database),
+                        Some(self.database.value().to_owned()),
+                        None,
+                        self.ssl_mode,
+                        None,
+                    )
+                }
             };
 
         let credential = self.credential_update();
@@ -1337,6 +1360,10 @@ impl ProfileDraft {
             ),
             DatabaseKind::Redis => (self.database.value(), None),
             DatabaseKind::MongoDb => (self.database.value(), None),
+            DatabaseKind::ClickHouse => (
+                self.database.value(),
+                Some(self.database.value().to_owned()),
+            ),
         };
         self.catalog_scope =
             CatalogScope::for_profile(self.kind, database, default_schema.as_deref());
@@ -1497,6 +1524,34 @@ impl ProfileDraft {
                 if self.ssl_mode == SslMode::Disable {
                     self.ssl_mode = SslMode::Prefer;
                 }
+                if self.mongodb_options.is_none() {
+                    self.mongodb_options = Some(crate::profile::MongoConnectionOptions {
+                        seeds: vec![crate::profile::MongoSeed {
+                            host: self.host.value().to_owned(),
+                            port: Some(27017),
+                        }],
+                        srv: false,
+                        uri_options: Vec::new(),
+                    });
+                }
+            }
+            DatabaseKind::ClickHouse => {
+                if self.host.value().trim().is_empty() {
+                    self.host.set("localhost");
+                }
+                if self.port.value().trim().is_empty() {
+                    self.port.set("8123");
+                    self.automatic_port = Some("8123".to_owned());
+                }
+                if self.database.value().trim().is_empty() {
+                    self.database.set("default");
+                }
+                if self.user.value().trim().is_empty() {
+                    self.user.set("default");
+                }
+                if previous == DatabaseKind::Redis {
+                    self.ssl_mode = SslMode::Disable;
+                }
             }
             DatabaseKind::Oracle => {
                 if self.host.value().trim().is_empty() {
@@ -1588,6 +1643,36 @@ impl ProfileDraft {
                     matches!(self.kind, DatabaseKind::Postgres | DatabaseKind::SqlServer)
                         .then(|| optional(&self.schema))
                         .flatten(),
+                    None,
+                )
+            }
+            DatabaseKind::ClickHouse => {
+                let host = optional(&self.host).ok_or_else(|| {
+                    ProfileValidationError::new(ProfileField::Host, "host is required")
+                })?;
+                let port = self.port.value().trim().parse::<u16>().map_err(|_| {
+                    ProfileValidationError::new(
+                        ProfileField::Port,
+                        "port must be an integer from 1 to 65535",
+                    )
+                })?;
+                if port == 0 {
+                    return Err(ProfileValidationError::new(
+                        ProfileField::Port,
+                        "port must be an integer from 1 to 65535",
+                    ));
+                }
+                let database = required(
+                    &self.database,
+                    ProfileField::Database,
+                    "database is required",
+                )?;
+                (
+                    Some(host),
+                    Some(port),
+                    optional(&self.user).or_else(|| Some("default".to_owned())),
+                    Some(database.clone()),
+                    Some(database),
                     None,
                 )
             }
@@ -2502,6 +2587,7 @@ fn default_port(kind: DatabaseKind) -> Option<u16> {
         DatabaseKind::Sqlite => None,
         DatabaseKind::Redis => Some(6379),
         DatabaseKind::MongoDb => Some(27017),
+        DatabaseKind::ClickHouse => Some(8123),
     }
 }
 
@@ -2786,6 +2872,10 @@ fn redact_url_password(value: &str) -> (String, Vec<(usize, usize)>) {
             return (redacted, character_ranges);
         }
     }
+    redact_authority_password(value)
+}
+
+fn redact_authority_password(value: &str) -> (String, Vec<(usize, usize)>) {
     let Some(scheme_end) = value.find("://") else {
         return (value.to_owned(), Vec::new());
     };

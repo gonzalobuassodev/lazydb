@@ -4498,6 +4498,7 @@ impl Runtime {
                 let _ = sender.send(Action::CatalogMutationFailed {
                     plan: task_plan,
                     message: error.to_string(),
+                    outcome_unknown: false,
                 });
                 return;
             }
@@ -4517,6 +4518,7 @@ impl Runtime {
                     let _ = sender.send(Action::CatalogMutationFailed {
                         plan: task_plan,
                         message,
+                        outcome_unknown: false,
                     });
                     return;
                 }
@@ -4531,6 +4533,7 @@ impl Runtime {
                 let _ = sender.send(Action::CatalogMutationFailed {
                     plan: task_plan,
                     message: "Mutation profile no longer exists".into(),
+                    outcome_unknown: false,
                 });
                 database.close_if_owned().await;
                 return;
@@ -4539,11 +4542,12 @@ impl Runtime {
                 let _ = sender.send(Action::CatalogMutationFailed {
                     plan: task_plan,
                     message: "Schema mutation is unavailable on a read-only profile".into(),
+                    outcome_unknown: false,
                 });
                 database.close_if_owned().await;
                 return;
             }
-            if let Some(expected) = task_plan.baseline_fingerprint.as_deref()
+            if task_plan.baseline_fingerprint.is_some()
                 && let Some((object, principal)) = match &task_plan.request.anchor {
                     crate::db::catalog_mutation::CatalogMutationAnchor::Catalog(object) => {
                         Some((object.clone(), None))
@@ -4559,8 +4563,22 @@ impl Runtime {
                     _ => None,
                 }
             {
-                let definition_target =
-                    target.execution_target(task_plan.request.connection.profile_id);
+                let definition_target = if database.database.kind()
+                    == crate::profile::DatabaseKind::ClickHouse
+                    && matches!(
+                        object.kind,
+                        crate::db::catalog::CatalogKind::Table
+                            | crate::db::catalog::CatalogKind::View
+                    ) {
+                    let database_name = object.native_path.first().cloned().unwrap_or_default();
+                    crate::model::execution_target::ExecutionTarget {
+                        profile_id: task_plan.request.connection.profile_id,
+                        database: database_name.clone(),
+                        schema: Some(database_name),
+                    }
+                } else {
+                    target.execution_target(task_plan.request.connection.profile_id)
+                };
                 let request = crate::db::catalog_mutation::CatalogObjectDefinitionRequest {
                     connection: task_plan.request.connection,
                     request_id: task_plan.request.request_id,
@@ -4574,13 +4592,28 @@ impl Runtime {
                     .load_catalog_object_definition(&request)
                     .await
                 {
-                    Ok(definition)
-                        if definition_baseline_fingerprint(&definition).as_deref()
-                            == Some(expected) => {}
-                    _ => {
+                    Ok(definition) if task_plan.baseline_matches_definition(&definition) => {}
+                    Ok(_) => {
                         let _ = sender.send(Action::CatalogMutationFailed {
                             plan: task_plan,
                             message: "Schema changed since the plan was created".into(),
+                            outcome_unknown: false,
+                        });
+                        database.close_if_owned().await;
+                        return;
+                    }
+                    Err(error) => {
+                        let category = match error.category {
+                            crate::db::ErrorCategory::Permission => "permission denied",
+                            crate::db::ErrorCategory::Authentication => "authentication failed",
+                            _ => "could not verify the schema before mutation",
+                        };
+                        let message =
+                            format!("{category}: {}", sanitize_terminal_text(&error.to_string()));
+                        let _ = sender.send(Action::CatalogMutationFailed {
+                            plan: task_plan,
+                            message,
+                            outcome_unknown: false,
                         });
                         database.close_if_owned().await;
                         return;
@@ -4595,9 +4628,23 @@ impl Runtime {
                     });
                 }
                 Err(error) => {
+                    let outcome_unknown = catalog_mutation_outcome_unknown(
+                        database.database.kind(),
+                        error.category,
+                        true,
+                    );
+                    let message = if outcome_unknown {
+                        format!(
+                            "ClickHouse did not confirm whether the statement was applied: {}. The catalog has been refreshed; inspect the object before retrying.",
+                            sanitize_terminal_text(&error.to_string())
+                        )
+                    } else {
+                        sanitize_terminal_text(&error.to_string())
+                    };
                     let _ = sender.send(Action::CatalogMutationFailed {
                         plan: task_plan,
-                        message: sanitize_terminal_text(&error.to_string()),
+                        message,
+                        outcome_unknown,
                     });
                 }
             }
@@ -4719,16 +4766,36 @@ impl Runtime {
         {
             let task_plan = plan.clone();
             let task = tokio::spawn(async move {
-                execute_catalog_drop_on_maintenance(
-                    task_plan,
-                    maintenance_database,
-                    connection,
-                    registry,
-                    secret_store,
-                    local_credential_store,
-                    sender,
-                )
-                .await;
+                let clickhouse = registry
+                    .lock()
+                    .await
+                    .profiles
+                    .get(&task_plan.request.connection.profile_id)
+                    .is_some_and(|profile| {
+                        profile.kind == crate::profile::DatabaseKind::ClickHouse
+                    });
+                if clickhouse {
+                    execute_clickhouse_database_drop(
+                        task_plan,
+                        maintenance_database,
+                        registry,
+                        secret_store,
+                        local_credential_store,
+                        sender,
+                    )
+                    .await;
+                } else {
+                    execute_catalog_drop_on_maintenance(
+                        task_plan,
+                        maintenance_database,
+                        connection,
+                        registry,
+                        secret_store,
+                        local_credential_store,
+                        sender,
+                    )
+                    .await;
+                }
             });
             self.catalog_drop_execute_tasks.insert(key, task);
             return;
@@ -6599,6 +6666,7 @@ impl Runtime {
                 | DatabaseConnection::SqlServer(_)
                 | DatabaseConnection::Redis(_)
                 | DatabaseConnection::MongoDb(_) => false,
+                DatabaseConnection::ClickHouse(_) => false,
             };
             let worker = match database
                 .start_transaction_worker_with_forced_close(worker_forced_close)
@@ -6885,6 +6953,7 @@ fn relation_target_for(
         {
             Some(schema.clone())
         }
+        crate::db::catalog::CatalogTarget::ProjectionChildren { table } => Some(table.clone()),
         crate::db::catalog::CatalogTarget::RelationChildren { relation } => Some(relation.clone()),
         _ => None,
     }
@@ -7001,6 +7070,93 @@ async fn execute_catalog_drop_on_maintenance(
         connection: expected,
     });
     maintenance.close().await;
+}
+
+async fn execute_clickhouse_database_drop(
+    plan: crate::db::catalog_drop::CatalogDropPlan,
+    maintenance_database: String,
+    registry: Arc<Mutex<ProfileRegistry>>,
+    secret_store: Arc<dyn SecretStore>,
+    local_credential_store: LocalCredentialStore,
+    sender: mpsc::UnboundedSender<Action>,
+) {
+    if let Err(error) = plan.validate() {
+        let _ = sender.send(Action::CatalogDropFailed {
+            plan,
+            message: error.to_string(),
+        });
+        return;
+    }
+    let profile = registry
+        .lock()
+        .await
+        .profiles
+        .get(&plan.request.connection.profile_id)
+        .cloned();
+    let Some(profile) = profile.filter(|profile| {
+        profile.kind == crate::profile::DatabaseKind::ClickHouse && !profile.read_only
+    }) else {
+        let _ = sender.send(Action::CatalogDropFailed {
+            plan,
+            message: "ClickHouse drop profile is unavailable or read-only".into(),
+        });
+        return;
+    };
+    let target = ExecutionTarget {
+        profile_id: profile.id,
+        database: maintenance_database.clone(),
+        schema: Some(maintenance_database.clone()),
+    };
+    if !target.is_valid(&profile)
+        || maintenance_database == profile.database.as_deref().unwrap_or("default")
+            && maintenance_database == plan.object.native_path[0]
+    {
+        let _ = sender.send(Action::CatalogDropFailed {
+            plan,
+            message: "ClickHouse database drop requires a distinct valid maintenance database"
+                .into(),
+        });
+        return;
+    }
+    let password =
+        match resolve_profile_password(&registry, &secret_store, &local_credential_store, &profile)
+            .await
+        {
+            Ok(password) => password,
+            Err(error) => {
+                let _ = sender.send(Action::CatalogDropFailed {
+                    plan,
+                    message: sanitize_terminal_text(&error.to_string()),
+                });
+                return;
+            }
+        };
+    let database =
+        match DatabaseConnection::connect_target(&profile, password.as_ref(), &target).await {
+            Ok(database) => database,
+            Err(error) => {
+                let _ = sender.send(Action::CatalogDropFailed {
+                    plan,
+                    message: sanitize_terminal_text(&error.to_string()),
+                });
+                return;
+            }
+        };
+    match database.execute(plan.sql()).await {
+        Ok(outcome) => {
+            let _ = sender.send(Action::CatalogDropSucceeded { plan, outcome });
+        }
+        Err(error) => {
+            let _ = sender.send(Action::CatalogDropFailed {
+                plan,
+                message: format!(
+                    "ClickHouse database drop outcome may be unknown: {}",
+                    sanitize_terminal_text(&error.to_string())
+                ),
+            });
+        }
+    }
+    database.close().await;
 }
 
 fn count_from_outcome(
@@ -7700,23 +7856,6 @@ async fn active_database(
         .iter()
         .find(|(key, _)| key.identity == expected)
         .map(|(_, active)| active.database.clone())
-}
-
-fn definition_baseline_fingerprint(
-    definition: &crate::db::catalog_mutation::CatalogObjectDefinition,
-) -> Option<String> {
-    use crate::db::catalog_mutation::CatalogObjectDefinition;
-    Some(match definition {
-        CatalogObjectDefinition::Database(value) => value.baseline_fingerprint.clone(),
-        CatalogObjectDefinition::Schema(value) => value.baseline_fingerprint.clone(),
-        CatalogObjectDefinition::Table(value) => value.baseline_fingerprint.clone(),
-        CatalogObjectDefinition::Index(value) => value.baseline_fingerprint.clone(),
-        CatalogObjectDefinition::Constraint(value) => value.baseline_fingerprint.clone(),
-        CatalogObjectDefinition::View(value) => value.baseline_fingerprint.clone(),
-        CatalogObjectDefinition::MaterializedView(value) => value.baseline_fingerprint.clone(),
-        CatalogObjectDefinition::Sequence(value) => value.baseline_fingerprint.clone(),
-        CatalogObjectDefinition::Role(value) => value.baseline_fingerprint.clone(),
-    })
 }
 
 async fn resolve_catalog_mutation_connection(
@@ -8758,6 +8897,16 @@ pub fn load_startup_profiles(cli: &Cli) -> Result<StartupProfiles> {
     })
 }
 
+fn catalog_mutation_outcome_unknown(
+    database_kind: crate::profile::DatabaseKind,
+    error_category: crate::db::ErrorCategory,
+    statement_may_have_been_sent: bool,
+) -> bool {
+    database_kind == crate::profile::DatabaseKind::ClickHouse
+        && statement_may_have_been_sent
+        && error_category == crate::db::ErrorCategory::Network
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -8769,6 +8918,32 @@ mod tests {
 
         assert_eq!(message, "Clipboard unavailable");
         assert!(!message.contains("secret"));
+    }
+
+    #[test]
+    fn clickhouse_mutation_network_failure_is_unknown_only_after_send_boundary() {
+        use crate::{db::ErrorCategory, profile::DatabaseKind};
+
+        assert!(catalog_mutation_outcome_unknown(
+            DatabaseKind::ClickHouse,
+            ErrorCategory::Network,
+            true,
+        ));
+        assert!(!catalog_mutation_outcome_unknown(
+            DatabaseKind::ClickHouse,
+            ErrorCategory::Permission,
+            true,
+        ));
+        assert!(!catalog_mutation_outcome_unknown(
+            DatabaseKind::ClickHouse,
+            ErrorCategory::Network,
+            false,
+        ));
+        assert!(!catalog_mutation_outcome_unknown(
+            DatabaseKind::Postgres,
+            ErrorCategory::Network,
+            true,
+        ));
     }
 
     #[test]

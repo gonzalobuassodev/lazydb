@@ -29,7 +29,13 @@ pub struct SqlRiskAnalysis {
 }
 
 pub fn classify_sql(sql: &str, dialect: SqlDialect) -> SqlRiskAnalysis {
-    let risks = if dialect == SqlDialect::SqlServer {
+    let risks = if dialect == SqlDialect::ClickHouse {
+        if contains_clickhouse_mutation(sql) {
+            vec![SqlRisk::Unknown]
+        } else {
+            parse_risks(sql, dialect)
+        }
+    } else if dialect == SqlDialect::SqlServer {
         match split_sql_server_batches(sql) {
             Ok(batches) => batches
                 .into_iter()
@@ -51,6 +57,35 @@ pub fn classify_sql(sql: &str, dialect: SqlDialect) -> SqlRiskAnalysis {
         risks,
         aggregate,
     }
+}
+
+fn contains_clickhouse_mutation(sql: &str) -> bool {
+    let statements = match Parser::parse_sql(parser_dialect(SqlDialect::ClickHouse), sql) {
+        Ok(statements) => statements,
+        Err(_) => return true,
+    };
+    if statements.is_empty() {
+        return false;
+    }
+    let known_count = super::scope::scan_statements(sql, SqlDialect::ClickHouse).len();
+    if known_count != statements.len() {
+        return true;
+    }
+    statements.iter().any(|statement| match statement {
+        Statement::Update(_) | Statement::Delete(_) => true,
+        Statement::AlterTable(_) => {
+            // ClickHouse mutations use a non-transactional ALTER syntax. The
+            // generic AST does not represent those operations reliably, so
+            // keep every ClickHouse ALTER behind explicit write approval.
+            true
+        }
+        Statement::Query(_) => false,
+        Statement::Set(_) => true,
+        Statement::Kill { .. } => true,
+        Statement::OptimizeTable { .. } | Statement::Truncate(_) => true,
+        Statement::CreateUser(_) | Statement::AlterUser(_) | Statement::CreateRole(_) => true,
+        _ => false,
+    })
 }
 
 fn parse_risks(sql: &str, dialect: SqlDialect) -> Vec<SqlRisk> {

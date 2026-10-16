@@ -175,7 +175,11 @@ fn first_code_offset(text: &str, dialect: SqlDialect) -> Option<usize> {
             while index < bytes.len() && bytes[index] != b'\n' {
                 index += 1;
             }
-        } else if bytes[index] == b'#' && matches!(dialect, SqlDialect::MySql | SqlDialect::Generic)
+        } else if bytes[index] == b'#'
+            && matches!(
+                dialect,
+                SqlDialect::MySql | SqlDialect::Generic | SqlDialect::ClickHouse
+            )
         {
             index += 1;
             while index < bytes.len() && bytes[index] != b'\n' {
@@ -219,7 +223,11 @@ fn statement_boundaries(text: &str, dialect: SqlDialect) -> Vec<(usize, usize)> 
                     state = State::OracleQuote(closing);
                     index = end;
                 }
-                b'`' if matches!(dialect, SqlDialect::MySql | SqlDialect::Generic) => {
+                b'`' if matches!(
+                    dialect,
+                    SqlDialect::MySql | SqlDialect::Generic | SqlDialect::ClickHouse
+                ) =>
+                {
                     state = State::Backtick;
                     index += 1;
                 }
@@ -237,7 +245,11 @@ fn statement_boundaries(text: &str, dialect: SqlDialect) -> Vec<(usize, usize)> 
                     state = State::LineComment;
                     index += 2;
                 }
-                b'#' if matches!(dialect, SqlDialect::MySql | SqlDialect::Generic) => {
+                b'#' if matches!(
+                    dialect,
+                    SqlDialect::MySql | SqlDialect::Generic | SqlDialect::ClickHouse
+                ) =>
+                {
                     state = State::LineComment;
                     index += 1;
                 }
@@ -336,7 +348,10 @@ fn advance_quoted(bytes: &[u8], index: &mut usize, quote: u8, state: &mut State)
 }
 
 fn dash_comment_allowed(bytes: &[u8], index: usize, dialect: SqlDialect) -> bool {
-    if !matches!(dialect, SqlDialect::MySql | SqlDialect::Generic) {
+    if !matches!(
+        dialect,
+        SqlDialect::MySql | SqlDialect::Generic | SqlDialect::ClickHouse
+    ) {
         return true;
     }
     if dialect == SqlDialect::MySql {
