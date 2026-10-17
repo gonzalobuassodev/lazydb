@@ -7,6 +7,8 @@ use lazydb::persistence::{
     local_credentials::LocalCredentialStore,
     secrets::{SecretStore, SecretStoreError},
 };
+use rmcp::model::{CallToolRequestParams, ClientCapabilities, ClientInfo, Implementation};
+use rmcp::{ClientLifecycleMode, ClientServiceExt, ServiceExt};
 use secrecy::SecretString;
 use std::sync::Arc;
 use tempfile::TempDir;
@@ -208,4 +210,180 @@ fn context_reports_allowed_and_profile_or_environment_denials() {
         context["write_capability"]["denial_reason"],
         "production_policy"
     );
+}
+
+#[tokio::test]
+async fn duckdb_query_is_available_over_mcp_wire_protocol() {
+    let temp = TempDir::new().unwrap();
+    let project = temp.path().join("project");
+    std::fs::create_dir_all(project.join(".git")).unwrap();
+    let db_path = temp.path().join("mcp.duckdb");
+    let profile = lazydb::profile::import_connection_url(
+        &format!("duckdb:{}", db_path.display()),
+        Some("mcp-duckdb"),
+    )
+    .unwrap()
+    .profile;
+    let service = AgentService::new(
+        AgentProjectContext::resolve(Some(&project)).unwrap(),
+        vec![profile],
+        CredentialResolver::new(
+            Arc::new(EmptySecrets),
+            LocalCredentialStore::new(temp.path().join("key"), "test"),
+        ),
+    );
+    let server = AgentMcpServer::new(service, WritePolicy::Deny);
+    let (server_io, client_io) = tokio::io::duplex(16 * 1024);
+    let (client_read, client_write) = tokio::io::split(client_io);
+    let server_task = tokio::spawn(server.serve(server_io));
+    let client: ClientInfo = ClientInfo::new(
+        ClientCapabilities::default(),
+        Implementation::new("lazydb-mcp-test", "0.1.0"),
+    );
+    let mut client = client
+        .serve_with_lifecycle((client_read, client_write), ClientLifecycleMode::Initialize)
+        .await
+        .unwrap();
+    let tools = client.list_tools(None).await.unwrap();
+    assert!(tools.tools.iter().any(|tool| tool.name == "query"));
+    let result = client
+        .call_tool(
+            CallToolRequestParams::new("query").with_arguments(
+                serde_json::json!({"connection":"mcp-duckdb", "sql":"SELECT 42 AS answer"})
+                    .as_object()
+                    .unwrap()
+                    .clone(),
+            ),
+        )
+        .await
+        .unwrap();
+    assert!(!result.is_error.unwrap_or(true));
+    let text = result
+        .content
+        .iter()
+        .find_map(|content| content.as_text().map(|text| text.text.as_str()));
+    assert!(
+        text.is_some_and(|text| text.contains("42")),
+        "MCP content: {text:?}"
+    );
+    client.close().await.unwrap();
+    drop(client);
+    let _server = server_task.await.unwrap().unwrap();
+}
+
+#[tokio::test]
+async fn duckdb_mcp_write_policy_denies_known_and_unknown_side_effects_without_changes() {
+    let temp = TempDir::new().unwrap();
+    let project = temp.path().join("project");
+    std::fs::create_dir_all(project.join(".git")).unwrap();
+    let db_path = temp.path().join("mcp-policy.duckdb");
+    let profile = lazydb::profile::import_connection_url(
+        &format!("duckdb:{}", db_path.display()),
+        Some("mcp-duckdb-policy"),
+    )
+    .unwrap()
+    .profile;
+    let setup = lazydb::db::DatabaseConnection::connect(&profile, None)
+        .await
+        .unwrap();
+    setup
+        .execute("CREATE TABLE policy_rows (id INTEGER); INSERT INTO policy_rows VALUES (1)")
+        .await
+        .unwrap();
+    setup.close().await;
+
+    let service = AgentService::new(
+        AgentProjectContext::resolve(Some(&project)).unwrap(),
+        vec![profile.clone()],
+        CredentialResolver::new(
+            Arc::new(EmptySecrets),
+            LocalCredentialStore::new(temp.path().join("key-policy"), "test"),
+        ),
+    );
+    let server = AgentMcpServer::new(service, WritePolicy::Deny);
+    let (server_io, client_io) = tokio::io::duplex(16 * 1024);
+    let (client_read, client_write) = tokio::io::split(client_io);
+    let server_task = tokio::spawn(server.serve(server_io));
+    let client_info = ClientInfo::new(
+        ClientCapabilities::default(),
+        Implementation::new("lazydb-mcp-policy-test", "0.1.0"),
+    );
+    let mut client = client_info
+        .serve_with_lifecycle((client_read, client_write), ClientLifecycleMode::Initialize)
+        .await
+        .unwrap();
+
+    let copy_path = temp.path().join("denied-copy.csv");
+    let sql_statements = [
+        "INSERT INTO policy_rows VALUES (2)".to_owned(),
+        format!("COPY policy_rows TO '{}' (HEADER)", copy_path.display()),
+        "ATTACH ':memory:' AS denied_catalog".to_owned(),
+        "INSTALL httpfs".to_owned(),
+        "LOAD httpfs".to_owned(),
+        "EXPLAIN ANALYZE INSERT INTO policy_rows VALUES (3)".to_owned(),
+        "SELECT nextval('missing_sequence')".to_owned(),
+        "SELECT setval('missing_sequence', 9)".to_owned(),
+    ];
+    for sql in &sql_statements {
+        let result = client
+            .call_tool(
+                CallToolRequestParams::new("execute_change").with_arguments(
+                    serde_json::json!({"connection":"mcp-duckdb-policy", "sql":sql})
+                        .as_object()
+                        .unwrap()
+                        .clone(),
+                ),
+            )
+            .await
+            .unwrap();
+        assert!(
+            result.is_error.unwrap_or(false),
+            "unexpected success for {sql}"
+        );
+    }
+    assert!(!copy_path.exists(), "denied COPY created an output file");
+    let attached = client
+        .call_tool(
+            CallToolRequestParams::new("query").with_arguments(
+                serde_json::json!({"connection":"mcp-duckdb-policy", "sql":"SELECT count(*) FROM duckdb_databases() WHERE database_name = 'denied_catalog'"})
+                    .as_object()
+                    .unwrap()
+                    .clone(),
+            ),
+        )
+        .await
+        .unwrap();
+    assert!(!attached.is_error.unwrap_or(true));
+    let attached_text = attached
+        .content
+        .iter()
+        .find_map(|content| content.as_text().map(|text| text.text.as_str()))
+        .unwrap_or_default();
+    assert!(
+        attached_text.contains('0'),
+        "catalog remains unattached: {attached_text}"
+    );
+
+    let query = client
+        .call_tool(
+            CallToolRequestParams::new("query").with_arguments(
+                serde_json::json!({"connection":"mcp-duckdb-policy", "sql":"SELECT count(*) AS n FROM policy_rows"})
+                    .as_object()
+                    .unwrap()
+                    .clone(),
+            ),
+        )
+        .await
+        .unwrap();
+    assert!(!query.is_error.unwrap_or(true));
+    let query_text = query
+        .content
+        .iter()
+        .find_map(|content| content.as_text().map(|text| text.text.as_str()))
+        .unwrap_or_default();
+    assert!(query_text.contains("1"), "MCP query result: {query_text}");
+
+    client.close().await.unwrap();
+    drop(client);
+    let _server = server_task.await.unwrap().unwrap();
 }

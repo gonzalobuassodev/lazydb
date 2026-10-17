@@ -3131,6 +3131,11 @@ fn ddl_object_and_type_keywords_follow_dialect_matrix() {
             &["TABLE", "VIEW", "TRIGGER"][..],
             &["MATERIALIZED VIEW", "SEQUENCE", "TYPE"][..],
         ),
+        (
+            SqlDialect::DuckDb,
+            &["TABLE", "VIEW", "SEQUENCE", "TYPE", "MACRO", "FUNCTION"][..],
+            &["MATERIALIZED VIEW", "TRIGGER", "AUTOINCREMENT"][..],
+        ),
     ] {
         for keyword in expected {
             let sql = format!(

@@ -863,7 +863,7 @@ fn oracle_url_preview_tracks_missing_fields_without_becoming_real_url() {
 }
 
 #[test]
-fn driver_cycle_includes_sql_server_before_sqlite() {
+fn driver_cycle_includes_duckdb_after_sqlite() {
     let mut state = ProfileManagerState::new(false);
     state.start_new(DatabaseKind::Postgres);
     state.selected_field = ProfileField::Kind;
@@ -878,6 +878,8 @@ fn driver_cycle_includes_sql_server_before_sqlite() {
     assert_eq!(state.draft.as_ref().unwrap().kind, DatabaseKind::SqlServer);
     state.cycle(1);
     assert_eq!(state.draft.as_ref().unwrap().kind, DatabaseKind::Sqlite);
+    state.cycle(1);
+    assert_eq!(state.draft.as_ref().unwrap().kind, DatabaseKind::DuckDb);
     state.cycle(1);
     assert_eq!(state.draft.as_ref().unwrap().kind, DatabaseKind::Postgres);
 }

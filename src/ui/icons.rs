@@ -247,6 +247,7 @@ impl IconSet {
                 DatabaseKind::Oracle => md::MD_DATABASE,
                 DatabaseKind::SqlServer => md::MD_DATABASE,
                 DatabaseKind::Sqlite => dev::DEV_SQLITE,
+                DatabaseKind::DuckDb => md::MD_DATABASE,
                 DatabaseKind::Redis => dev::DEV_REDIS,
             },
             IconMode::Unicode => match kind {
@@ -256,6 +257,7 @@ impl IconSet {
                 DatabaseKind::Oracle => "OR",
                 DatabaseKind::SqlServer => "MS",
                 DatabaseKind::Sqlite => "SQ",
+                DatabaseKind::DuckDb => "DU",
                 DatabaseKind::Redis => "RD",
             },
             IconMode::Ascii => match kind {
@@ -265,6 +267,7 @@ impl IconSet {
                 DatabaseKind::Oracle => "OR",
                 DatabaseKind::SqlServer => "MS",
                 DatabaseKind::Sqlite => "SQ",
+                DatabaseKind::DuckDb => "DU",
                 DatabaseKind::Redis => "RD",
             },
         }
@@ -277,6 +280,7 @@ impl IconSet {
             DatabaseKind::Oracle => ratatui::style::Color::Rgb(220, 70, 70),
             DatabaseKind::SqlServer => ratatui::style::Color::Rgb(13, 127, 228),
             DatabaseKind::Sqlite => ratatui::style::Color::Rgb(68, 184, 214),
+            DatabaseKind::DuckDb => ratatui::style::Color::Rgb(255, 191, 0),
             DatabaseKind::Redis => ratatui::style::Color::Rgb(220, 45, 45),
         }
     }
@@ -491,11 +495,12 @@ impl IconSet {
 mod tests {
     use super::*;
 
-    const DATABASE_KINDS: [DatabaseKind; 4] = [
+    const DATABASE_KINDS: [DatabaseKind; 5] = [
         DatabaseKind::Postgres,
         DatabaseKind::MySql,
         DatabaseKind::SqlServer,
         DatabaseKind::Sqlite,
+        DatabaseKind::DuckDb,
     ];
 
     const CATALOG_KINDS: [CatalogKind; 16] = [

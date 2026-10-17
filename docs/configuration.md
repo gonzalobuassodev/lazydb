@@ -18,7 +18,7 @@ silently accepting a setting that LazyDB does not use.
 ## Connection driver categories
 
 New and edited connection forms show **Category** above **Driver**. Choose
-**Relational** for PostgreSQL, MySQL, MariaDB, Oracle, SQL Server or SQLite;
+**Relational** for PostgreSQL, MySQL, MariaDB, Oracle, SQL Server, SQLite or DuckDB;
 choose **Non-relational** for Redis. Left/Right changes the focused category or
 cycles drivers within that category. Categories and drivers also support mouse
 selection. Narrow forms keep full driver names in a selection-following window.
@@ -305,7 +305,7 @@ The current profile file format is version `5`:
 | `id` | UUID string | Generated on creation | Stable identity used by workspace state and system credential references. Must be unique within the file. |
 | `name` | String | Derived from the database, host, or SQLite filename | Name shown in the Explorer and accepted by `--profile` and agent `--connection`. |
 | `access` | Table | `{ scope = "global" }` | Controls which projects can see a saved profile. |
-| `kind` | `postgres`, `mysql`, `mariadb`, `oracle`, `sqlserver`, `sqlite`, `redis` | Required | Database adapter to use. Oracle uses the native driver included in the default build and requires Oracle Instant Client at runtime; Redis is the non-relational key-value adapter. |
+| `kind` | `postgres`, `mysql`, `mariadb`, `oracle`, `sqlserver`, `sqlite`, `duckdb`, `redis` | Required | Database adapter to use. Oracle uses the native driver included in the default build and requires Oracle Instant Client at runtime; DuckDB is embedded; Redis is the non-relational key-value adapter. |
 | `url_format` | Kebab-case enum | Driver-specific | URL spelling used when LazyDB displays or regenerates the connection URL. |
 | `host` | String or `null` | `null` | Server hostname or address. PostgreSQL, MySQL/MariaDB, Oracle, SQL Server, and Redis use this field. |
 | `port` | Integer or `null` | Driver default when imported | Server port. PostgreSQL defaults to `5432`, MySQL/MariaDB to `3306`, Oracle to `1521`, SQL Server to `1433`, and Redis to `6379`. SQL Server profiles require an explicit TCP port when connecting. |
@@ -313,6 +313,7 @@ The current profile file format is version `5`:
 | `database` | String or `null` | `null` | Database name for PostgreSQL, MySQL/MariaDB, Oracle service, or SQL Server; logical SQLite path value; or non-negative Redis logical database number. |
 | `default_schema` | String or `null` | `null` | PostgreSQL `currentSchema`, SQL Server schema, or SQLite `main`. MySQL has no separate default-schema field. |
 | `sqlite_path` | Path or `null` | `null` | SQLite file path. It is `null` for an in-memory database. |
+| `duckdb_path` | Path or `null` | `null` | DuckDB file path. It is `null` for an in-memory database. |
 | `ssl_mode` | `disable`, `prefer`, `require`, `verify-ca`, `verify-full` | `prefer` | TLS policy for PostgreSQL, MySQL/MariaDB, Oracle, SQL Server, and Redis. SQLite always uses `disable`; Redis accepts `disable` or a TLS-enabled mode, not `prefer`. |
 | `credential_policy` | Tagged table | `{ policy = "none" }` | Where the password comes from. |
 | `read_only` | Boolean | `false` | Requests adapter-level read-only behavior. Use database grants for authorization. |
@@ -329,9 +330,9 @@ the client directory requires restarting LazyDB.
 `url_format` accepts `postgres`, `postgresql`, `jdbc-postgresql` for PostgreSQL;
 `mysql`, `jdbc-mysql` for MySQL; `mariadb` for MariaDB; `jdbc-oracle` for Oracle;
 `sqlserver`, `mssql`, `jdbc-sqlserver` for SQL Server; `sqlite`, `file-uri`,
-`jdbc-sqlite` for SQLite; and `redis`, `rediss` for Redis. Defaults are
-`postgresql`, `mysql`, `mariadb`, `jdbc-oracle`, `sqlserver`, `sqlite`, and
-`redis` respectively.
+`jdbc-sqlite` for SQLite; `duckdb` for DuckDB; and `redis`, `rediss` for Redis. Defaults are
+`postgresql`, `mysql`, `mariadb`, `jdbc-oracle`, `sqlserver`, `sqlite`, `duckdb`, and
+`redis` respectively. See the [DuckDB guide](duckdb.md) for its local file and memory URL formats.
 
 ### Profile Access
 

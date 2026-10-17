@@ -74,6 +74,7 @@ fn catalog_unavailable_relation_error_is_user_facing_and_terminal_safe() {
     app.update(Action::RelationFailed {
         request: lazydb::model::relation::RelationRequest {
             tab_id: Uuid::nil(),
+            console_id: Uuid::nil(),
             tab_generation: 0,
             request_id: 0,
             connection: lazydb::identity::ConnectionIdentity {
@@ -1189,7 +1190,12 @@ async fn connects_loads_catalog_and_executes_through_runtime() {
     loop {
         let action = timeout(Duration::from_secs(3), receiver.recv())
             .await
-            .unwrap()
+            .unwrap_or_else(|_| {
+                panic!(
+                    "relation preview timed out; tab state: {:?}",
+                    app.tabs[app.active_tab]
+                )
+            })
             .unwrap();
         dispatch(&mut app, &mut runtime, action);
         if matches!(

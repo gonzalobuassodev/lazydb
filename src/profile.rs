@@ -18,6 +18,7 @@ pub enum DatabaseKind {
     Oracle,
     SqlServer,
     Sqlite,
+    DuckDb,
     Redis,
 }
 
@@ -31,6 +32,7 @@ impl DatabaseKind {
                 | Self::Oracle
                 | Self::SqlServer
                 | Self::Sqlite
+                | Self::DuckDb
         )
     }
 }
@@ -52,6 +54,7 @@ pub enum ConnectionUrlFormat {
     Sqlite,
     FileUri,
     JdbcSqlite,
+    DuckDb,
     Redis,
     RedisTls,
 }
@@ -65,6 +68,7 @@ impl ConnectionUrlFormat {
             DatabaseKind::Oracle => Self::JdbcOracle,
             DatabaseKind::SqlServer => Self::SqlServer,
             DatabaseKind::Sqlite => Self::Sqlite,
+            DatabaseKind::DuckDb => Self::DuckDb,
             DatabaseKind::Redis => Self::Redis,
         }
     }
@@ -87,6 +91,7 @@ impl ConnectionUrlFormat {
                     DatabaseKind::Sqlite
                 )
                 | (Self::Redis | Self::RedisTls, DatabaseKind::Redis)
+                | (Self::DuckDb, DatabaseKind::DuckDb)
         )
     }
 
@@ -98,6 +103,7 @@ impl ConnectionUrlFormat {
             DatabaseKind::Oracle => &[Self::JdbcOracle],
             DatabaseKind::SqlServer => &[Self::SqlServer, Self::MsSql, Self::JdbcSqlServer],
             DatabaseKind::Sqlite => &[Self::Sqlite, Self::FileUri, Self::JdbcSqlite],
+            DatabaseKind::DuckDb => &[Self::DuckDb],
             DatabaseKind::Redis => &[Self::Redis, Self::RedisTls],
         }
     }
@@ -228,6 +234,65 @@ impl CatalogScope {
                     }
                 }),
         }
+    }
+
+    pub fn with_attached_databases(
+        mut self,
+        current_database: &str,
+        attached: impl IntoIterator<Item = String>,
+    ) -> Self {
+        let CatalogSelection::Selected(databases) = &mut self.databases else {
+            return self;
+        };
+        let Some(current) = databases
+            .iter()
+            .find(|database| database.name == current_database)
+            .cloned()
+        else {
+            return self;
+        };
+        for name in attached {
+            if name != current_database && !databases.iter().any(|database| database.name == name) {
+                databases.push(DatabaseScope {
+                    schemas: if name == "temp" {
+                        CatalogSelection::All
+                    } else {
+                        current.schemas.clone()
+                    },
+                    name,
+                });
+            }
+        }
+        self
+    }
+
+    pub fn with_discovered_databases(
+        mut self,
+        current_database: &str,
+        discovered: impl IntoIterator<Item = String>,
+    ) -> Self {
+        if let CatalogSelection::Selected(databases) = &mut self.databases {
+            let schema_scope = databases
+                .iter()
+                .find(|database| database.name == current_database)
+                .map(|database| database.schemas.clone())
+                .unwrap_or(CatalogSelection::All);
+            for name in discovered {
+                if name != current_database
+                    && !databases.iter().any(|database| database.name == name)
+                {
+                    databases.push(DatabaseScope {
+                        name: name.clone(),
+                        schemas: if name == "temp" {
+                            CatalogSelection::All
+                        } else {
+                            schema_scope.clone()
+                        },
+                    });
+                }
+            }
+        }
+        self
     }
 }
 
@@ -425,6 +490,8 @@ pub struct ConnectionProfile {
     pub database: Option<String>,
     pub default_schema: Option<String>,
     pub sqlite_path: Option<PathBuf>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub duckdb_path: Option<PathBuf>,
     #[serde(default)]
     pub ssl_mode: SslMode,
     #[serde(default)]
@@ -459,6 +526,8 @@ pub enum ProfileError {
     MissingOracleService,
     #[error("SQLite URL is missing a database path")]
     MissingSqlitePath,
+    #[error("DuckDB URL is missing a database path")]
+    MissingDuckDbPath,
     #[error("connection URL contains unknown query parameter `{0}`")]
     UnknownQueryParameter(String),
     #[error("connection URL contains conflicting query parameter `{0}`")]
@@ -473,6 +542,113 @@ pub enum ProfileError {
     IncompatibleFormat,
 }
 
+fn parse_duckdb_url(input: &str) -> Result<Option<ParsedConnectionUrl>, ProfileError> {
+    let Some(rest) = input
+        .get(..7)
+        .filter(|prefix| prefix.eq_ignore_ascii_case("duckdb:"))
+        .map(|_| &input[7..])
+    else {
+        return Ok(None);
+    };
+
+    let (path_and_authority, query) = rest.split_once('?').unwrap_or((rest, ""));
+    let path_and_authority =
+        path_and_authority
+            .strip_prefix("//")
+            .map_or(path_and_authority, |value| {
+                if value.starts_with('/') {
+                    value
+                } else {
+                    path_and_authority
+                }
+            });
+    let path = if path_and_authority == ":memory:" {
+        path_and_authority
+    } else if let Some(path) = path_and_authority.strip_prefix("//") {
+        if path.starts_with('/') {
+            path
+        } else {
+            return Err(ProfileError::InvalidQueryParameter("path".into()));
+        }
+    } else {
+        if path_and_authority.starts_with('/') {
+            path_and_authority
+        } else if path_and_authority
+            .split('/')
+            .next()
+            .is_some_and(|part| part.contains('.'))
+        {
+            return Err(ProfileError::InvalidQueryParameter("path".into()));
+        } else {
+            path_and_authority
+        }
+    };
+    let memory = path == ":memory:";
+    if path.is_empty() {
+        return Err(ProfileError::MissingDuckDbPath);
+    }
+
+    let mut read_only = false;
+    let mut read_only_seen = false;
+    let mut schema = "main".to_owned();
+    let mut schema_seen = false;
+    for (key, value) in url::form_urlencoded::parse(query.as_bytes()) {
+        if key.eq_ignore_ascii_case("read_only") {
+            if read_only_seen {
+                return Err(ProfileError::ConflictingQueryParameter("read_only".into()));
+            }
+            read_only_seen = true;
+            read_only = match value.as_ref() {
+                "true" => true,
+                "false" => false,
+                _ => return Err(ProfileError::InvalidQueryParameter("read_only".into())),
+            };
+        } else if key.eq_ignore_ascii_case("schema") {
+            if schema_seen {
+                return Err(ProfileError::ConflictingQueryParameter("schema".into()));
+            }
+            schema_seen = true;
+            schema = value.into_owned();
+            if schema.is_empty() {
+                return Err(ProfileError::InvalidQueryParameter("schema".into()));
+            }
+        } else {
+            return Err(ProfileError::UnknownQueryParameter(key.into_owned()));
+        }
+    }
+    if memory && read_only {
+        return Err(ProfileError::InvalidQueryParameter("read_only".into()));
+    }
+
+    let decoded_path = percent_decode_str(path)
+        .decode_utf8()
+        .map_err(|_| ProfileError::InvalidQueryParameter("path".into()))?;
+    let duckdb_path = (!memory).then(|| PathBuf::from(decoded_path.into_owned()));
+    let database = duckdb_path
+        .as_ref()
+        .and_then(|path| path.file_stem())
+        .and_then(|name| name.to_str())
+        .filter(|name| !name.is_empty())
+        .unwrap_or("memory")
+        .to_owned();
+    Ok(Some(ParsedConnectionUrl {
+        kind: DatabaseKind::DuckDb,
+        format: ConnectionUrlFormat::DuckDb,
+        host: None,
+        port: None,
+        user: None,
+        password: None,
+        database: Some(database),
+        default_schema: Some(schema),
+        sqlite_path: None,
+        sqlite_memory: false,
+        duckdb_path,
+        ssl_mode: SslMode::Disable,
+        read_only,
+        read_only_explicit: read_only_seen,
+    }))
+}
+
 #[derive(Debug)]
 pub struct ParsedConnectionUrl {
     pub kind: DatabaseKind,
@@ -485,6 +661,7 @@ pub struct ParsedConnectionUrl {
     pub default_schema: Option<String>,
     pub sqlite_path: Option<PathBuf>,
     pub sqlite_memory: bool,
+    pub duckdb_path: Option<PathBuf>,
     pub ssl_mode: SslMode,
     pub read_only: bool,
     pub read_only_explicit: bool,
@@ -524,6 +701,7 @@ pub fn parse_connection_url(input: &str) -> Result<ParsedConnectionUrl, ProfileE
             default_schema: Some("main".to_owned()),
             sqlite_path: None,
             sqlite_memory: true,
+            duckdb_path: None,
             ssl_mode: SslMode::Disable,
             read_only,
             read_only_explicit: url::form_urlencoded::parse(query.as_bytes())
@@ -544,6 +722,9 @@ pub fn parse_connection_url(input: &str) -> Result<ParsedConnectionUrl, ProfileE
         return parse_jdbc_oracle_url(normalized);
     }
 
+    if let Some(parsed) = parse_duckdb_url(normalized)? {
+        return Ok(parsed);
+    }
     let url = Url::parse(normalized)?;
     let (kind, format) = match (url.scheme().to_ascii_lowercase().as_str(), jdbc) {
         ("postgres", false) => (DatabaseKind::Postgres, ConnectionUrlFormat::Postgres),
@@ -596,6 +777,7 @@ fn parse_jdbc_oracle_url(input: &str) -> Result<ParsedConnectionUrl, ProfileErro
         default_schema: None,
         sqlite_path: None,
         sqlite_memory: false,
+        duckdb_path: None,
         ssl_mode: SslMode::Prefer,
         read_only: false,
         read_only_explicit: false,
@@ -607,7 +789,15 @@ pub fn import_connection_url(
     preferred_name: Option<&str>,
 ) -> Result<ImportedProfile, ProfileError> {
     let parsed = parse_connection_url(input)?;
-    let derived_name = if parsed.sqlite_memory {
+    let derived_name = if parsed.kind == DatabaseKind::DuckDb && parsed.duckdb_path.is_none() {
+        "memory".to_owned()
+    } else if let Some(path) = &parsed.duckdb_path {
+        path.file_name()
+            .and_then(|value| value.to_str())
+            .filter(|value| !value.is_empty())
+            .unwrap_or("duckdb")
+            .to_owned()
+    } else if parsed.sqlite_memory {
         "memory".to_owned()
     } else if let Some(path) = &parsed.sqlite_path {
         path.file_name()
@@ -622,9 +812,14 @@ pub fn import_connection_url(
             .or_else(|| parsed.host.clone())
             .unwrap_or_else(|| "connection".to_owned())
     };
+    let scope_database = if parsed.kind == DatabaseKind::DuckDb {
+        parsed.database.as_deref().unwrap_or("memory")
+    } else {
+        parsed.database.as_deref().unwrap_or_default()
+    };
     let catalog_scope = CatalogScope::for_profile(
         parsed.kind,
-        parsed.database.as_deref().unwrap_or_default(),
+        scope_database,
         parsed.default_schema.as_deref(),
     );
     Ok(ImportedProfile {
@@ -641,6 +836,7 @@ pub fn import_connection_url(
             database: parsed.database,
             default_schema: parsed.default_schema,
             sqlite_path: parsed.sqlite_path,
+            duckdb_path: parsed.duckdb_path,
             ssl_mode: parsed.ssl_mode,
             credential_policy: CredentialPolicy::None,
             read_only: parsed.read_only,
@@ -743,7 +939,9 @@ fn parse_server_url(
         DatabaseKind::MySql | DatabaseKind::MariaDb => 3306,
         DatabaseKind::Oracle => 1521,
         DatabaseKind::SqlServer => 1433,
-        DatabaseKind::Sqlite => unreachable!("server URL cannot be SQLite"),
+        DatabaseKind::Sqlite | DatabaseKind::DuckDb => {
+            unreachable!("file database URL cannot be a server URL")
+        }
         DatabaseKind::Redis => 6379,
     };
     Ok(ParsedConnectionUrl {
@@ -757,6 +955,7 @@ fn parse_server_url(
         default_schema,
         sqlite_path: None,
         sqlite_memory: false,
+        duckdb_path: None,
         ssl_mode,
         read_only,
         read_only_explicit,
@@ -830,6 +1029,7 @@ fn parse_jdbc_sql_server_url(input: &str) -> Result<ParsedConnectionUrl, Profile
         default_schema,
         sqlite_path: None,
         sqlite_memory: false,
+        duckdb_path: None,
         ssl_mode: sql_server_ssl_mode(encrypt, trust_server_certificate)?,
         read_only: read_only.unwrap_or(false),
         read_only_explicit: read_only.is_some(),
@@ -947,6 +1147,7 @@ fn parse_sqlite_url(input: &str, jdbc: bool) -> Result<ParsedConnectionUrl, Prof
         default_schema: Some("main".to_owned()),
         sqlite_path: Some(path),
         sqlite_memory: false,
+        duckdb_path: None,
         ssl_mode: SslMode::Disable,
         read_only,
         read_only_explicit: url::form_urlencoded::parse(query.as_bytes())
@@ -1007,6 +1208,30 @@ pub fn format_connection_url(
             output.push_str("?mode=ro");
         }
         return Ok(output);
+    }
+    if profile.kind == DatabaseKind::DuckDb {
+        let path = match profile.duckdb_path.as_ref() {
+            Some(path) => utf8_percent_encode(&path.to_string_lossy(), SQLITE_PATH).to_string(),
+            None => ":memory:".to_owned(),
+        };
+        let mut query = Vec::new();
+        if profile.read_only {
+            query.push("read_only=true".to_owned());
+        }
+        if let Some(schema) = profile.default_schema.as_deref()
+            && schema != "main"
+        {
+            query.push(format!(
+                "schema={}",
+                utf8_percent_encode(schema, QUERY_VALUE)
+            ));
+        }
+        let suffix = if query.is_empty() {
+            String::new()
+        } else {
+            format!("?{}", query.join("&"))
+        };
+        return Ok(format!("duckdb:{path}{suffix}"));
     }
     if format == ConnectionUrlFormat::JdbcSqlServer {
         return format_jdbc_sql_server_url(profile);
@@ -1270,7 +1495,9 @@ fn ssl_mode_value(value: SslMode) -> &'static str {
 
 #[cfg(test)]
 mod tests {
-    use super::{CatalogScope, DatabaseKind, SslMode, import_connection_url};
+    use super::{
+        CatalogScope, DatabaseKind, SslMode, format_connection_url, import_connection_url,
+    };
 
     #[test]
     fn imports_postgres_jdbc_url_and_current_schema() {
@@ -1290,6 +1517,21 @@ mod tests {
             imported.profile.catalog_scope,
             CatalogScope::for_profile(DatabaseKind::Postgres, "moss", Some("tools"))
         );
+    }
+
+    #[test]
+    fn attached_database_scope_inherits_schema_restriction_without_widening_it() {
+        let scope = CatalogScope::for_profile(DatabaseKind::DuckDb, "primary", Some("main"))
+            .with_attached_databases("primary", ["primary".into(), "attached".into()]);
+        assert!(scope.allows_database("primary"));
+        assert!(scope.allows_database("attached"));
+        assert!(!scope.allows_database("unknown"));
+        assert!(scope.allows_schema("attached", "main"));
+        assert!(!scope.allows_schema("attached", "other"));
+        let scope = CatalogScope::for_profile(DatabaseKind::DuckDb, "primary", Some("main"))
+            .with_discovered_databases("primary", ["temp".into()]);
+        assert!(scope.allows_database("temp"));
+        assert!(scope.allows_schema("temp", "main"));
     }
 
     #[test]
@@ -1365,6 +1607,92 @@ mod tests {
             "/tmp/file.db"
         );
         assert_eq!(memory.profile.database.as_deref(), Some(":memory:"));
+    }
+
+    #[test]
+    fn imports_and_exports_duckdb_paths_and_options() {
+        let imported = import_connection_url(
+            "duckdb:/tmp/analytics%20data.duckdb?read_only=true&schema=raw",
+            None,
+        )
+        .unwrap();
+        assert_eq!(imported.profile.kind, DatabaseKind::DuckDb);
+        assert_eq!(
+            imported.profile.duckdb_path.as_deref(),
+            Some(std::path::Path::new("/tmp/analytics data.duckdb"))
+        );
+        assert_eq!(imported.profile.database.as_deref(), Some("analytics data"));
+        assert_eq!(imported.profile.default_schema.as_deref(), Some("raw"));
+        assert!(imported.profile.read_only);
+        let exported =
+            format_connection_url(&imported.profile, imported.profile.url_format).unwrap();
+        assert_eq!(
+            exported,
+            "duckdb:/tmp/analytics%20data.duckdb?read_only=true&schema=raw"
+        );
+
+        let memory = import_connection_url("duckdb::memory:", None).unwrap();
+        assert_eq!(memory.profile.kind, DatabaseKind::DuckDb);
+        assert!(memory.profile.duckdb_path.is_none());
+        assert_eq!(memory.profile.database.as_deref(), Some("memory"));
+        assert_eq!(
+            format_connection_url(&memory.profile, memory.profile.url_format).unwrap(),
+            "duckdb::memory:"
+        );
+
+        for path in ["duckdb:relative/data.duckdb", "duckdb:/absolute.duckdb"] {
+            let profile = import_connection_url(path, None).unwrap().profile;
+            let exported = format_connection_url(&profile, profile.url_format).unwrap();
+            assert_eq!(exported, path);
+        }
+
+        for (path, canonical) in [
+            (
+                "duckdb:目录/a%25b%23c%3Fd.duckdb",
+                "duckdb:%E7%9B%AE%E5%BD%95/a%25b%23c%3Fd.duckdb",
+            ),
+            (
+                "duckdb:/tmp/目录/a%25b%23c%3Fd.duckdb",
+                "duckdb:/tmp/%E7%9B%AE%E5%BD%95/a%25b%23c%3Fd.duckdb",
+            ),
+            (
+                "duckdb:C%3A/Users/example/data.duckdb",
+                "duckdb:C:/Users/example/data.duckdb",
+            ),
+        ] {
+            let profile = import_connection_url(path, None).unwrap().profile;
+            assert_eq!(
+                format_connection_url(&profile, profile.url_format).unwrap(),
+                canonical
+            );
+        }
+    }
+
+    #[test]
+    fn rejects_invalid_duckdb_options_and_remote_urls() {
+        for url in [
+            "duckdb:/tmp/data.duckdb?unknown=true",
+            "duckdb:/tmp/data.duckdb?read_only=yes",
+            "duckdb:/tmp/data.duckdb?schema=a&schema=b",
+            "duckdb:remote.example/data.duckdb",
+            "duckdb::memory:?read_only=true",
+        ] {
+            assert!(import_connection_url(url, None).is_err(), "accepted {url}");
+        }
+    }
+
+    #[test]
+    fn older_profile_payload_without_duckdb_path_remains_readable() {
+        let mut value = serde_json::to_value(
+            import_connection_url("sqlite:/tmp/demo.db", None)
+                .unwrap()
+                .profile,
+        )
+        .unwrap();
+        value.as_object_mut().unwrap().remove("duckdb_path");
+        let profile: super::ConnectionProfile = serde_json::from_value(value).unwrap();
+        assert_eq!(profile.kind, DatabaseKind::Sqlite);
+        assert!(profile.duckdb_path.is_none());
     }
 
     #[test]

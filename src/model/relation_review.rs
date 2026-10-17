@@ -40,6 +40,7 @@ pub fn preview_sql_for_relation(
             }
         }
         DatabaseKind::Postgres
+        | DatabaseKind::DuckDb
         | DatabaseKind::Oracle
         | DatabaseKind::SqlServer
         | DatabaseKind::Sqlite => {

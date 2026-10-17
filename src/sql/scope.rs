@@ -225,7 +225,10 @@ fn statement_boundaries(text: &str, dialect: SqlDialect) -> Vec<(usize, usize)> 
                 }
                 b'[' if matches!(
                     dialect,
-                    SqlDialect::SqlServer | SqlDialect::Sqlite | SqlDialect::Generic
+                    SqlDialect::SqlServer
+                        | SqlDialect::Sqlite
+                        | SqlDialect::DuckDb
+                        | SqlDialect::Generic
                 ) =>
                 {
                     state = State::Bracket;
@@ -246,7 +249,11 @@ fn statement_boundaries(text: &str, dialect: SqlDialect) -> Vec<(usize, usize)> 
                     state = State::BlockComment;
                     index += 2;
                 }
-                b'$' if matches!(dialect, SqlDialect::Postgres | SqlDialect::Generic) => {
+                b'$' if matches!(
+                    dialect,
+                    SqlDialect::Postgres | SqlDialect::DuckDb | SqlDialect::Generic
+                ) =>
+                {
                     if let Some(end) = dollar_tag_end(text, index) {
                         state = State::DollarQuote(TextRange::new(index, end));
                         index = end;

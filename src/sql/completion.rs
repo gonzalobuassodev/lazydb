@@ -839,7 +839,7 @@ fn relation_insert_text(
                 vec![database.unwrap_or_default(), object]
             }
         }
-        SqlDialect::Sqlite => {
+        SqlDialect::Sqlite | SqlDialect::DuckDb => {
             if schema.is_some_and(|value| context.schema == Some(value)) {
                 vec![object]
             } else {
@@ -1802,6 +1802,7 @@ fn keywords_for_completion(
             OrderingStage::Direction => match dialect {
                 SqlDialect::Postgres
                 | SqlDialect::Sqlite
+                | SqlDialect::DuckDb
                 | SqlDialect::Generic
                 | SqlDialect::Oracle => &["ASC", "DESC", "NULLS FIRST", "NULLS LAST"],
                 SqlDialect::MySql | SqlDialect::MariaDb | SqlDialect::SqlServer => &["ASC", "DESC"],
@@ -1809,6 +1810,7 @@ fn keywords_for_completion(
             OrderingStage::AfterDirection => match dialect {
                 SqlDialect::Postgres
                 | SqlDialect::Sqlite
+                | SqlDialect::DuckDb
                 | SqlDialect::Generic
                 | SqlDialect::Oracle => &["NULLS FIRST", "NULLS LAST"],
                 SqlDialect::MySql | SqlDialect::MariaDb | SqlDialect::SqlServer => &[],
@@ -1816,6 +1818,7 @@ fn keywords_for_completion(
             OrderingStage::NullPlacement => match dialect {
                 SqlDialect::Postgres
                 | SqlDialect::Sqlite
+                | SqlDialect::DuckDb
                 | SqlDialect::Generic
                 | SqlDialect::Oracle => &["FIRST", "LAST"],
                 SqlDialect::MySql | SqlDialect::MariaDb | SqlDialect::SqlServer => &[],
@@ -2926,7 +2929,7 @@ fn keywords(
                 "REFERENCES",
                 "CHECK",
             ],
-            SqlDialect::Sqlite | SqlDialect::Oracle => &[],
+            SqlDialect::Sqlite | SqlDialect::DuckDb | SqlDialect::Oracle => &[],
         },
         Context::Ddl(DdlContext::AlterColumnType(_)) => &[],
         Context::Ddl(DdlContext::NewColumnName) => &[],
@@ -3004,6 +3007,9 @@ fn ddl_object_keywords(dialect: SqlDialect, _create: bool) -> &'static [&'static
             "TRIGGER",
         ],
         SqlDialect::Sqlite => &["TABLE", "VIEW", "INDEX", "TRIGGER"],
+        SqlDialect::DuckDb => &[
+            "TABLE", "VIEW", "INDEX", "SCHEMA", "SEQUENCE", "TYPE", "MACRO", "FUNCTION",
+        ],
         SqlDialect::Generic => &["TABLE", "VIEW", "INDEX", "SCHEMA", "DATABASE"],
         SqlDialect::Oracle => &[
             "TABLE",
@@ -3061,7 +3067,9 @@ fn alter_table_action_keywords(dialect: SqlDialect) -> &'static [&'static str] {
             "ADD CONSTRAINT",
             "DROP CONSTRAINT",
         ],
-        SqlDialect::Sqlite => &["ADD COLUMN", "DROP COLUMN", "RENAME COLUMN", "RENAME TO"],
+        SqlDialect::Sqlite | SqlDialect::DuckDb => {
+            &["ADD COLUMN", "DROP COLUMN", "RENAME COLUMN", "RENAME TO"]
+        }
         SqlDialect::SqlServer => &[
             "ADD",
             "ALTER COLUMN",
@@ -3126,6 +3134,19 @@ fn data_types_for_context(context: Context, dialect: SqlDialect) -> &'static [&'
             "VARCHAR",
         ],
         SqlDialect::Sqlite => &["BLOB", "INTEGER", "NUMERIC", "REAL", "TEXT"],
+        SqlDialect::DuckDb => &[
+            "BIGINT",
+            "BOOLEAN",
+            "DATE",
+            "DECIMAL",
+            "DOUBLE",
+            "INTEGER",
+            "JSON",
+            "TIMESTAMP",
+            "UBIGINT",
+            "UUID",
+            "VARCHAR",
+        ],
         SqlDialect::Generic => &["BIGINT", "BOOLEAN", "INTEGER", "NUMERIC", "TEXT", "VARCHAR"],
         SqlDialect::Oracle => &[
             "BINARY_FLOAT",

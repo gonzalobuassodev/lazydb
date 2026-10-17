@@ -1302,6 +1302,7 @@ fn table_draft(name: &str, columns: Vec<ColumnDraft>) -> CatalogDraft {
         column_editor: None,
         indexes: vec![],
         constraints: vec![],
+        table_constraints: vec![],
     })
 }
 
@@ -1334,6 +1335,7 @@ fn table_definition(name: &str, columns: Vec<ColumnDefinition>) -> TableDefiniti
         columns,
         indexes: vec![],
         constraints: vec![],
+        structured_constraints: vec![],
         baseline_fingerprint: "sha256:table".into(),
     }
 }

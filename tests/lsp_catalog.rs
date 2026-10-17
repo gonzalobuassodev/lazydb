@@ -58,6 +58,10 @@ impl FakeLoader {
             ObjectGroup::Tables,
             ObjectGroup::Views,
             ObjectGroup::MaterializedViews,
+            ObjectGroup::Sequences,
+            ObjectGroup::Types,
+            ObjectGroup::Functions,
+            ObjectGroup::Procedures,
         ] {
             self.respond(
                 CatalogTarget::Objects {
@@ -247,6 +251,10 @@ async fn discover_index_builds_full_hierarchy_with_real_ids() {
             ObjectGroup::Tables,
             ObjectGroup::Views,
             ObjectGroup::MaterializedViews,
+            ObjectGroup::Sequences,
+            ObjectGroup::Types,
+            ObjectGroup::Functions,
+            ObjectGroup::Procedures,
         ] {
             fake.respond(
                 CatalogTarget::Objects {
@@ -377,6 +385,10 @@ async fn failed_target_keeps_other_schemata_and_marks_incomplete() {
             ObjectGroup::Tables,
             ObjectGroup::Views,
             ObjectGroup::MaterializedViews,
+            ObjectGroup::Sequences,
+            ObjectGroup::Types,
+            ObjectGroup::Functions,
+            ObjectGroup::Procedures,
         ] {
             fake.respond(
                 CatalogTarget::Objects {

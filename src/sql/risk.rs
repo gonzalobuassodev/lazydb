@@ -3,7 +3,7 @@ use sqlparser::{
     parser::Parser,
 };
 
-use super::{SqlDialect, dialect::parser_dialect, split_sql_server_batches};
+use super::{SqlDialect, dialect::parser_dialect, scan_statements, split_sql_server_batches};
 
 #[derive(Clone, Copy, Debug, Eq, Ord, PartialEq, PartialOrd)]
 pub enum SqlRisk {
@@ -38,7 +38,15 @@ pub fn classify_sql(sql: &str, dialect: SqlDialect) -> SqlRiskAnalysis {
             Err(_) => vec![SqlRisk::Unknown],
         }
     } else {
-        parse_risks(sql, dialect)
+        scan_statements(sql, dialect)
+            .into_iter()
+            .flat_map(|range| {
+                range.get(sql).map_or_else(
+                    || vec![SqlRisk::Unknown],
+                    |statement| parse_risks(statement, dialect),
+                )
+            })
+            .collect()
     };
     let statement_count = risks.len();
     let aggregate = match risks.as_slice() {
@@ -55,7 +63,19 @@ pub fn classify_sql(sql: &str, dialect: SqlDialect) -> SqlRiskAnalysis {
 
 fn parse_risks(sql: &str, dialect: SqlDialect) -> Vec<SqlRisk> {
     match Parser::parse_sql(parser_dialect(dialect), sql) {
-        Ok(statements) => statements.iter().map(classify_statement).collect(),
+        Ok(statements) => statements
+            .iter()
+            .map(|statement| {
+                if dialect == SqlDialect::DuckDb
+                    && (matches!(statement, Statement::CreateSecret { .. })
+                        || contains_duckdb_sensitive_function(statement))
+                {
+                    SqlRisk::Unknown
+                } else {
+                    classify_statement(statement)
+                }
+            })
+            .collect(),
         Err(_) => vec![SqlRisk::Unknown],
     }
 }
@@ -136,6 +156,31 @@ fn classify_statement(statement: &Statement) -> SqlRisk {
         | Statement::AlterUser(_) => SqlRisk::Ddl,
         Statement::Truncate(_) => SqlRisk::Ddl,
         _ => SqlRisk::Unknown,
+    }
+}
+
+fn contains_duckdb_sensitive_function(statement: &Statement) -> bool {
+    fn query_contains(query: &Query) -> bool {
+        let sql = query.to_string().to_ascii_lowercase();
+        [
+            "nextval(",
+            "setval(",
+            "read_csv",
+            "read_parquet",
+            "read_json",
+            "glob(",
+        ]
+        .iter()
+        .any(|function| sql.contains(function))
+            || query
+                .with
+                .as_ref()
+                .is_some_and(|with| with.cte_tables.iter().any(|cte| query_contains(&cte.query)))
+    }
+    match statement {
+        Statement::Query(query) => query_contains(query),
+        Statement::Explain { statement, .. } => contains_duckdb_sensitive_function(statement),
+        _ => false,
     }
 }
 

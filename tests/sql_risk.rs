@@ -100,3 +100,25 @@ fn oracle_statement_terminators_do_not_change_read_only_risk() {
         vec![SqlRisk::Unknown]
     );
 }
+
+#[test]
+fn duckdb_file_and_extension_side_effects_are_unknown() {
+    for sql in [
+        "COPY (SELECT 1) TO '/tmp/export.csv'",
+        "ATTACH '/tmp/other.duckdb' AS other",
+        "DETACH other",
+        "INSTALL httpfs",
+        "LOAD httpfs",
+        "CREATE SECRET s (TYPE S3, KEY_ID 'x', SECRET 'y')",
+        "SET memory_limit = '1GB'",
+        "SELECT nextval('s')",
+        "SELECT setval('s', 4)",
+    ] {
+        let analysis = classify_sql(sql, SqlDialect::DuckDb);
+        assert_eq!(analysis.risks, vec![SqlRisk::Unknown], "{sql}");
+    }
+    assert_eq!(
+        classify_sql("SELECT 1; SELECT 2", SqlDialect::DuckDb).risks,
+        vec![SqlRisk::ReadOnly, SqlRisk::ReadOnly]
+    );
+}

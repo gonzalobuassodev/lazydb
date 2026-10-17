@@ -209,6 +209,7 @@ fn sql_dialect(dialect: crate::cli::LspDialect) -> SqlDialect {
         crate::cli::LspDialect::MySql => SqlDialect::MySql,
         crate::cli::LspDialect::SqlServer => SqlDialect::SqlServer,
         crate::cli::LspDialect::Sqlite => SqlDialect::Sqlite,
+        crate::cli::LspDialect::DuckDb => SqlDialect::DuckDb,
         crate::cli::LspDialect::Generic => SqlDialect::Generic,
     }
 }

@@ -91,6 +91,8 @@ struct ConnectionProfileV5 {
     default_schema: Option<String>,
     sqlite_path: Option<PathBuf>,
     #[serde(default)]
+    duckdb_path: Option<PathBuf>,
+    #[serde(default)]
     ssl_mode: SslMode,
     #[serde(default)]
     credential_policy: CredentialPolicy,
@@ -116,6 +118,7 @@ impl From<ConnectionProfileV5> for ConnectionProfile {
             database: profile.database,
             default_schema: profile.default_schema,
             sqlite_path: profile.sqlite_path,
+            duckdb_path: profile.duckdb_path,
             ssl_mode: profile.ssl_mode,
             credential_policy: profile.credential_policy,
             read_only: profile.read_only,
@@ -146,6 +149,8 @@ struct ConnectionProfileV2 {
     default_schema: Option<String>,
     sqlite_path: Option<PathBuf>,
     #[serde(default)]
+    duckdb_path: Option<PathBuf>,
+    #[serde(default)]
     ssl_mode: SslMode,
     secret_ref: Option<String>,
     #[serde(default)]
@@ -170,6 +175,7 @@ impl From<ConnectionProfileV2> for ConnectionProfile {
             database: profile.database,
             default_schema: profile.default_schema,
             sqlite_path: profile.sqlite_path,
+            duckdb_path: profile.duckdb_path,
             ssl_mode: profile.ssl_mode,
             credential_policy: profile
                 .secret_ref

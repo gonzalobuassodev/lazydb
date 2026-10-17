@@ -133,6 +133,21 @@ fn unsupported_request_returns_json_rpc_error_without_polluting_stdout() {
 }
 
 #[test]
+fn duckdb_dialect_option_starts_protocol_server_and_publishes_diagnostics() {
+    let mut server = LspProcess::start_with_args(&["lsp", "--stdio", "--dialect", "duckdb"]);
+    let initialized = server.request(1, "initialize", json!({"capabilities": {}}));
+    assert_eq!(initialized["id"], 1);
+    let uri = "file:///tmp/duckdb-query.sql";
+    let notification = server.notify_and_read("textDocument/didOpen", json!({"textDocument": {
+        "uri": uri, "languageId": "sql", "version": 1, "text": "SELECT 1 QUALIFY row_number() OVER () = 1"
+    }}));
+    assert_eq!(notification["method"], "textDocument/publishDiagnostics");
+    assert_eq!(notification["params"]["uri"], uri);
+    let shutdown = server.request(2, "shutdown", Value::Null);
+    assert!(shutdown.get("error").is_none());
+}
+
+#[test]
 fn opening_invalid_sql_publishes_versioned_diagnostics() {
     let mut server = LspProcess::start();
     let _ = server.request(1, "initialize", json!({"capabilities": {}}));

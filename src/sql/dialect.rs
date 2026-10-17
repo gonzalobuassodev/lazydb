@@ -5,6 +5,7 @@ pub enum SqlDialect {
     MariaDb,
     SqlServer,
     Sqlite,
+    DuckDb,
     Oracle,
     #[default]
     Generic,
@@ -25,6 +26,7 @@ impl SqlDialect {
             crate::profile::DatabaseKind::MariaDb => Self::MariaDb,
             crate::profile::DatabaseKind::SqlServer => Self::SqlServer,
             crate::profile::DatabaseKind::Sqlite => Self::Sqlite,
+            crate::profile::DatabaseKind::DuckDb => Self::DuckDb,
             crate::profile::DatabaseKind::Oracle => Self::Oracle,
             crate::profile::DatabaseKind::Redis => Self::Generic,
         }
@@ -37,6 +39,7 @@ pub(crate) fn parser_dialect(dialect: SqlDialect) -> &'static dyn sqlparser::dia
         SqlDialect::MySql | SqlDialect::MariaDb => &sqlparser::dialect::MySqlDialect {},
         SqlDialect::SqlServer => &sqlparser::dialect::MsSqlDialect {},
         SqlDialect::Sqlite => &sqlparser::dialect::SQLiteDialect {},
+        SqlDialect::DuckDb => &sqlparser::dialect::DuckDbDialect {},
         SqlDialect::Generic => &sqlparser::dialect::GenericDialect {},
         SqlDialect::Oracle => &sqlparser::dialect::GenericDialect {},
     }

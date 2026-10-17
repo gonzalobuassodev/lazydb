@@ -725,6 +725,7 @@ fn form_navigation_skips_fields_hidden_by_driver_and_mode() {
 
     app.update(Action::ProfileFocusField(ProfileField::Kind));
     app.update(Action::ProfileCycle(-1));
+    app.update(Action::ProfileCycle(-1));
     assert_eq!(
         app.profile_manager
             .as_ref()

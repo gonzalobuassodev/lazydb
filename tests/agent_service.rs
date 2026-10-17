@@ -49,6 +49,12 @@ fn sqlite_profile(path: &std::path::Path, name: &str) -> ConnectionProfile {
         .profile
 }
 
+fn duckdb_profile(path: &std::path::Path, name: &str) -> ConnectionProfile {
+    import_connection_url(&format!("duckdb:{}", path.display()), Some(name))
+        .unwrap()
+        .profile
+}
+
 #[test]
 fn connection_projection_never_exposes_sql_server_credentials() {
     let mut profile = import_connection_url("sqlserver://db.example.test/app", Some("mssql"))
@@ -122,6 +128,56 @@ async fn query_returns_typed_rows_and_target_identity() {
         lazydb::db::value::CellValue::Null
     ));
     assert!(!result.outcome.truncated);
+}
+
+#[tokio::test]
+async fn duckdb_headless_query_search_and_write_use_native_file_profile() {
+    let temp = TempDir::new().unwrap();
+    fs::create_dir(temp.path().join(".git")).unwrap();
+    let path = temp.path().join("agent.duckdb");
+    let profile = duckdb_profile(&path, "analytics");
+    let setup = lazydb::db::DatabaseConnection::connect(&profile, None)
+        .await
+        .unwrap();
+    setup.execute("CREATE TABLE events (id INTEGER PRIMARY KEY, label VARCHAR); INSERT INTO events VALUES (1, 'opened')").await.unwrap();
+    setup.close().await;
+
+    let service = service(&temp, vec![profile.clone()]);
+    let query = service
+        .query(None, "SELECT id, label FROM events")
+        .await
+        .unwrap();
+    assert_eq!(query.outcome.row_count, 1);
+    assert_eq!(
+        query.target.connection.kind,
+        lazydb::profile::DatabaseKind::DuckDb
+    );
+    let search = service
+        .search_schema(None, "events".into(), 10)
+        .await
+        .unwrap();
+    assert!(search.hits.iter().any(|hit| hit.name == "events"));
+    let write = service
+        .execute(
+            None,
+            "INSERT INTO events VALUES (2, 'returned')",
+            WritePolicy::All,
+        )
+        .await
+        .unwrap();
+    assert_eq!(
+        write.target.connection.kind,
+        lazydb::profile::DatabaseKind::DuckDb
+    );
+    let verify = lazydb::db::DatabaseConnection::connect(&profile, None)
+        .await
+        .unwrap();
+    let rows = verify.execute("SELECT count(*) FROM events").await.unwrap();
+    assert_eq!(
+        rows.result_sets[0].rows[0][0],
+        lazydb::db::value::CellValue::Integer(2)
+    );
+    verify.close().await;
 }
 
 #[tokio::test]

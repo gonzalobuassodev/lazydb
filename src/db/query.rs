@@ -146,6 +146,30 @@ impl QueryOutcomeAccumulator {
         self.result_sets.push(result);
     }
 
+    pub(crate) fn start_result(&mut self, columns: Vec<ColumnMeta>) {
+        self.mark_event();
+        self.current = Some(ResultSet {
+            columns,
+            rows: Vec::new(),
+            affected_rows: 0,
+        });
+    }
+
+    pub(crate) fn budget_remaining(&self) -> (usize, usize) {
+        if self.truncated {
+            (0, 0)
+        } else {
+            (
+                self.budget.max_rows.saturating_sub(self.retained_rows),
+                self.budget.max_bytes.saturating_sub(self.retained_bytes),
+            )
+        }
+    }
+
+    pub(crate) fn exhaust_budget(&mut self) {
+        self.truncated = true;
+    }
+
     pub(crate) fn finish(mut self) -> QueryOutcome {
         if let Some(result) = self.current.take() {
             self.result_sets.push(result);

@@ -4480,6 +4480,7 @@ LIMIT 2001
             columns,
             indexes: Vec::new(),
             constraints: Vec::new(),
+            structured_constraints: Vec::new(),
             baseline_fingerprint: format!(
                 "sha256:{:x}",
                 Sha256::digest(format!("{schema}.{name}:{oid}").as_bytes())

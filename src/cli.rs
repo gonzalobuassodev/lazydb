@@ -209,6 +209,8 @@ pub enum LspDialect {
     #[value(name = "sqlserver", alias = "sql-server")]
     SqlServer,
     Sqlite,
+    #[value(name = "duckdb")]
+    DuckDb,
     #[default]
     Generic,
 }
@@ -220,6 +222,7 @@ impl From<crate::profile::DatabaseKind> for LspDialect {
             crate::sql::SqlDialect::MySql => Self::MySql,
             crate::sql::SqlDialect::MariaDb => Self::MySql,
             crate::sql::SqlDialect::SqlServer => Self::SqlServer,
+            crate::sql::SqlDialect::DuckDb => Self::DuckDb,
             crate::sql::SqlDialect::Sqlite
             | crate::sql::SqlDialect::Generic
             | crate::sql::SqlDialect::Oracle => Self::Sqlite,
@@ -401,7 +404,7 @@ pub struct Capabilities<'a> {
     pub version: &'a str,
     pub cli_api: u16,
     pub features: [&'a str; 8],
-    pub drivers: &'a [&'a str; 7],
+    pub drivers: &'a [&'a str; 8],
 }
 
 #[derive(Debug, Serialize)]
@@ -681,6 +684,7 @@ mod tests {
                 "oracle",
                 "sqlserver",
                 "sqlite",
+                "duckdb",
                 "redis"
             ])
         );

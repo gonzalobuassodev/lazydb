@@ -20,6 +20,7 @@ disable it at runtime.
 | Oracle | Relational | Available; table/view/sequence DDL and catalog mutation slices | Not advertised | AUTO/MANUAL | Not advertised | Not implemented |
 | SQL Server | Relational | Available; table/view mutation; complex children gated | Insert supports `OUTPUT`; update/delete require primary key | AUTO/MANUAL | Session close; open transaction rolls back | Not supported |
 | SQLite | Relational | Available; table/view DDL and catalog mutation | Rowid-table insert lookup; update/delete require primary key; table shape is gated | AUTO/MANUAL | Progress handler / close | Not applicable |
+| DuckDB | Embedded relational | Catalog/search/preview and native DDL; schema/table/view/sequence/ART index create; typed PK/UNIQUE/CHECK/FK constraints on table creation; table/column rename, nullable add, column drop/type/default/nullability and comment change; view rename/query/comment change; authoritative table constraints/index metadata and sequence/index definitions; table constraint edit and table index draft edit gated; macro structured management unavailable | Insert/update/delete for primary-key tables | AUTO/MANUAL | Native operation interrupt | Not applicable |
 | Redis | Key-value | No SQL catalog or DDL | Native key/value and collection mutation, separate from relation grid | No SQL transaction UI | Not applicable | Read-only `INFO` metrics |
 
 ## Users & Roles

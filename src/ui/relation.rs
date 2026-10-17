@@ -987,7 +987,7 @@ fn relation_loading_identity(
             _ => panic!("relation ddl loading identity requested while idle"),
         },
     };
-    animation::LoadIdentity::Relation(request)
+    animation::LoadIdentity::Relation(Box::new(request))
 }
 
 fn render_loading_status(

@@ -191,6 +191,7 @@ fn oracle_table_edit_plan_renames_only_the_table_identity() {
             columns: vec![],
             indexes: vec![],
             constraints: vec![],
+            structured_constraints: vec![],
             baseline_fingerprint: "old".into(),
         },
     );
@@ -238,6 +239,7 @@ fn mysql_table_and_column_comment_edits_produce_mutation_sql() {
         }],
         indexes: vec![],
         constraints: vec![],
+        structured_constraints: vec![],
         baseline_fingerprint: "items".into(),
     };
     let mut draft = TableDraft::from_definition_for_database(&definition, DatabaseKind::MySql);
@@ -296,6 +298,7 @@ fn oracle_table_and_column_comment_edits_produce_comment_statements() {
         }],
         indexes: vec![],
         constraints: vec![],
+        structured_constraints: vec![],
         baseline_fingerprint: "items".into(),
     };
     let mut draft = TableDraft::from_definition(&definition);
@@ -352,6 +355,7 @@ fn comment_edits_preserve_no_changes_and_support_clearing() {
         }],
         indexes: vec![],
         constraints: vec![],
+        structured_constraints: vec![],
         baseline_fingerprint: "items".into(),
     };
     let baseline = lazydb::db::catalog_mutation::CatalogObjectDefinition::Table(definition.clone());
@@ -781,6 +785,7 @@ fn sqlite_table_edit_plan_uses_native_rename() {
             }],
             indexes: vec![],
             constraints: vec![],
+            structured_constraints: vec![],
             baseline_fingerprint: "old".into(),
         },
     );
@@ -843,6 +848,7 @@ fn sql_server_table_edit_plan_uses_sp_rename() {
             columns: vec![],
             indexes: vec![],
             constraints: vec![],
+            structured_constraints: vec![],
             baseline_fingerprint: "old".into(),
         },
     );

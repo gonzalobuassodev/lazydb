@@ -1223,6 +1223,7 @@ fn is_text_field(field: ProfileField) -> bool {
             | ProfileField::Database
             | ProfileField::Schema
             | ProfileField::SqlitePath
+            | ProfileField::DuckDbPath
     )
 }
 
@@ -1323,7 +1324,8 @@ fn field_section(field: ProfileField) -> Option<FormSection> {
         | ProfileField::Schema
         | ProfileField::VisibleObjects
         | ProfileField::SqliteMemory
-        | ProfileField::SqlitePath => Some(FormSection::Connection),
+        | ProfileField::SqlitePath
+        | ProfileField::DuckDbPath => Some(FormSection::Connection),
         ProfileField::User | ProfileField::Password | ProfileField::PasswordStorage => {
             Some(FormSection::Authentication)
         }
@@ -1382,6 +1384,7 @@ fn text_input(draft: &ProfileDraft, field: ProfileField) -> Option<&TextInput> {
         ProfileField::Database => Some(&draft.database),
         ProfileField::Schema => Some(&draft.schema),
         ProfileField::SqlitePath => Some(&draft.sqlite_path),
+        ProfileField::DuckDbPath => Some(&draft.duckdb_path),
         _ => None,
     }
 }
@@ -1421,6 +1424,7 @@ fn field_value(draft: &ProfileDraft, field: ProfileField) -> String {
         }
         ProfileField::SqliteMemory => toggle_value(draft.sqlite_memory),
         ProfileField::SqlitePath => safe_line(draft.sqlite_path.value()),
+        ProfileField::DuckDbPath => safe_line(draft.duckdb_path.value()),
         ProfileField::Test | ProfileField::Save | ProfileField::Cancel => String::new(),
     }
 }
@@ -1433,6 +1437,7 @@ fn url_help(kind: DatabaseKind) -> &'static str {
         DatabaseKind::Oracle => "Accepts jdbc:oracle:thin:@host:port/service",
         DatabaseKind::SqlServer => "Accepts sqlserver://, mssql://, and jdbc:sqlserver://",
         DatabaseKind::Sqlite => "Accepts sqlite://, file:, and jdbc:sqlite:",
+        DatabaseKind::DuckDb => "Accepts duckdb:<path> and duckdb::memory:",
         DatabaseKind::Redis => "Accepts redis:// and rediss://",
     }
 }
@@ -1458,6 +1463,7 @@ fn field_label(field: ProfileField, kind: DatabaseKind) -> &'static str {
         ProfileField::PasswordStorage => "Password storage",
         ProfileField::SqliteMemory => "Memory database",
         ProfileField::SqlitePath => "Path",
+        ProfileField::DuckDbPath => "DuckDB file",
         ProfileField::Test => "Test",
         ProfileField::Save => "Save",
         ProfileField::Cancel => "Cancel",

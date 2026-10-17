@@ -669,6 +669,13 @@ pub fn map_mouse(event: MouseEvent, ui: &UiState, app: &App) -> Option<Action> {
                                 | HitTarget::CatalogEditorTableField(_)
                                 | HitTarget::CatalogEditorTableColumn(_)
                                 | HitTarget::CatalogEditorAddTableColumn
+                                | HitTarget::CatalogEditorAddTableConstraintPrimaryKey
+                                | HitTarget::CatalogEditorAddTableConstraintUnique
+                                | HitTarget::CatalogEditorAddTableConstraintCheck
+                                | HitTarget::CatalogEditorAddTableConstraintForeignKey
+                                | HitTarget::CatalogEditorFocusTableConstraint(_)
+                                | HitTarget::CatalogEditorRemoveTableConstraint(_)
+                                | HitTarget::CatalogEditorConstraintField { .. }
                                 | HitTarget::CatalogEditorRemoveTableColumn
                                 | HitTarget::CatalogEditorRemoveTableColumnRow(_)
                                 | HitTarget::CatalogEditorRestoreTableColumnRow(_)
@@ -1127,6 +1134,27 @@ pub fn map_mouse(event: MouseEvent, ui: &UiState, app: &App) -> Option<Action> {
                     Some(Action::CatalogEditorSelectTableColumn(index))
                 }
                 HitTarget::CatalogEditorAddTableColumn => Some(Action::CatalogEditorAddTableColumn),
+                HitTarget::CatalogEditorAddTableConstraintPrimaryKey => {
+                    Some(Action::CatalogEditorAddTableConstraintPrimaryKey)
+                }
+                HitTarget::CatalogEditorAddTableConstraintUnique => {
+                    Some(Action::CatalogEditorAddTableConstraintUnique)
+                }
+                HitTarget::CatalogEditorAddTableConstraintCheck => {
+                    Some(Action::CatalogEditorAddTableConstraintCheck)
+                }
+                HitTarget::CatalogEditorAddTableConstraintForeignKey => {
+                    Some(Action::CatalogEditorAddTableConstraintForeignKey)
+                }
+                HitTarget::CatalogEditorFocusTableConstraint(index) => {
+                    Some(Action::CatalogEditorFocusTableConstraint(index))
+                }
+                HitTarget::CatalogEditorRemoveTableConstraint(index) => {
+                    Some(Action::CatalogEditorRemoveTableConstraint(index))
+                }
+                HitTarget::CatalogEditorConstraintField { constraint, field } => {
+                    Some(Action::CatalogEditorFocusConstraintField { constraint, field })
+                }
                 HitTarget::CatalogEditorRemoveTableColumn => {
                     Some(Action::CatalogEditorRemoveTableColumn)
                 }
@@ -1660,6 +1688,13 @@ fn focus_at(ui: &UiState, column: u16, row: u16) -> Option<Focus> {
         | HitTarget::CatalogEditorTableField(_)
         | HitTarget::CatalogEditorTableColumn(_)
         | HitTarget::CatalogEditorAddTableColumn
+        | HitTarget::CatalogEditorAddTableConstraintPrimaryKey
+        | HitTarget::CatalogEditorAddTableConstraintUnique
+        | HitTarget::CatalogEditorAddTableConstraintCheck
+        | HitTarget::CatalogEditorAddTableConstraintForeignKey
+        | HitTarget::CatalogEditorFocusTableConstraint(_)
+        | HitTarget::CatalogEditorRemoveTableConstraint(_)
+        | HitTarget::CatalogEditorConstraintField { .. }
         | HitTarget::CatalogEditorRemoveTableColumn
         | HitTarget::CatalogEditorRestoreTableColumn
         | HitTarget::CatalogEditorRemoveTableColumnRow(_)

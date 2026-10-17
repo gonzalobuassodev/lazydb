@@ -213,13 +213,27 @@ pub async fn run(
                 ));
             }
             imported.profile.name = normalized_name.to_owned();
-            if let Some(path) = imported.profile.sqlite_path.as_mut()
-                && path.is_relative()
-            {
+            let relative_path = imported
+                .profile
+                .sqlite_path
+                .as_mut()
+                .filter(|path| path.is_relative())
+                .or_else(|| {
+                    imported
+                        .profile
+                        .duckdb_path
+                        .as_mut()
+                        .filter(|path| path.is_relative())
+                });
+            if let Some(path) = relative_path {
                 *path = std::env::current_dir()
-                    .map_err(|_| error("invalid_profile", "Unable to resolve the SQLite path.", 2))?
+                    .map_err(|_| {
+                        error("invalid_profile", "Unable to resolve the database path.", 2)
+                    })?
                     .join(&*path);
-                imported.profile.database = Some(path.to_string_lossy().into_owned());
+                if imported.profile.kind == crate::profile::DatabaseKind::Sqlite {
+                    imported.profile.database = Some(path.to_string_lossy().into_owned());
+                }
                 imported.profile.catalog_scope = crate::profile::CatalogScope::for_profile(
                     imported.profile.kind,
                     &imported.profile.database.clone().unwrap_or_default(),
@@ -501,13 +515,18 @@ pub async fn run(
             })?;
             let profile =
                 select_profile_from_collection(&report.collection, &context, &selector, false)?;
-            if profile.kind == crate::profile::DatabaseKind::Sqlite
-                && let Some(path) = profile.sqlite_path.as_ref()
+            if matches!(
+                profile.kind,
+                crate::profile::DatabaseKind::Sqlite | crate::profile::DatabaseKind::DuckDb
+            ) && let Some(path) = profile
+                .sqlite_path
+                .as_ref()
+                .or(profile.duckdb_path.as_ref())
                 && !path.exists()
             {
                 return Err(error(
                     "connection_failed",
-                    "The SQLite database file does not exist; test does not create it.",
+                    "The database file does not exist; test does not create it.",
                     6,
                 ));
             }

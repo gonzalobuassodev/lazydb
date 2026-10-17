@@ -101,4 +101,19 @@ fn keyboard_reference_is_dedicated_and_complete() {
     assert!(omni.contains("`Escape`"));
     assert!(omni.contains("remote search requires"));
     assert!(readme.contains("docs/omni-bar.md"));
+
+    let duckdb = include_str!("../docs/duckdb.md");
+    assert!(readme.contains("docs/duckdb.md"));
+    for term in [
+        "duckdb::memory:",
+        "read_only=true",
+        "temporary objects",
+        "MANUAL",
+        "TIME_NS",
+    ] {
+        assert!(
+            duckdb.contains(term),
+            "missing DuckDB documentation term {term}"
+        );
+    }
 }

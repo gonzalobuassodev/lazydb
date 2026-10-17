@@ -227,6 +227,7 @@ impl CatalogMutationCapabilities {
                         CatalogObjectType::Catalog(CatalogKind::View),
                         CatalogObjectType::Catalog(CatalogKind::MaterializedView),
                         CatalogObjectType::Catalog(CatalogKind::Sequence),
+                        CatalogObjectType::Catalog(CatalogKind::Index),
                     ],
                     CatalogKind::Table => vec![
                         CatalogObjectType::Catalog(CatalogKind::Column),
@@ -543,6 +544,7 @@ pub struct TableDefinition {
     pub columns: Vec<ColumnDefinition>,
     pub indexes: Vec<String>,
     pub constraints: Vec<String>,
+    pub structured_constraints: Vec<ConstraintDefinition>,
     pub baseline_fingerprint: String,
 }
 
