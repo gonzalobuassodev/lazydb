@@ -8345,21 +8345,29 @@ impl App {
                             },
                         )
                         .collect();
+                    let profile_context =
+                        Self::catalog_editor_profile(&selection.anchor).and_then(|profile_id| {
+                            self.profiles
+                                .iter()
+                                .find(|profile| profile.id == profile_id)
+                                .map(|profile| (profile_id, profile.kind))
+                        });
                     let mut editor = CatalogEditorState::new(
                         CatalogMutationMode::Create,
                         selection.anchor,
                         selection.catalog_epoch,
                         options,
                     );
-                    editor.database_kind = self.active_profile().map(|profile| profile.kind);
+                    editor.database_kind = profile_context.map(|(_, kind)| kind);
                     if editor.options.len() == 1 {
                         let view_capabilities = self.connection.mutation_capabilities.view_options;
                         Self::select_catalog_editor_option(&mut editor, 0, view_capabilities);
                     }
-                    if let Some(crate::model::catalog_editor::CatalogDraft::Schema(draft)) =
-                        editor.draft.as_mut()
+                    if editor.draft.is_some()
+                        && let Some((profile_id, kind)) = profile_context
                     {
-                        draft.owner.set(self.default_schema_owner());
+                        let owner = self.default_catalog_owner(profile_id);
+                        Self::initialize_catalog_create_owner(&mut editor, kind, owner);
                     }
                     self.catalog_editor = Some(editor);
                     self.overlay = Some(Overlay::CatalogEditor);
@@ -8897,9 +8905,23 @@ impl App {
             }
             Action::CatalogEditorSelect => {
                 let view_capabilities = self.connection.mutation_capabilities.view_options;
+                let owner_context = self
+                    .catalog_editor
+                    .as_ref()
+                    .and_then(|editor| Self::catalog_editor_profile(&editor.anchor))
+                    .and_then(|profile_id| {
+                        self.profiles
+                            .iter()
+                            .find(|profile| profile.id == profile_id)
+                            .map(|profile| (profile.kind, self.default_catalog_owner(profile_id)))
+                    });
                 if let Some(editor) = self.catalog_editor.as_mut() {
                     let selected = editor.selected_option;
-                    Self::select_catalog_editor_option(editor, selected, view_capabilities);
+                    if Self::select_catalog_editor_option(editor, selected, view_capabilities)
+                        && let Some((kind, owner)) = owner_context
+                    {
+                        Self::initialize_catalog_create_owner(editor, kind, owner);
+                    }
                 }
                 Vec::new()
             }
@@ -18956,6 +18978,36 @@ impl App {
         true
     }
 
+    fn catalog_editor_profile(anchor: &CatalogMutationAnchor) -> Option<Uuid> {
+        match anchor {
+            CatalogMutationAnchor::Profile { profile_id } => Some(*profile_id),
+            CatalogMutationAnchor::Catalog(id) => Some(id.profile_id()),
+            CatalogMutationAnchor::Group { schema, .. } => Some(schema.profile_id()),
+            CatalogMutationAnchor::Principal(entry) => Some(entry.id.profile_id),
+        }
+    }
+
+    fn initialize_catalog_create_owner(
+        editor: &mut CatalogEditorState,
+        database_kind: DatabaseKind,
+        owner: String,
+    ) {
+        if editor.mode != CatalogMutationMode::Create {
+            return;
+        }
+        match editor.draft.as_mut() {
+            Some(crate::model::catalog_editor::CatalogDraft::Database(draft))
+                if database_kind == DatabaseKind::Postgres =>
+            {
+                draft.owner.set(owner);
+            }
+            Some(crate::model::catalog_editor::CatalogDraft::Schema(draft)) => {
+                draft.owner.set(owner);
+            }
+            _ => {}
+        }
+    }
+
     fn close_profile_manager(&mut self) {
         let Some(manager) = self.profile_manager.as_ref() else {
             return;
@@ -21558,14 +21610,17 @@ impl App {
             })
     }
 
-    fn default_schema_owner(&self) -> String {
+    fn default_catalog_owner(&self, profile_id: Uuid) -> String {
         self.connection
-            .server
-            .as_ref()
+            .active_identity()
+            .filter(|identity| identity.profile_id == profile_id)
+            .and(self.connection.server.as_ref())
             .and_then(|server| server.current_user.as_deref())
             .filter(|user| !user.trim().is_empty())
             .or_else(|| {
-                self.active_profile()
+                self.profiles
+                    .iter()
+                    .find(|profile| profile.id == profile_id)
                     .and_then(|profile| profile.user.as_deref())
                     .filter(|user| !user.trim().is_empty())
             })
@@ -24662,6 +24717,8 @@ impl App {
         if !editor.select_object_type(object_type) {
             return Vec::new();
         }
+        let owner = self.default_catalog_owner(profile_id);
+        Self::initialize_catalog_create_owner(&mut editor, profile.kind, owner);
         self.catalog_editor = Some(editor);
         self.overlay = Some(Overlay::CatalogEditor);
         Vec::new()

@@ -8,6 +8,7 @@ use lazydb::{
             ViewOption,
         },
     },
+    model::explorer_add::ExplorerAddKind,
     model::{
         catalog_editor::{
             CatalogDraft, CatalogEditorPage, CatalogEditorState, CatalogFormFocus,
@@ -141,6 +142,284 @@ fn catalog_profile_form_name(app: &App) -> &str {
         CatalogDraft::Role(draft) => draft.name.value(),
         _ => panic!("profile form must be a database or role"),
     }
+}
+
+fn connected_postgres_app(current_user: Option<&str>) -> (App, Uuid) {
+    let profile = postgres_profile();
+    let profile_id = profile.id;
+    let mut app = App::new(vec![profile.clone()]);
+    connect_postgres_profile(&mut app, &profile, current_user);
+    (app, profile_id)
+}
+
+fn postgres_profile() -> ConnectionProfile {
+    let mut profile = import_connection_url("postgres://localhost/app", Some("postgres-test"))
+        .unwrap()
+        .profile;
+    profile.user = Some("login_user".into());
+    profile
+}
+
+fn connect_postgres_profile(
+    app: &mut App,
+    profile: &ConnectionProfile,
+    current_user: Option<&str>,
+) {
+    let generation = match app.update(Action::RequestConnect(profile.id)).as_slice() {
+        [lazydb::action::Command::Connect { generation, .. }] => *generation,
+        commands => panic!("unexpected commands: {commands:?}"),
+    };
+    app.update(Action::ConnectionSucceeded {
+        profile_id: profile.id,
+        generation,
+        server: lazydb::db::ServerInfo {
+            kind: lazydb::profile::DatabaseKind::Postgres,
+            version: "PostgreSQL 15".into(),
+            database: "app".into(),
+            current_user: current_user.map(str::to_owned),
+        },
+        mutation_capabilities:
+            lazydb::db::postgres::PostgresAdapter::catalog_mutation_capabilities_for_version(
+                150_000,
+            ),
+    });
+}
+
+fn open_database_from_add_menu(app: &mut App, profile_id: Uuid) {
+    app.explorer.normalized.selected = Some(ExplorerNodeId::Profile(profile_id));
+    app.update(Action::OpenExplorerAdd);
+    let index = match app.overlay.as_ref() {
+        Some(Overlay::ExplorerAdd(menu)) => menu
+            .options
+            .iter()
+            .position(|option| option.kind == ExplorerAddKind::Database)
+            .expect("database option"),
+        overlay => panic!("expected explorer add menu, got {overlay:?}"),
+    };
+    app.update(Action::ExplorerAddSelect(index));
+    app.update(Action::ExplorerAddConfirm);
+}
+
+fn database_draft(app: &App) -> &lazydb::model::catalog_editor::DatabaseDraft {
+    match app
+        .catalog_editor
+        .as_ref()
+        .and_then(|editor| editor.draft.as_ref())
+    {
+        Some(CatalogDraft::Database(draft)) => draft,
+        draft => panic!("expected database draft, got {draft:?}"),
+    }
+}
+
+#[test]
+fn new_database_owner_uses_effective_user_from_add_menu() {
+    let (mut app, profile_id) = connected_postgres_app(Some("effective_role"));
+    open_database_from_add_menu(&mut app, profile_id);
+
+    assert_eq!(app.overlay, Some(Overlay::CatalogEditor));
+    assert_eq!(
+        app.catalog_editor.as_ref().map(|editor| editor.page),
+        Some(CatalogEditorPage::Form)
+    );
+    let draft = database_draft(&app);
+    assert_eq!(draft.owner.value(), "effective_role");
+    assert!(draft.name.value().is_empty());
+    assert_eq!(draft.focus, CatalogFormFocus::Name);
+}
+
+#[test]
+fn new_database_owner_falls_back_to_profile_user_when_server_user_is_missing() {
+    for current_user in [None, Some(""), Some(" \t ")] {
+        let (mut app, profile_id) = connected_postgres_app(current_user);
+        open_database_from_add_menu(&mut app, profile_id);
+        assert_eq!(database_draft(&app).owner.value(), "login_user");
+    }
+
+    let mut profile = postgres_profile();
+    profile.user = Some(" \t ".into());
+    let profile_id = profile.id;
+    let mut app = App::new(vec![profile]);
+    let profile = app.profiles.first().expect("profile").clone();
+    connect_postgres_profile(&mut app, &profile, Some("  "));
+    open_database_from_add_menu(&mut app, profile_id);
+    assert!(database_draft(&app).owner.value().is_empty());
+}
+
+#[test]
+fn new_database_owner_keeps_effective_user_verbatim() {
+    let (mut app, profile_id) = connected_postgres_app(Some("  effective role  "));
+    open_database_from_add_menu(&mut app, profile_id);
+    assert_eq!(database_draft(&app).owner.value(), "  effective role  ");
+}
+
+#[test]
+fn new_database_owner_does_not_use_another_profiles_server_user() {
+    let (mut app, active_profile_id) = connected_postgres_app(Some("active_role"));
+    let target_profile = postgres_profile();
+    let target_profile_id = target_profile.id;
+    app.profiles.push(target_profile.clone());
+    app.explorer.normalized.profiles.insert(
+        target_profile_id,
+        lazydb::model::explorer::ExplorerProfileState::new(
+            target_profile_id,
+            target_profile.name.clone(),
+            target_profile.kind,
+            "localhost".into(),
+            lazydb::model::explorer::ProfileProvenance::Saved,
+            lazydb::model::explorer::ProfilePlacement::default(),
+        ),
+    );
+    app.explorer.normalized.selected = Some(ExplorerNodeId::Profile(target_profile_id));
+
+    app.update(Action::OpenCatalogCreate);
+    let index = app
+        .catalog_editor
+        .as_ref()
+        .expect("catalog editor")
+        .options
+        .iter()
+        .position(|option| option.object_type == CatalogObjectType::Catalog(CatalogKind::Database))
+        .expect("database option");
+    app.update(Action::CatalogEditorMove(index as isize));
+    app.update(Action::CatalogEditorSelect);
+
+    assert_eq!(
+        app.connection.active_identity().unwrap().profile_id,
+        active_profile_id
+    );
+    assert_eq!(database_draft(&app).owner.value(), "login_user");
+}
+
+#[test]
+fn new_database_owner_is_not_applied_to_other_database_kinds() {
+    for (url, kind) in [
+        (
+            "mysql://login_user@localhost/app",
+            lazydb::profile::DatabaseKind::MySql,
+        ),
+        (
+            "mariadb://login_user@localhost/app",
+            lazydb::profile::DatabaseKind::MariaDb,
+        ),
+        (
+            "clickhouse://login_user@localhost/app",
+            lazydb::profile::DatabaseKind::ClickHouse,
+        ),
+    ] {
+        let profile = import_connection_url(url, Some("test-profile"))
+            .unwrap()
+            .profile;
+        let profile_id = profile.id;
+        let mut app = App::new(vec![profile]);
+        let generation = match app.update(Action::RequestConnect(profile_id)).as_slice() {
+            [lazydb::action::Command::Connect { generation, .. }] => *generation,
+            commands => panic!("unexpected commands: {commands:?}"),
+        };
+        app.update(Action::ConnectionSucceeded {
+            profile_id,
+            generation,
+            server: lazydb::db::ServerInfo {
+                kind,
+                version: "test server".into(),
+                database: "app".into(),
+                current_user: Some("server_user".into()),
+            },
+            mutation_capabilities: match kind {
+                lazydb::profile::DatabaseKind::MySql | lazydb::profile::DatabaseKind::MariaDb => {
+                    lazydb::db::mysql::MySqlAdapter::catalog_mutation_capabilities()
+                }
+                lazydb::profile::DatabaseKind::ClickHouse => {
+                    lazydb::db::clickhouse::ClickHouseAdapter::catalog_mutation_capabilities()
+                }
+                _ => unreachable!(),
+            },
+        });
+        open_database_from_add_menu(&mut app, profile_id);
+        let draft = database_draft(&app);
+        assert_eq!(draft.database_kind, kind);
+        assert!(draft.owner.value().is_empty());
+    }
+}
+
+#[test]
+fn new_database_owner_uses_effective_user_from_object_picker() {
+    let (mut app, profile_id) = connected_postgres_app(Some("effective_role"));
+    app.explorer.normalized.selected = Some(ExplorerNodeId::Profile(profile_id));
+    app.update(Action::OpenCatalogCreate);
+    let index = app
+        .catalog_editor
+        .as_ref()
+        .expect("catalog editor")
+        .options
+        .iter()
+        .position(|option| option.object_type == CatalogObjectType::Catalog(CatalogKind::Database))
+        .expect("database option");
+    app.update(Action::CatalogEditorMove(index as isize));
+    app.update(Action::CatalogEditorSelect);
+
+    assert_eq!(database_draft(&app).owner.value(), "effective_role");
+}
+
+#[test]
+fn new_database_owner_preserves_edits_and_reinitializes_only_when_reopened() {
+    let (mut app, profile_id) = connected_postgres_app(Some("effective_role"));
+    open_database_from_add_menu(&mut app, profile_id);
+    app.update(Action::CatalogEditorFocusFormField(CatalogFormFocus::Owner));
+    for _ in 0.."effective_role".chars().count() {
+        app.update(Action::CatalogEditorBackspace);
+    }
+    for character in "custom_owner".chars() {
+        app.update(Action::CatalogEditorInsert(character));
+    }
+    app.update(Action::CatalogEditorFieldNext);
+    assert_eq!(database_draft(&app).owner.value(), "custom_owner");
+
+    app.update(Action::CatalogEditorFocusFormField(CatalogFormFocus::Owner));
+    for _ in 0.."custom_owner".chars().count() {
+        app.update(Action::CatalogEditorBackspace);
+    }
+    app.update(Action::CatalogEditorFieldNext);
+    assert!(database_draft(&app).owner.value().is_empty());
+    app.update(Action::CatalogEditorFocusFormField(CatalogFormFocus::Name));
+    for character in "app_db".chars() {
+        app.update(Action::CatalogEditorInsert(character));
+    }
+    let error = database_draft(&app).validate().unwrap_err().to_string();
+    assert!(error.contains("database name and owner are required"));
+
+    app.update(Action::CatalogEditorCancel);
+    open_database_from_add_menu(&mut app, profile_id);
+    assert_eq!(database_draft(&app).owner.value(), "effective_role");
+}
+
+#[test]
+fn new_database_owner_uses_target_profile_user_for_a_different_anchor() {
+    let (mut app, active_profile_id) = connected_postgres_app(Some("active_role"));
+    let target_profile = postgres_profile();
+    let target_profile_id = target_profile.id;
+    app.profiles.push(target_profile);
+    let mut editor = CatalogEditorState::new(
+        CatalogMutationMode::Create,
+        CatalogMutationAnchor::Profile {
+            profile_id: target_profile_id,
+        },
+        0,
+        vec![lazydb::model::catalog_editor::CatalogMutationOption {
+            object_type: CatalogObjectType::Catalog(CatalogKind::Database),
+            label: "Database".into(),
+        }],
+    );
+    editor.database_kind = Some(lazydb::profile::DatabaseKind::Postgres);
+    app.catalog_editor = Some(editor);
+    app.update(Action::CatalogEditorSelect);
+
+    assert_eq!(database_draft(&app).owner.value(), "login_user");
+    assert_ne!(
+        app.connection.active_identity().unwrap().profile_id,
+        target_profile_id
+    );
+    assert_ne!(database_draft(&app).owner.value(), "active_role");
+    assert_ne!(active_profile_id, target_profile_id);
 }
 
 #[test]
