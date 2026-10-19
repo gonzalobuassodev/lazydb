@@ -739,9 +739,10 @@ impl App {
             | DatabaseKind::MariaDb
             | DatabaseKind::SqlServer
             | DatabaseKind::Oracle => crate::db::principal::PrincipalCapability::DdlOnly,
-            DatabaseKind::Sqlite | DatabaseKind::Redis | DatabaseKind::MongoDb => {
-                crate::db::principal::PrincipalCapability::Unsupported
-            }
+            DatabaseKind::Sqlite
+            | DatabaseKind::DuckDb
+            | DatabaseKind::Redis
+            | DatabaseKind::MongoDb => crate::db::principal::PrincipalCapability::Unsupported,
             DatabaseKind::ClickHouse => {
                 crate::db::clickhouse::ClickHouseAdapter::principal_capability()
             }
@@ -2117,6 +2118,7 @@ impl App {
                 DatabaseKind::MySql | DatabaseKind::MariaDb => SqlDialect::MySql,
                 DatabaseKind::Oracle => SqlDialect::Generic,
                 DatabaseKind::Sqlite => SqlDialect::Sqlite,
+                DatabaseKind::DuckDb => SqlDialect::DuckDb,
                 DatabaseKind::SqlServer => SqlDialect::SqlServer,
                 DatabaseKind::Redis | DatabaseKind::MongoDb => SqlDialect::Generic,
                 DatabaseKind::ClickHouse => SqlDialect::ClickHouse,
@@ -2385,12 +2387,24 @@ impl App {
             && self
                 .editor_text(self.sql_editors[0].id)
                 .is_ok_and(|text| text.is_empty());
+        let profile_console_ids = self
+            .sql_editors
+            .iter()
+            .filter(|record| {
+                record.execution_target.as_ref().is_some_and(|target| {
+                    self.profiles
+                        .iter()
+                        .any(|profile| profile.id == target.profile_id)
+                })
+            })
+            .map(|record| record.id)
+            .collect::<HashSet<_>>();
         let global_editors = if has_unpersisted_default_console {
             Vec::new()
         } else {
             self.sql_editors
                 .iter()
-                .filter(|record| record.execution_target.is_none())
+                .filter(|record| !profile_console_ids.contains(&record.id))
                 .cloned()
                 .collect::<Vec<_>>()
         };
@@ -2401,7 +2415,7 @@ impl App {
                 .iter()
                 .filter(|tab| {
                     tab.as_console()
-                        .is_some_and(|console| console.execution_target.is_none())
+                        .is_some_and(|console| !profile_console_ids.contains(&console.id))
                 })
                 .cloned()
                 .collect::<Vec<_>>()
@@ -8900,6 +8914,34 @@ impl App {
                 }
                 if let Some(draft) = self.catalog_editor.as_mut().and_then(|e| e.draft.as_mut()) {
                     if matches!(draft, crate::model::catalog_editor::CatalogDraft::Table(_)) {
+                        if let crate::model::catalog_editor::CatalogDraft::Table(table) = draft {
+                            if let Some(index) = match table.focus {
+                                crate::model::catalog_editor::TableEditorFocus::Action(
+                                    crate::model::catalog_editor::TableActionField::Constraint(index)
+                                    | crate::model::catalog_editor::TableActionField::RemoveConstraint(index),
+                                ) => Some(index),
+                                _ => None,
+                            } && let Some(constraint) = table.table_constraints.get_mut(index)
+                            {
+                                constraint.move_field(1);
+                                return Vec::new();
+                            }
+                            if matches!(
+                                table.focus,
+                                crate::model::catalog_editor::TableEditorFocus::Action(
+                                    crate::model::catalog_editor::TableActionField::AddColumn
+                                        | crate::model::catalog_editor::TableActionField::AddConstraintPrimaryKey
+                                        | crate::model::catalog_editor::TableActionField::AddConstraintUnique
+                                        | crate::model::catalog_editor::TableActionField::AddConstraintCheck
+                                        | crate::model::catalog_editor::TableActionField::AddConstraintForeignKey
+                                        | crate::model::catalog_editor::TableActionField::Review
+                                        | crate::model::catalog_editor::TableActionField::Cancel
+                                )
+                            ) {
+                                table.focus_next();
+                                return Vec::new();
+                            }
+                        }
                         draft.move_field(1, allow_with_data);
                         return Vec::new();
                     }
@@ -8968,6 +9010,34 @@ impl App {
                 }
                 if let Some(draft) = self.catalog_editor.as_mut().and_then(|e| e.draft.as_mut()) {
                     if matches!(draft, crate::model::catalog_editor::CatalogDraft::Table(_)) {
+                        if let crate::model::catalog_editor::CatalogDraft::Table(table) = draft {
+                            if let Some(index) = match table.focus {
+                                crate::model::catalog_editor::TableEditorFocus::Action(
+                                    crate::model::catalog_editor::TableActionField::Constraint(index)
+                                    | crate::model::catalog_editor::TableActionField::RemoveConstraint(index),
+                                ) => Some(index),
+                                _ => None,
+                            } && let Some(constraint) = table.table_constraints.get_mut(index)
+                            {
+                                constraint.move_field(-1);
+                                return Vec::new();
+                            }
+                            if matches!(
+                                table.focus,
+                                crate::model::catalog_editor::TableEditorFocus::Action(
+                                    crate::model::catalog_editor::TableActionField::AddColumn
+                                        | crate::model::catalog_editor::TableActionField::AddConstraintPrimaryKey
+                                        | crate::model::catalog_editor::TableActionField::AddConstraintUnique
+                                        | crate::model::catalog_editor::TableActionField::AddConstraintCheck
+                                        | crate::model::catalog_editor::TableActionField::AddConstraintForeignKey
+                                        | crate::model::catalog_editor::TableActionField::Review
+                                        | crate::model::catalog_editor::TableActionField::Cancel
+                                )
+                            ) {
+                                table.focus_previous();
+                                return Vec::new();
+                            }
+                        }
                         draft.move_field(-1, allow_with_data);
                         return Vec::new();
                     }
@@ -9098,6 +9168,15 @@ impl App {
                         field,
                         crate::model::catalog_editor::TableEditorFocus::ColumnDetails(_)
                     );
+                    if let crate::model::catalog_editor::TableEditorFocus::Action(
+                        crate::model::catalog_editor::TableActionField::Constraint(index),
+                    ) = field
+                    {
+                        if draft.table_constraints.get(index).is_some() {
+                            draft.focus = field;
+                        }
+                        return Vec::new();
+                    }
                     if draft.column_editor.is_some() == details_field {
                         if draft.focus != field {
                             draft.finish_edit_group();
@@ -9227,6 +9306,150 @@ impl App {
                 {
                     draft.begin_add_column_below();
                     draft.finish_edit_group();
+                }
+                Vec::new()
+            }
+            Action::CatalogEditorAddTableConstraintPrimaryKey
+            | Action::CatalogEditorAddTableConstraintUnique
+            | Action::CatalogEditorAddTableConstraintCheck
+            | Action::CatalogEditorAddTableConstraintForeignKey => {
+                if let Some(crate::model::catalog_editor::CatalogDraft::Table(draft)) = self
+                    .catalog_editor
+                    .as_mut()
+                    .and_then(|editor| editor.draft.as_mut())
+                {
+                    let schema = draft.schema.value().to_owned();
+                    let relation = draft.name.value().to_owned();
+                    let kind = match action {
+                        Action::CatalogEditorAddTableConstraintPrimaryKey => {
+                            crate::db::catalog_mutation::ConstraintDefinitionKind::PrimaryKey {
+                                columns: Vec::new(),
+                            }
+                        }
+                        Action::CatalogEditorAddTableConstraintUnique => {
+                            crate::db::catalog_mutation::ConstraintDefinitionKind::Unique {
+                                columns: Vec::new(),
+                            }
+                        }
+                        Action::CatalogEditorAddTableConstraintForeignKey => {
+                            crate::db::catalog_mutation::ConstraintDefinitionKind::ForeignKey {
+                                columns: Vec::new(),
+                                referenced_schema: schema.clone(),
+                                referenced_relation: String::new(),
+                                referenced_columns: Vec::new(),
+                                match_type: "SIMPLE".into(),
+                                on_update: "NO ACTION".into(),
+                                on_delete: "NO ACTION".into(),
+                            }
+                        }
+                        _ => crate::db::catalog_mutation::ConstraintDefinitionKind::Check {
+                            expression: String::new(),
+                            no_inherit: false,
+                        },
+                    };
+                    let mut constraint = crate::model::catalog_editor::ConstraintDraft::new(
+                        kind, &schema, &relation,
+                    );
+                    let suffix = draft.table_constraints.len() + 1;
+                    constraint.name = format!("{}_constraint_{}", relation, suffix).into();
+                    match action {
+                        Action::CatalogEditorAddTableConstraintPrimaryKey => {
+                            constraint.columns = draft
+                                .columns
+                                .iter()
+                                .find(|column| {
+                                    !matches!(
+                                        column.state,
+                                        crate::model::catalog_editor::DraftRowState::Removed { .. }
+                                    )
+                                })
+                                .map(|column| column.name.value().to_owned())
+                                .unwrap_or_default()
+                                .into()
+                        }
+                        Action::CatalogEditorAddTableConstraintUnique => {
+                            constraint.columns = draft
+                                .columns
+                                .iter()
+                                .find(|column| {
+                                    !matches!(
+                                        column.state,
+                                        crate::model::catalog_editor::DraftRowState::Removed { .. }
+                                    )
+                                })
+                                .map(|column| column.name.value().to_owned())
+                                .unwrap_or_default()
+                                .into()
+                        }
+                        Action::CatalogEditorAddTableConstraintCheck => {
+                            constraint.expression = "TRUE".into()
+                        }
+                        Action::CatalogEditorAddTableConstraintForeignKey => {
+                            constraint.columns = draft
+                                .columns
+                                .iter()
+                                .find(|column| {
+                                    !matches!(
+                                        column.state,
+                                        crate::model::catalog_editor::DraftRowState::Removed { .. }
+                                    )
+                                })
+                                .map(|column| column.name.value().to_owned())
+                                .unwrap_or_default()
+                                .into();
+                            constraint.referenced_relation = relation.clone().into();
+                            constraint.referenced_columns =
+                                constraint.columns.value().to_owned().into();
+                        }
+                        _ => {}
+                    }
+                    draft.add_constraint(constraint);
+                }
+                Vec::new()
+            }
+            Action::CatalogEditorFocusTableConstraint(index) => {
+                if let Some(crate::model::catalog_editor::CatalogDraft::Table(draft)) = self
+                    .catalog_editor
+                    .as_mut()
+                    .and_then(|editor| editor.draft.as_mut())
+                {
+                    if let Some(constraint) = draft.table_constraints.get_mut(index) {
+                        constraint.move_field(-((constraint.selected_field as isize).min(9)));
+                        draft.focus = crate::model::catalog_editor::TableEditorFocus::Action(
+                            crate::model::catalog_editor::TableActionField::Constraint(index),
+                        );
+                    }
+                }
+                Vec::new()
+            }
+            Action::CatalogEditorFocusConstraintField { constraint, field } => {
+                if let Some(crate::model::catalog_editor::CatalogDraft::Table(draft)) = self
+                    .catalog_editor
+                    .as_mut()
+                    .and_then(|editor| editor.draft.as_mut())
+                    && let Some(item) = draft.table_constraints.get_mut(constraint)
+                    && field
+                        <= match item.kind {
+                            crate::db::catalog_mutation::ConstraintDefinitionKind::ForeignKey {
+                                ..
+                            } => 6,
+                            _ => 1,
+                        }
+                {
+                    item.selected_field = field;
+                    draft.focus = crate::model::catalog_editor::TableEditorFocus::Action(
+                        crate::model::catalog_editor::TableActionField::Constraint(constraint),
+                    );
+                }
+                Vec::new()
+            }
+            Action::CatalogEditorRemoveTableConstraint(index) => {
+                if let Some(crate::model::catalog_editor::CatalogDraft::Table(draft)) = self
+                    .catalog_editor
+                    .as_mut()
+                    .and_then(|editor| editor.draft.as_mut())
+                {
+                    draft.remove_constraint(index);
                 }
                 Vec::new()
             }
@@ -9782,6 +10005,7 @@ impl App {
                         editor.mode == crate::db::catalog_mutation::CatalogMutationMode::Create;
                     if let Some(draft) = editor.draft.as_mut() {
                         match draft {
+                            crate::model::catalog_editor::CatalogDraft::Table(_) => {}
                             crate::model::catalog_editor::CatalogDraft::MaterializedView(draft) => {
                                 draft.toggle_focused(create_mode);
                             }
@@ -18553,6 +18777,7 @@ impl App {
                 DatabaseKind::Sqlite => {
                     crate::db::sqlite::SqliteAdapter::catalog_mutation_capabilities()
                 }
+                DatabaseKind::DuckDb => Default::default(),
                 DatabaseKind::SqlServer => {
                     crate::db::mssql::MsSqlAdapter::catalog_mutation_capabilities()
                 }
@@ -19653,6 +19878,15 @@ impl App {
                 command,
             ));
         }
+        let console_release = if was_console {
+            self.database_command_identity()
+                .map(|connection| Command::ReleaseDuckDbConsole {
+                    connection,
+                    console_id: id,
+                })
+        } else {
+            None
+        };
         self.pending_executions.remove(&id);
         let closed_mongo = matches!(self.tabs.get(index), Some(WorkspaceTab::MongoConsole(_)));
         if let Some(tab) = self.tabs[index].as_console()
@@ -19714,6 +19948,9 @@ impl App {
         self.active_tab = self.active_tab.min(self.tabs.len().saturating_sub(1));
         self.normalize_focus();
         let mut commands = cancel;
+        if let Some(command) = console_release {
+            commands.push(command);
+        }
         if let Some(command) = dashboard_cancel {
             commands.push(command);
         }
@@ -20751,6 +20988,9 @@ impl App {
             profile_id,
             generation,
         }));
+        let console_id = editor_target_console
+            .or_else(|| self.active_console_opt().map(|console| console.id))
+            .unwrap_or(profile_id);
         if let Some(active_profile_id) = self.connection.profile_id.filter(|id| *id != profile_id)
             && let Some(state) = self
                 .explorer
@@ -20770,6 +21010,7 @@ impl App {
                 profile_id,
                 generation,
                 target,
+                console_id,
             });
         }
         commands
@@ -20802,9 +21043,10 @@ impl App {
                 let schema = match profile.kind {
                     DatabaseKind::MySql | DatabaseKind::MariaDb => Some(database.clone()),
                     DatabaseKind::Oracle => entry.qualified_name.schema.clone(),
-                    DatabaseKind::Postgres | DatabaseKind::SqlServer | DatabaseKind::Sqlite => {
-                        entry.qualified_name.schema.clone()
-                    }
+                    DatabaseKind::Postgres
+                    | DatabaseKind::SqlServer
+                    | DatabaseKind::Sqlite
+                    | DatabaseKind::DuckDb => entry.qualified_name.schema.clone(),
                     DatabaseKind::Redis | DatabaseKind::MongoDb => None,
                     DatabaseKind::ClickHouse => Some(database.clone()),
                 };
@@ -21001,7 +21243,7 @@ impl App {
                 profile_id: profile.id,
                 schema: match profile.kind {
                     DatabaseKind::MySql | DatabaseKind::MariaDb => Some(database.clone()),
-                    DatabaseKind::Sqlite => Some("main".to_owned()),
+                    DatabaseKind::Sqlite | DatabaseKind::DuckDb => Some("main".to_owned()),
                     DatabaseKind::Postgres | DatabaseKind::SqlServer | DatabaseKind::Oracle => None,
                     DatabaseKind::Redis | DatabaseKind::MongoDb => None,
                     DatabaseKind::ClickHouse => Some(database.clone()),
@@ -21954,6 +22196,7 @@ impl App {
             DatabaseKind::MySql | DatabaseKind::MariaDb => SqlDialect::MySql,
             DatabaseKind::Oracle => SqlDialect::Oracle,
             DatabaseKind::Sqlite => SqlDialect::Sqlite,
+            DatabaseKind::DuckDb => SqlDialect::DuckDb,
             DatabaseKind::SqlServer => SqlDialect::SqlServer,
             DatabaseKind::Redis | DatabaseKind::MongoDb => SqlDialect::Generic,
             DatabaseKind::ClickHouse => SqlDialect::ClickHouse,
@@ -21966,6 +22209,7 @@ impl App {
             Some(DatabaseKind::MySql | DatabaseKind::MariaDb) => SqlDialect::MySql,
             Some(DatabaseKind::Oracle) => SqlDialect::Oracle,
             Some(DatabaseKind::Sqlite) => SqlDialect::Sqlite,
+            Some(DatabaseKind::DuckDb) => SqlDialect::DuckDb,
             Some(DatabaseKind::SqlServer) => SqlDialect::SqlServer,
             Some(DatabaseKind::Redis | DatabaseKind::MongoDb) => SqlDialect::Generic,
             Some(DatabaseKind::ClickHouse) => SqlDialect::ClickHouse,
@@ -21987,6 +22231,7 @@ impl App {
             Some(DatabaseKind::MySql | DatabaseKind::MariaDb) => SqlDialect::MySql,
             Some(DatabaseKind::Oracle) => SqlDialect::Oracle,
             Some(DatabaseKind::Sqlite) => SqlDialect::Sqlite,
+            Some(DatabaseKind::DuckDb) => SqlDialect::DuckDb,
             Some(DatabaseKind::SqlServer) => SqlDialect::SqlServer,
             Some(DatabaseKind::Redis | DatabaseKind::MongoDb) | None => SqlDialect::Generic,
             Some(DatabaseKind::ClickHouse) => SqlDialect::ClickHouse,
@@ -22394,6 +22639,7 @@ impl App {
     ) -> Vec<Command> {
         use sql::TransactionControl;
         let tab = self.active_console();
+        let console_id = tab.id;
         let Some(target) = tab.execution_target.clone() else {
             self.notify_warning("Query", "Select an execution target before running SQL");
             return Vec::new();
@@ -22439,6 +22685,7 @@ impl App {
                     connection,
                     target,
                     tab_id,
+                    console_id,
                     query_generation,
                     transaction_generation,
                 }]
@@ -22470,6 +22717,7 @@ impl App {
         sql: String,
     ) -> Vec<Command> {
         let tab = self.active_console();
+        let console_id = tab.id;
         let Some(target) = tab.execution_target.clone() else {
             self.notify_warning("Query", "Select an execution target before running SQL");
             return Vec::new();
@@ -22496,6 +22744,7 @@ impl App {
             connection,
             target,
             tab_id,
+            console_id,
             query_generation,
             transaction_generation,
             sql,
@@ -22638,6 +22887,7 @@ impl App {
         let Some(tab) = tab.and_then(WorkspaceTab::as_console_mut) else {
             return Vec::new();
         };
+        let console_id = tab.id;
         tab.execution_connection = Some(draft.connection);
         if draft.transaction_mode == TransactionMode::Manual {
             let connection = draft.connection;
@@ -22667,6 +22917,7 @@ impl App {
                     connection,
                     target,
                     tab_id,
+                    console_id,
                     query_generation,
                     transaction_generation: tab.transaction_generation,
                     sql,
@@ -22688,6 +22939,7 @@ impl App {
                 target: draft.target,
                 tab_id: draft.console_id,
                 generation,
+                console_id: draft.console_id,
                 source_sql: draft.sql,
                 dialect: draft.dialect,
                 page: crate::model::pagination::PageRequest::first(
@@ -22700,6 +22952,7 @@ impl App {
                 target: draft.target,
                 tab_id: draft.console_id,
                 generation,
+                console_id: draft.console_id,
                 sql: draft.sql,
             }]
         }
@@ -22748,6 +23001,7 @@ impl App {
                 connection,
                 target,
                 tab_id,
+                console_id: tab_id,
                 source_generation,
                 derived_generation,
                 source_sql,
@@ -22798,6 +23052,7 @@ impl App {
                 connection,
                 target,
                 tab_id,
+                console_id: tab.id,
                 query_generation,
                 transaction_generation,
                 source_sql,
@@ -22846,6 +23101,7 @@ impl App {
             target,
             tab_id,
             generation,
+            console_id: tab_id,
             source_sql,
             dialect,
             page,
@@ -26817,6 +27073,7 @@ impl App {
             connection,
             target,
             tab_id,
+            console_id: tab_id,
             source_generation,
             derived_generation,
             source_sql,
@@ -27889,6 +28146,9 @@ impl App {
     }
 
     fn load_relation_metadata_for_save(&mut self, connection: ConnectionIdentity) -> Vec<Command> {
+        let console_id = self
+            .active_console_opt()
+            .map_or(Uuid::nil(), |console| console.id);
         let Some(profile) = self
             .profiles
             .iter()
@@ -27917,6 +28177,7 @@ impl App {
         }
         let request = RelationRequest {
             tab_id: tab.id,
+            console_id,
             tab_generation: tab.generation,
             request_id: tab.next_request_id,
             connection,
@@ -28572,6 +28833,9 @@ impl App {
         descriptor: RelationDescriptor,
         connection: ConnectionIdentity,
     ) -> Vec<Command> {
+        let console_id = self
+            .active_console_opt()
+            .map_or(Uuid::nil(), |console| console.id);
         let Some(scope) = self
             .profiles
             .iter()
@@ -28610,6 +28874,7 @@ impl App {
             };
             let request = RelationRequest {
                 tab_id: tab.id,
+                console_id,
                 tab_generation: tab.generation,
                 request_id: tab.next_request_id,
                 connection,
@@ -28648,6 +28913,10 @@ impl App {
         refresh: bool,
         requested_page: Option<crate::model::pagination::PageRequest>,
     ) -> Vec<Command> {
+        let console_id = self
+            .tabs
+            .get(self.active_tab)
+            .map_or(Uuid::nil(), WorkspaceTab::id);
         if let Some(WorkspaceTab::Relation(tab)) = self.tabs.get(self.active_tab)
             && (tab.transaction_state != TransactionState::Idle || relation_has_pending_edits(tab))
         {
@@ -28760,6 +29029,7 @@ impl App {
         };
         let request = RelationRequest {
             tab_id: tab.id,
+            console_id,
             tab_generation: tab.generation,
             request_id: tab.next_request_id,
             connection,
@@ -29159,6 +29429,11 @@ fn add_explorer_profile(
             .map(|path| path.to_string_lossy().into_owned())
             .or_else(|| profile.database.clone())
             .unwrap_or_default(),
+        DatabaseKind::DuckDb => profile
+            .duckdb_path
+            .as_ref()
+            .map(|path| path.to_string_lossy().into_owned())
+            .unwrap_or_else(|| "memory".to_owned()),
         DatabaseKind::Postgres
         | DatabaseKind::MySql
         | DatabaseKind::MariaDb
@@ -32039,6 +32314,7 @@ mod tests {
             .unwrap_or_else(|| "items".into());
         let request = RelationRequest {
             tab_id: Uuid::new_v4(),
+            console_id: Uuid::new_v4(),
             tab_generation: 0,
             request_id: 0,
             connection,
@@ -32289,6 +32565,9 @@ mod tests {
         let scope = app.profiles[0].catalog_scope.clone();
         let request = RelationRequest {
             tab_id,
+            console_id: app
+                .active_console_opt()
+                .map_or(tab_id, |console| console.id),
             tab_generation: 0,
             request_id: 1,
             connection: app.connection.active_identity().unwrap(),
@@ -33934,6 +34213,7 @@ mod tests {
             .profile;
         let profile_id = profile.id;
         let mut app = App::new(vec![profile]);
+        app.update(Action::NewConsole);
         let commands = app.update(Action::RequestProfileConnect { profile_id });
         let generation = match commands[0] {
             Command::Connect { generation, .. } => generation,

@@ -136,6 +136,7 @@ impl DatabaseKindLabel for DatabaseKind {
             DatabaseKind::MariaDb => "MariaDB",
             DatabaseKind::Oracle => "Oracle",
             DatabaseKind::Sqlite => "SQLite",
+            DatabaseKind::DuckDb => "DuckDB",
             DatabaseKind::SqlServer => "SQL Server",
             DatabaseKind::Redis => "Redis",
             DatabaseKind::MongoDb => "MongoDB",

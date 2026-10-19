@@ -71,6 +71,7 @@ mod tests {
             default_schema: Some("public".into()),
             sqlite_path: None,
             mongodb_options: None,
+            duckdb_path: None,
             ssl_mode: Default::default(),
             credential_policy: Default::default(),
             read_only: false,
@@ -194,12 +195,25 @@ impl ExecutionTarget {
                     .as_ref()
                     .map(|path| path.display().to_string())
             })
+            .or_else(|| {
+                profile
+                    .duckdb_path
+                    .as_ref()
+                    .map(|path| path.display().to_string())
+            })
+            .or_else(|| (profile.kind == DatabaseKind::DuckDb).then(|| "memory".to_owned()))
             .unwrap_or_default();
         let schema = match profile.kind {
             DatabaseKind::MySql | DatabaseKind::MariaDb | DatabaseKind::ClickHouse => {
                 Some(database.clone())
             }
             DatabaseKind::Sqlite => Some("main".to_owned()),
+            DatabaseKind::DuckDb => Some(
+                profile
+                    .default_schema
+                    .clone()
+                    .unwrap_or_else(|| "main".into()),
+            ),
             DatabaseKind::Postgres | DatabaseKind::SqlServer | DatabaseKind::Oracle => {
                 profile.default_schema.clone()
             }
@@ -227,6 +241,12 @@ impl ExecutionTarget {
                         .allows_schema(&self.database, &self.database)
             }
             DatabaseKind::Sqlite => {
+                profile.database.as_deref() == Some(self.database.as_str())
+                    && self.schema.as_deref().is_some_and(|schema| {
+                        profile.catalog_scope.allows_schema(&self.database, schema)
+                    })
+            }
+            DatabaseKind::DuckDb => {
                 profile.database.as_deref() == Some(self.database.as_str())
                     && self.schema.as_deref().is_some_and(|schema| {
                         profile.catalog_scope.allows_schema(&self.database, schema)
@@ -261,6 +281,7 @@ impl ExecutionTarget {
                 configured.default_schema = Some(self.database.clone());
             }
             DatabaseKind::Sqlite => {}
+            DatabaseKind::DuckDb => configured.default_schema = self.schema.clone(),
             DatabaseKind::Redis | DatabaseKind::MongoDb => {
                 configured.database = Some(self.database.clone());
                 configured.default_schema = None;

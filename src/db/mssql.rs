@@ -853,6 +853,7 @@ impl MsSqlAdapter {
                     columns,
                     indexes,
                     constraints,
+                    structured_constraints: Vec::new(),
                     baseline_fingerprint,
                 }))
             }
@@ -4690,6 +4691,7 @@ mod tests {
             default_schema: Some("dbo".to_owned()),
             sqlite_path: None,
             mongodb_options: None,
+            duckdb_path: None,
             ssl_mode,
             credential_policy: CredentialPolicy::Prompt,
             read_only: false,

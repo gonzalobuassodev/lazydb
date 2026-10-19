@@ -68,6 +68,10 @@ pub async fn discover_index(
                 ObjectGroup::Tables,
                 ObjectGroup::Views,
                 ObjectGroup::MaterializedViews,
+                ObjectGroup::Sequences,
+                ObjectGroup::Types,
+                ObjectGroup::Functions,
+                ObjectGroup::Procedures,
             ] {
                 let Ok(target) = CatalogTarget::objects(schema.id.clone(), group) else {
                     continue;

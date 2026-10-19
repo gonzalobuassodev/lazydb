@@ -22,4 +22,8 @@ fn database_kind_mapping_has_one_canonical_sql_dialect() {
         SqlDialect::for_database_kind(DatabaseKind::ClickHouse),
         SqlDialect::ClickHouse
     );
+    assert_eq!(
+        SqlDialect::for_database_kind(DatabaseKind::DuckDb),
+        SqlDialect::DuckDb
+    );
 }

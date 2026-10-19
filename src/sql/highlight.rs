@@ -846,6 +846,7 @@ fn dialect_ref(dialect: SqlDialect) -> &'static dyn Dialect {
         SqlDialect::MySql | SqlDialect::MariaDb => &MySqlDialect {},
         SqlDialect::SqlServer => &MsSqlDialect {},
         SqlDialect::Sqlite => &SQLiteDialect {},
+        SqlDialect::DuckDb => &sqlparser::dialect::DuckDbDialect {},
         SqlDialect::Generic | SqlDialect::Oracle => &GenericDialect {},
         SqlDialect::ClickHouse => &ClickHouseDialect {},
     }

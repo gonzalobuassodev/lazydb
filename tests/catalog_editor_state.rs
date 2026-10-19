@@ -303,6 +303,7 @@ fn table_change_summary_ignores_focus_and_text_cursor_changes() {
         }],
         indexes: vec![],
         constraints: vec![],
+        structured_constraints: vec![],
         baseline_fingerprint: "baseline".into(),
     };
 
@@ -346,6 +347,7 @@ fn column_field_changes_match_original_identity_and_clear_when_restored() {
         }],
         indexes: vec![],
         constraints: vec![],
+        structured_constraints: vec![],
         baseline_fingerprint: "baseline".into(),
     };
 
@@ -373,6 +375,7 @@ fn column_field_changes_ignore_added_removed_and_unmatched_columns() {
         columns: vec![],
         indexes: vec![],
         constraints: vec![],
+        structured_constraints: vec![],
         baseline_fingerprint: "baseline".into(),
     };
     let mut added = lazydb::model::catalog_editor::ColumnDraft::new_added();
@@ -439,6 +442,7 @@ fn table_change_summary_counts_added_modified_and_removed_columns() {
         columns: vec![],
         indexes: vec![],
         constraints: vec![],
+        structured_constraints: vec![],
         baseline_fingerprint: "baseline".into(),
     };
     baseline.columns = vec![lazydb::db::catalog_mutation::ColumnDefinition {
@@ -475,12 +479,107 @@ fn table_change_summary_counts_index_and_constraint_changes_as_property_changes(
         columns: vec![],
         indexes: vec![],
         constraints: vec![],
+        structured_constraints: vec![],
         baseline_fingerprint: "baseline".into(),
     };
 
     let summary = draft.change_summary(Some(&baseline));
     assert!(summary.properties_changed);
     assert!(summary.is_dirty());
+}
+
+#[test]
+fn table_draft_loads_structured_constraints_without_marking_them_dirty() {
+    use lazydb::db::catalog_mutation::{ConstraintDefinition, ConstraintDefinitionKind};
+    let mut baseline = lazydb::db::catalog_mutation::TableDefinition {
+        database: "app".into(),
+        schema: "public".into(),
+        name: "events".into(),
+        owner: "postgres".into(),
+        comment: lazydb::db::catalog::OptionalMetadata::Supported(None),
+        columns: vec![lazydb::db::catalog_mutation::ColumnDefinition {
+            name: "id".into(),
+            ordinal_position: 1,
+            native_type: "integer".into(),
+            nullable: false,
+            default_expression: lazydb::db::catalog::OptionalMetadata::Supported(None),
+            identity: lazydb::db::catalog::OptionalMetadata::Supported(Some(false)),
+            generated_expression: lazydb::db::catalog::OptionalMetadata::Supported(None),
+            collation: lazydb::db::catalog::OptionalMetadata::Supported(None),
+            comment: lazydb::db::catalog::OptionalMetadata::Supported(None),
+        }],
+        indexes: vec![],
+        constraints: vec![],
+        structured_constraints: vec![],
+        baseline_fingerprint: "baseline".into(),
+    };
+    baseline.structured_constraints.push(ConstraintDefinition {
+        database: "app".into(),
+        schema: "public".into(),
+        relation: "events".into(),
+        relation_kind: lazydb::db::catalog::CatalogKind::Table,
+        name: "events_pk".into(),
+        kind: ConstraintDefinitionKind::PrimaryKey {
+            columns: vec!["id".into()],
+        },
+        deferrable: false,
+        initially_deferred: false,
+        validated: true,
+        comment: lazydb::db::catalog::OptionalMetadata::Unsupported,
+        baseline_fingerprint: "pk".into(),
+    });
+    let draft = TableDraft::from_definition(&baseline);
+    assert!(!draft.is_dirty_against(Some(&baseline)));
+}
+
+#[test]
+fn constraint_field_navigation_matches_each_constraint_form() {
+    use lazydb::db::catalog_mutation::ConstraintDefinitionKind;
+    let kinds = [
+        (ConstraintDefinitionKind::PrimaryKey { columns: vec![] }, 2),
+        (ConstraintDefinitionKind::Unique { columns: vec![] }, 2),
+        (
+            ConstraintDefinitionKind::Check {
+                expression: "TRUE".into(),
+                no_inherit: false,
+            },
+            2,
+        ),
+        (
+            ConstraintDefinitionKind::ForeignKey {
+                columns: vec![],
+                referenced_schema: "main".into(),
+                referenced_relation: "parent".into(),
+                referenced_columns: vec![],
+                match_type: "SIMPLE".into(),
+                on_update: "NO ACTION".into(),
+                on_delete: "NO ACTION".into(),
+            },
+            7,
+        ),
+    ];
+    for (kind, count) in kinds {
+        let mut constraint =
+            lazydb::model::catalog_editor::ConstraintDraft::new(kind, "main", "child");
+        for expected in 1..count {
+            constraint.move_field(1);
+            assert_eq!(constraint.selected_field, expected);
+            assert!(constraint.selected_input_mut().is_some());
+        }
+        constraint.move_field(1);
+        assert_eq!(constraint.selected_field, 0);
+    }
+    let mut check = lazydb::model::catalog_editor::ConstraintDraft::new(
+        ConstraintDefinitionKind::Check {
+            expression: "TRUE".into(),
+            no_inherit: false,
+        },
+        "main",
+        "items",
+    );
+    check.move_field(1);
+    check.insert('x');
+    assert_eq!(check.expression.value(), "TRUEx");
 }
 
 #[test]
@@ -828,6 +927,7 @@ fn table_column_reordering_preserves_identity_and_tracks_order_changes() {
             .collect(),
         indexes: Vec::new(),
         constraints: Vec::new(),
+        structured_constraints: Vec::new(),
         baseline_fingerprint: "test".into(),
     };
     let mut draft = TableDraft::from_definition(&definition);
@@ -929,8 +1029,17 @@ fn table_action_navigation_moves_both_directions_and_form_clamps_at_ends() {
     draft.focus_next();
     assert_eq!(
         draft.focus,
-        TableEditorFocus::Action(TableActionField::Review)
+        TableEditorFocus::Action(TableActionField::AddConstraintPrimaryKey)
     );
+    for expected in [
+        TableActionField::AddConstraintUnique,
+        TableActionField::AddConstraintCheck,
+        TableActionField::AddConstraintForeignKey,
+        TableActionField::Review,
+    ] {
+        draft.focus_next();
+        assert_eq!(draft.focus, TableEditorFocus::Action(expected));
+    }
     draft.focus_next();
     assert_eq!(
         draft.focus,
@@ -947,6 +1056,15 @@ fn table_action_navigation_moves_both_directions_and_form_clamps_at_ends() {
         draft.focus,
         TableEditorFocus::Action(TableActionField::Review)
     );
+    for expected in [
+        TableActionField::AddConstraintForeignKey,
+        TableActionField::AddConstraintCheck,
+        TableActionField::AddConstraintUnique,
+        TableActionField::AddConstraintPrimaryKey,
+    ] {
+        draft.focus_previous();
+        assert_eq!(draft.focus, TableEditorFocus::Action(expected));
+    }
     draft.focus_previous();
     assert_eq!(
         draft.focus,
@@ -1022,16 +1140,16 @@ fn table_navigation_uses_one_complete_state_machine_for_compact_action_chain() {
         draft.focus,
         TableEditorFocus::Action(TableActionField::AddColumn)
     );
-    draft.focus_next();
-    draft.focus_next();
-    draft.focus_next();
+    for _ in 0..6 {
+        draft.focus_next();
+    }
     assert_eq!(
         draft.focus,
         TableEditorFocus::Action(TableActionField::Cancel)
     );
-    draft.focus_previous();
-    draft.focus_previous();
-    draft.focus_previous();
+    for _ in 0..7 {
+        draft.focus_previous();
+    }
     assert_eq!(draft.focus, TableEditorFocus::Columns);
 }
 
@@ -1281,6 +1399,7 @@ fn table_draft_insertion_preserves_existing_column_identity_and_state() {
         ],
         indexes: vec![],
         constraints: vec![],
+        structured_constraints: vec![],
         baseline_fingerprint: "sha256:table".into(),
     };
     let mut draft = TableDraft::from_definition(&definition);
@@ -1334,6 +1453,7 @@ fn table_draft_inserts_new_column_after_max_ordinal_without_reordering_existing_
         ],
         indexes: vec![],
         constraints: vec![],
+        structured_constraints: vec![],
         baseline_fingerprint: "sha256:table".into(),
     };
     let mut draft = TableDraft::from_definition(&definition);
@@ -1804,6 +1924,7 @@ fn table_draft_keeps_stable_row_ids_and_focuses_columns() {
         }],
         indexes: vec![],
         constraints: vec![],
+        structured_constraints: vec![],
         baseline_fingerprint: "sha256:x".into(),
     };
     let mut draft = TableDraft::from_definition(&definition);

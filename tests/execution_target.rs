@@ -24,6 +24,7 @@ fn profile(kind: DatabaseKind) -> ConnectionProfile {
         default_schema: Some("public".into()),
         sqlite_path: (kind == DatabaseKind::Sqlite).then(|| PathBuf::from("app.db")),
         mongodb_options: None,
+        duckdb_path: None,
         ssl_mode: SslMode::Prefer,
         credential_policy: CredentialPolicy::None,
         read_only: false,
@@ -47,11 +48,32 @@ fn profile_defaults_produce_backend_valid_targets() {
         DatabaseKind::MySql,
         DatabaseKind::SqlServer,
         DatabaseKind::Sqlite,
+        DatabaseKind::DuckDb,
     ] {
-        let profile = profile(kind);
+        let mut profile = profile(kind);
+        if kind == DatabaseKind::DuckDb {
+            profile.database = Some("memory".into());
+            profile.default_schema = Some("main".into());
+            profile.catalog_scope =
+                lazydb::profile::CatalogScope::for_profile(kind, "memory", Some("main"));
+        }
         let target = ExecutionTarget::from_profile(&profile);
         assert!(target.is_valid(&profile), "{kind:?}: {target:?}");
     }
+}
+
+#[test]
+fn duckdb_execution_target_uses_catalog_and_schema_not_file_path() {
+    let mut profile = profile(DatabaseKind::DuckDb);
+    profile.duckdb_path = Some(PathBuf::from("analytics.duckdb"));
+    profile.database = Some("memory".into());
+    profile.default_schema = Some("main".into());
+    profile.catalog_scope =
+        lazydb::profile::CatalogScope::for_profile(DatabaseKind::DuckDb, "memory", Some("main"));
+    let target = ExecutionTarget::from_profile(&profile);
+    assert_eq!(target.database, "memory");
+    assert_eq!(target.schema.as_deref(), Some("main"));
+    assert!(target.is_valid(&profile));
 }
 
 #[test]

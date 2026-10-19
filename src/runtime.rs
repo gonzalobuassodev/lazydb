@@ -398,6 +398,7 @@ use tokio::{
 };
 
 pub(crate) mod connections;
+pub(crate) mod duckdb;
 pub(crate) mod transaction;
 
 use connections::{ConnectionAttempts, ConnectionKey};
@@ -482,6 +483,7 @@ struct ProfileRegistry {
 struct ManualTransactionEntry {
     connection: ConnectionIdentity,
     target: ExecutionTarget,
+    console_id: Uuid,
     transaction_id: Uuid,
     transaction_generation: u64,
     request_sender: tokio::sync::mpsc::UnboundedSender<crate::db::transaction::TransactionRequest>,
@@ -637,8 +639,14 @@ pub struct Runtime {
     profile_mutation: Arc<Mutex<()>>,
     event_sender: mpsc::UnboundedSender<Action>,
     connection: Arc<Mutex<HashMap<ConnectionKey, ActiveConnection>>>,
+    duckdb_sessions: Arc<Mutex<duckdb::DuckDbSessions>>,
     connection_attempts: Arc<StdMutex<ConnectionAttempts>>,
     query_tasks: HashMap<(Uuid, u64), JoinHandle<()>>,
+    duckdb_query_interrupts:
+        Arc<StdMutex<HashMap<(Uuid, u64), (Uuid, crate::db::duckdb::DuckDbOperationHandle)>>>,
+    cancelled_queries: Arc<StdMutex<HashSet<(Uuid, u64)>>>,
+    duckdb_query_generations: Arc<StdMutex<HashSet<(Uuid, u64)>>>,
+    duckdb_query_connections: Arc<StdMutex<HashMap<(Uuid, u64), ConnectionIdentity>>>,
     catalog_drop_plan_tasks: HashMap<(ConnectionIdentity, u64), JoinHandle<()>>,
     catalog_drop_execute_tasks: HashMap<(ConnectionIdentity, u64), JoinHandle<()>>,
     catalog_mutation_tasks: HashMap<(ConnectionIdentity, u64), JoinHandle<()>>,
@@ -776,8 +784,13 @@ impl Runtime {
             profile_mutation: Arc::new(Mutex::new(())),
             event_sender,
             connection: Arc::new(Mutex::new(HashMap::new())),
+            duckdb_sessions: Arc::new(Mutex::new(duckdb::DuckDbSessions::default())),
             connection_attempts: Arc::new(StdMutex::new(ConnectionAttempts::default())),
             query_tasks: HashMap::new(),
+            duckdb_query_interrupts: Arc::new(StdMutex::new(HashMap::new())),
+            cancelled_queries: Arc::new(StdMutex::new(HashSet::new())),
+            duckdb_query_generations: Arc::new(StdMutex::new(HashSet::new())),
+            duckdb_query_connections: Arc::new(StdMutex::new(HashMap::new())),
             catalog_drop_plan_tasks: HashMap::new(),
             catalog_drop_execute_tasks: HashMap::new(),
             catalog_mutation_tasks: HashMap::new(),
@@ -843,6 +856,18 @@ impl Runtime {
 
     pub fn dispatch(&mut self, command: Command) {
         self.query_tasks.retain(|_, task| !task.is_finished());
+        self.duckdb_query_interrupts
+            .lock()
+            .expect("DuckDB operation registry poisoned")
+            .retain(|key, _| self.query_tasks.contains_key(key));
+        self.duckdb_query_generations
+            .lock()
+            .expect("DuckDB query registry poisoned")
+            .retain(|key| self.query_tasks.contains_key(key));
+        self.duckdb_query_connections
+            .lock()
+            .expect("DuckDB query connection registry poisoned")
+            .retain(|key, _| self.query_tasks.contains_key(key));
         self.history_executions
             .retain(|key, _| self.query_tasks.contains_key(key));
         self.catalog_drop_plan_tasks
@@ -905,8 +930,9 @@ impl Runtime {
                 profile_id,
                 generation,
                 target,
+                console_id,
             } => {
-                self.connect(profile_id, generation, target);
+                self.connect(profile_id, generation, target, console_id);
             }
             Command::LoadCatalogPage(request) => self.load_catalog_page(request),
             Command::DiscoverRedisDatabases {
@@ -1259,8 +1285,9 @@ impl Runtime {
                 target,
                 tab_id,
                 generation,
+                console_id,
                 sql,
-            } => self.run_query(connection, target, tab_id, generation, sql),
+            } => self.run_query(connection, target, tab_id, generation, console_id, sql),
             Command::LoadSqlHistory {
                 overlay_id,
                 generation,
@@ -1301,16 +1328,18 @@ impl Runtime {
                 target,
                 tab_id,
                 generation,
+                console_id,
                 source_sql,
                 dialect,
                 page,
             } => self.run_query_page(
-                connection, target, tab_id, generation, source_sql, dialect, page,
+                connection, target, tab_id, generation, console_id, source_sql, dialect, page,
             ),
             Command::RunDerivedQuery {
                 connection,
                 target,
                 tab_id,
+                console_id,
                 source_generation,
                 derived_generation,
                 sql,
@@ -1318,6 +1347,7 @@ impl Runtime {
                 connection,
                 target,
                 tab_id,
+                console_id,
                 source_generation,
                 derived_generation,
                 sql,
@@ -1326,6 +1356,7 @@ impl Runtime {
                 connection,
                 target,
                 tab_id,
+                console_id,
                 source_generation,
                 derived_generation,
                 source_sql,
@@ -1337,6 +1368,7 @@ impl Runtime {
                 connection,
                 target,
                 tab_id,
+                console_id,
                 source_generation,
                 derived_generation,
                 source_sql,
@@ -1349,12 +1381,14 @@ impl Runtime {
                 connection,
                 target,
                 tab_id,
+                console_id,
                 query_generation,
                 transaction_generation,
             } => self.manual_begin(
                 connection,
                 target,
                 tab_id,
+                console_id,
                 query_generation,
                 transaction_generation,
             ),
@@ -1362,6 +1396,7 @@ impl Runtime {
                 connection,
                 target,
                 tab_id,
+                console_id,
                 query_generation,
                 transaction_generation,
                 sql,
@@ -1369,6 +1404,7 @@ impl Runtime {
                 connection,
                 target,
                 tab_id,
+                console_id,
                 query_generation,
                 transaction_generation,
                 sql,
@@ -1377,6 +1413,7 @@ impl Runtime {
                 connection,
                 target,
                 tab_id,
+                console_id,
                 query_generation,
                 transaction_generation,
                 source_sql,
@@ -1387,6 +1424,7 @@ impl Runtime {
                 connection,
                 target,
                 tab_id,
+                console_id,
                 query_generation,
                 transaction_generation,
                 source_sql,
@@ -1418,7 +1456,25 @@ impl Runtime {
                 connection,
             } => self.relation_transaction_end(tab_id, generation, connection, false),
             Command::CancelQuery { tab_id, generation } => {
-                if let Some(task) = self.query_tasks.remove(&(tab_id, generation)) {
+                self.cancelled_queries
+                    .lock()
+                    .expect("cancelled query registry poisoned")
+                    .insert((tab_id, generation));
+                let operation = self
+                    .duckdb_query_interrupts
+                    .lock()
+                    .expect("DuckDB operation registry poisoned")
+                    .remove(&(tab_id, generation));
+                let is_duckdb = operation.is_some()
+                    || self
+                        .duckdb_query_generations
+                        .lock()
+                        .expect("DuckDB query registry poisoned")
+                        .contains(&(tab_id, generation));
+                if let Some((_, operation)) = operation {
+                    operation.cancel();
+                }
+                if !is_duckdb && let Some(task) = self.query_tasks.remove(&(tab_id, generation)) {
                     task.abort();
                 }
                 if let Some(execution_id) = self.history_executions.remove(&(tab_id, generation))
@@ -1437,6 +1493,77 @@ impl Runtime {
                             .await;
                     });
                 }
+            }
+            Command::ReleaseDuckDbConsole {
+                connection,
+                console_id,
+            } => {
+                let manual_key = self.manual_transactions.iter().find_map(|(tab_id, entry)| {
+                    (entry.console_id == console_id && entry.connection == connection)
+                        .then_some(*tab_id)
+                });
+                if let Some(entry) =
+                    manual_key.and_then(|tab_id| self.manual_transactions.remove(&tab_id))
+                {
+                    let operation_keys = self
+                        .duckdb_query_generations
+                        .lock()
+                        .expect("DuckDB query registry poisoned")
+                        .iter()
+                        .copied()
+                        .filter(|(tab, _)| *tab == console_id)
+                        .collect::<Vec<_>>();
+                    for key in operation_keys {
+                        if let Some((_, operation)) = self
+                            .duckdb_query_interrupts
+                            .lock()
+                            .expect("DuckDB operation registry poisoned")
+                            .remove(&key)
+                        {
+                            operation.cancel();
+                        }
+                    }
+                    let sessions = Arc::clone(&self.duckdb_sessions);
+                    self.background_tasks.push(tokio::spawn(async move {
+                        shutdown_transaction_entry(entry).await;
+                        let databases = sessions
+                            .lock()
+                            .await
+                            .remove_console_if_idle(connection, console_id);
+                        for database in databases {
+                            database.close().await;
+                        }
+                    }));
+                    return;
+                }
+                let operation_keys = self
+                    .duckdb_query_generations
+                    .lock()
+                    .expect("DuckDB query registry poisoned")
+                    .iter()
+                    .copied()
+                    .filter(|(tab, _)| *tab == console_id)
+                    .collect::<Vec<_>>();
+                for key in operation_keys {
+                    if let Some((_, operation)) = self
+                        .duckdb_query_interrupts
+                        .lock()
+                        .expect("DuckDB operation registry poisoned")
+                        .remove(&key)
+                    {
+                        operation.cancel();
+                    }
+                }
+                let sessions = Arc::clone(&self.duckdb_sessions);
+                self.background_tasks.push(tokio::spawn(async move {
+                    let databases = sessions
+                        .lock()
+                        .await
+                        .remove_console_if_idle(connection, console_id);
+                    for database in databases {
+                        database.close().await;
+                    }
+                }));
             }
             Command::CancelManual {
                 tab_id,
@@ -3670,6 +3797,23 @@ impl Runtime {
     }
 
     fn disconnect(&mut self, expected: ConnectionIdentity) {
+        let operation_keys = self
+            .duckdb_query_connections
+            .lock()
+            .expect("DuckDB query connection registry poisoned")
+            .iter()
+            .filter_map(|(key, identity)| (*identity == expected).then_some(*key))
+            .collect::<Vec<_>>();
+        for key in operation_keys {
+            if let Some((_, operation)) = self
+                .duckdb_query_interrupts
+                .lock()
+                .expect("DuckDB operation registry poisoned")
+                .remove(&key)
+            {
+                operation.cancel();
+            }
+        }
         self.catalog_search_tasks
             .retain(|(owner, _), (identity, _, task)| {
                 let should_abort =
@@ -3685,6 +3829,7 @@ impl Runtime {
         let known_relations = Arc::clone(&self.known_relations);
         let known_relation_targets = Arc::clone(&self.known_relation_targets);
         let latest_catalog_requests = Arc::clone(&self.latest_catalog_requests);
+        let duckdb_sessions = Arc::clone(&self.duckdb_sessions);
         let mutation = Arc::clone(&self.profile_mutation);
         let attempts = Arc::clone(&self.connection_attempts);
         let sender = self.event_sender.clone();
@@ -3735,7 +3880,7 @@ impl Runtime {
                 let _ = entry.worker_handle.await;
             }
             let _mutation_guard = mutation.lock().await;
-            let active = {
+            let removed_connections = {
                 let mut guard = connection.lock().await;
                 let keys = guard
                     .keys()
@@ -3746,7 +3891,8 @@ impl Runtime {
                     .filter_map(|key| guard.remove(&key))
                     .collect::<Vec<_>>()
             };
-            if !active.is_empty() {
+            let duckdb_sessions_to_close = duckdb_sessions.lock().await.remove_generation(expected);
+            if !removed_connections.is_empty() || !duckdb_sessions_to_close.is_empty() {
                 if let Ok(mut known) = known_relations.lock() {
                     known.retain(|(identity, _)| *identity != expected);
                 }
@@ -3756,9 +3902,14 @@ impl Runtime {
                 if let Ok(mut latest) = latest_catalog_requests.lock() {
                     latest.retain(|(connection, _), _| *connection != expected);
                 }
-                for active in active {
-                    active.database.close().await;
+                for active in removed_connections {
+                    if active.database.kind() != crate::profile::DatabaseKind::DuckDb {
+                        active.database.close().await;
+                    }
                 }
+            }
+            for database in duckdb_sessions_to_close {
+                database.close().await;
             }
             let _ = sender.send(Action::DisconnectCompleted {
                 connection: expected,
@@ -3766,7 +3917,13 @@ impl Runtime {
         }));
     }
 
-    fn connect(&mut self, profile_id: Uuid, generation: u64, target: ExecutionTarget) {
+    fn connect(
+        &mut self,
+        profile_id: Uuid,
+        generation: u64,
+        target: ExecutionTarget,
+        console_id: Uuid,
+    ) {
         let registry = Arc::clone(&self.registry);
         let mutation = Arc::clone(&self.profile_mutation);
         let secret_store = Arc::clone(&self.secret_store);
@@ -3777,6 +3934,7 @@ impl Runtime {
         let known_relations = Arc::clone(&self.known_relations);
         let known_relation_targets = Arc::clone(&self.known_relation_targets);
         let latest_catalog_requests = Arc::clone(&self.latest_catalog_requests);
+        let duckdb_sessions = Arc::clone(&self.duckdb_sessions);
         let expected = ConnectionIdentity {
             profile_id,
             generation,
@@ -3841,7 +3999,7 @@ impl Runtime {
                 });
                 return;
             }
-            let reusable_sqlite = if profile.kind == crate::profile::DatabaseKind::Sqlite {
+            let reusable_embedded = if profile.kind == crate::profile::DatabaseKind::Sqlite {
                 connection
                     .lock()
                     .await
@@ -3850,19 +4008,39 @@ impl Runtime {
             } else {
                 None
             };
-            let reused_sqlite = reusable_sqlite.is_some();
+            let duckdb_owner = if profile.kind == crate::profile::DatabaseKind::DuckDb {
+                duckdb_sessions.lock().await.root(expected)
+            } else {
+                None
+            };
+            let reused_embedded = reusable_embedded.is_some();
+            let reused_duckdb_session = duckdb_sessions
+                .lock()
+                .await
+                .has_session(expected, &target, console_id);
             let candidate = timeout(Duration::from_secs(10), async {
-                let database = match reusable_sqlite {
+                let connected = match reusable_embedded {
                     Some(database) => database,
+                    None if duckdb_owner.is_some() => duckdb_owner.as_ref().unwrap().clone(),
                     None => {
                         DatabaseConnection::connect_target(&profile, password.as_ref(), &target)
                             .await?
                     }
                 };
+                let database = if profile.kind == crate::profile::DatabaseKind::DuckDb {
+                    let mut sessions = duckdb_sessions.lock().await;
+                    let root = sessions.root_connected(expected, connected);
+                    sessions.console_session(expected, target.clone(), console_id, root)?
+                } else {
+                    connected
+                };
                 let server = match database.probe().await {
                     Ok(server) => server,
                     Err(error) => {
-                        if !reused_sqlite {
+                        if !reused_embedded
+                            && duckdb_owner.is_none()
+                            && profile.kind != crate::profile::DatabaseKind::DuckDb
+                        {
                             database.close().await;
                         }
                         return Err(error);
@@ -3877,7 +4055,9 @@ impl Runtime {
                 Ok(Ok((database, server, mutation_capabilities))) => {
                     let mutation_guard = mutation.lock().await;
                     if !profile_revision_is_current(&registry, &profile, profile_revision).await {
-                        database.close().await;
+                        if profile.kind != crate::profile::DatabaseKind::DuckDb {
+                            database.close().await;
+                        }
                         finish_attempt();
                         return;
                     }
@@ -3931,7 +4111,11 @@ impl Runtime {
                     drop(active);
                     let Some((replaced, previous)) = installation else {
                         let candidate = candidate.take().expect("connection candidate exists");
-                        if !reused_sqlite {
+                        if !reused_embedded
+                            && !reused_duckdb_session
+                            && duckdb_owner.is_none()
+                            && profile.kind != crate::profile::DatabaseKind::DuckDb
+                        {
                             candidate.close().await;
                         }
                         finish_attempt();
@@ -3946,11 +4130,13 @@ impl Runtime {
                     drop(mutation_guard);
                     if let Some((replaced_key, replaced)) = replaced
                         && replaced_key.identity != expected
+                        && replaced.database.kind() != crate::profile::DatabaseKind::DuckDb
                     {
                         replaced.database.close().await;
                     }
                     if let Some(previous) = previous
-                        && !reused_sqlite
+                        && !reused_embedded
+                        && profile.kind != crate::profile::DatabaseKind::DuckDb
                     {
                         previous.database.close().await;
                     }
@@ -4974,10 +5160,47 @@ impl Runtime {
             return;
         }
         let sender = self.event_sender.clone();
+        let duckdb_sessions = Arc::clone(&self.duckdb_sessions);
         let connection = Arc::clone(&self.connection);
         let task_request = request.clone();
         let task = tokio::spawn(async move {
-            let Some(database) = active_database(connection, task_request.connection).await else {
+            let duckdb_database = {
+                let mut sessions = duckdb_sessions.lock().await;
+                if let Some((_, session)) = sessions
+                    .console_session_for_profile(task_request.connection, task_request.console_id)
+                {
+                    Some(session)
+                } else if let Some(root) = sessions.root(task_request.connection) {
+                    let target = ExecutionTarget {
+                        profile_id: task_request.connection.profile_id,
+                        database: task_request
+                            .relation
+                            .object_id
+                            .native_path
+                            .first()
+                            .cloned()
+                            .unwrap_or_default(),
+                        schema: Some("main".into()),
+                    };
+                    sessions
+                        .console_session(
+                            task_request.connection,
+                            target,
+                            task_request.console_id,
+                            root,
+                        )
+                        .ok()
+                } else {
+                    None
+                }
+            };
+            let database = duckdb_database.or_else(|| None);
+            let database = if database.is_none() {
+                active_database(connection, task_request.connection).await
+            } else {
+                database
+            };
+            let Some(database) = database else {
                 let _ = sender.send(Action::RelationFailed {
                     request: task_request,
                     message: "No active database connection".to_owned(),
@@ -5133,6 +5356,7 @@ impl Runtime {
         target: ExecutionTarget,
         tab_id: Uuid,
         generation: u64,
+        console_id: Uuid,
         sql: String,
     ) {
         let sender = self.event_sender.clone();
@@ -5140,6 +5364,12 @@ impl Runtime {
         let recorder = self.history_recorder.clone();
         let execution_id = Uuid::new_v4();
         let operation_id = Uuid::new_v4();
+        let duckdb_sessions = Arc::clone(&self.duckdb_sessions);
+        let operation_registry = Arc::clone(&self.duckdb_query_interrupts);
+        let cancelled_queries = Arc::clone(&self.cancelled_queries);
+        let cancelled_queries_for_cleanup = Arc::clone(&cancelled_queries);
+        let duckdb_query_generations = Arc::clone(&self.duckdb_query_generations);
+        let duckdb_query_connections = Arc::clone(&self.duckdb_query_connections);
         self.history_executions
             .insert((tab_id, generation), execution_id);
         let task = tokio::spawn(async move {
@@ -5165,7 +5395,16 @@ impl Runtime {
             if let Some(recorder) = &recorder {
                 let _ = recorder.start(history).await;
             }
-            let database = active_database_for_target(connection, expected, &target).await;
+            let database =
+                active_database_for_target(Arc::clone(&connection), expected, &target).await;
+            let database = match database {
+                Some(database) => duckdb_sessions
+                    .lock()
+                    .await
+                    .console_session(expected, target.clone(), console_id, database)
+                    .ok(),
+                None => None,
+            };
             let Some(database) = database else {
                 if let Some(recorder) = &recorder {
                     let _ = recorder
@@ -5185,12 +5424,47 @@ impl Runtime {
                 });
                 return;
             };
+            let is_duckdb = matches!(database, DatabaseConnection::DuckDb(_));
+            if is_duckdb {
+                duckdb_query_generations
+                    .lock()
+                    .expect("DuckDB query registry poisoned")
+                    .insert((tab_id, generation));
+                duckdb_query_connections
+                    .lock()
+                    .expect("DuckDB query connection registry poisoned")
+                    .insert((tab_id, generation), expected);
+            }
+            let cancel_flag = Arc::new(std::sync::atomic::AtomicBool::new(false));
+            if cancelled_queries
+                .lock()
+                .expect("cancelled query registry poisoned")
+                .contains(&(tab_id, generation))
+            {
+                cancel_flag.store(true, std::sync::atomic::Ordering::SeqCst);
+            }
+            let registry_for_start = Arc::clone(&operation_registry);
+            let cancel_flag_for_start = Arc::clone(&cancel_flag);
             match database
-                .execute_with_budget(
+                .execute_with_budget_cancellable(
                     &sql,
                     crate::db::query::QueryBudget {
                         max_rows: 10_000,
                         max_bytes: 16 * 1024 * 1024,
+                    },
+                    operation_id,
+                    cancel_flag,
+                    move |operation| {
+                        let key = (tab_id, generation);
+                        let mut registry = registry_for_start
+                            .lock()
+                            .expect("DuckDB operation registry poisoned");
+                        registry.insert(key, (operation_id, operation));
+                        if cancel_flag_for_start.load(std::sync::atomic::Ordering::SeqCst)
+                            && let Some((_, operation)) = registry.remove(&key)
+                        {
+                            operation.cancel();
+                        }
                     },
                 )
                 .await
@@ -5236,6 +5510,22 @@ impl Runtime {
                     });
                 }
             }
+            operation_registry
+                .lock()
+                .expect("DuckDB operation registry poisoned")
+                .remove(&(tab_id, generation));
+            cancelled_queries_for_cleanup
+                .lock()
+                .expect("cancelled query registry poisoned")
+                .remove(&(tab_id, generation));
+            duckdb_query_generations
+                .lock()
+                .expect("DuckDB query registry poisoned")
+                .remove(&(tab_id, generation));
+            duckdb_query_connections
+                .lock()
+                .expect("DuckDB query connection registry poisoned")
+                .remove(&(tab_id, generation));
         });
         self.query_tasks.insert((tab_id, generation), task);
     }
@@ -5408,6 +5698,7 @@ impl Runtime {
         target: ExecutionTarget,
         tab_id: Uuid,
         generation: u64,
+        console_id: Uuid,
         source_sql: String,
         dialect: crate::sql::SqlDialect,
         mut page: crate::model::pagination::PageRequest,
@@ -5415,10 +5706,20 @@ impl Runtime {
         let operation_id = Uuid::new_v4();
         let sender = self.event_sender.clone();
         let connection = Arc::clone(&self.connection);
+        let duckdb_sessions = Arc::clone(&self.duckdb_sessions);
         let recorder = self.history_recorder.clone();
         let task = tokio::spawn(async move {
-            let Some(database) = active_database_for_target(connection, expected, &target).await
-            else {
+            let active =
+                active_database_for_target(Arc::clone(&connection), expected, &target).await;
+            let database = match active {
+                Some(database) => duckdb_sessions
+                    .lock()
+                    .await
+                    .console_session(expected, target.clone(), console_id, database)
+                    .ok(),
+                None => None,
+            };
+            let Some(database) = database else {
                 let _ = sender.send(Action::QueryPageFailed {
                     tab_id,
                     generation,
@@ -5631,20 +5932,32 @@ impl Runtime {
         self.query_tasks.insert((tab_id, generation), task);
     }
 
+    #[allow(clippy::too_many_arguments)]
     fn run_derived_query(
         &mut self,
         expected: ConnectionIdentity,
         target: ExecutionTarget,
         tab_id: Uuid,
+        console_id: Uuid,
         source_generation: u64,
         derived_generation: u64,
         sql: String,
     ) {
         let sender = self.event_sender.clone();
         let connection = Arc::clone(&self.connection);
+        let duckdb_sessions = Arc::clone(&self.duckdb_sessions);
         let task = tokio::spawn(async move {
-            let Some(database) = active_database_for_target(connection, expected, &target).await
-            else {
+            let active =
+                active_database_for_target(Arc::clone(&connection), expected, &target).await;
+            let database = match active {
+                Some(database) => duckdb_sessions
+                    .lock()
+                    .await
+                    .console_session(expected, target.clone(), console_id, database)
+                    .ok(),
+                None => None,
+            };
+            let Some(database) = database else {
                 let _ = sender.send(Action::DerivedQueryFailed {
                     tab_id,
                     source_generation,
@@ -5696,6 +6009,7 @@ impl Runtime {
         expected: ConnectionIdentity,
         target: ExecutionTarget,
         tab_id: Uuid,
+        console_id: Uuid,
         source_generation: u64,
         derived_generation: u64,
         source_sql: String,
@@ -5706,9 +6020,19 @@ impl Runtime {
     ) {
         let sender = self.event_sender.clone();
         let connection = Arc::clone(&self.connection);
+        let duckdb_sessions = Arc::clone(&self.duckdb_sessions);
         let task = tokio::spawn(async move {
-            let Some(database) = active_database_for_target(connection, expected, &target).await
-            else {
+            let active =
+                active_database_for_target(Arc::clone(&connection), expected, &target).await;
+            let database = match active {
+                Some(database) => duckdb_sessions
+                    .lock()
+                    .await
+                    .console_session(expected, target.clone(), console_id, database)
+                    .ok(),
+                None => None,
+            };
+            let Some(database) = database else {
                 let _ = sender.send(Action::DerivedQueryPageFailed {
                     tab_id,
                     source_generation,
@@ -5842,6 +6166,7 @@ impl Runtime {
         connection: ConnectionIdentity,
         target: ExecutionTarget,
         tab_id: Uuid,
+        console_id: Uuid,
         query_generation: u64,
         transaction_generation: u64,
     ) {
@@ -5850,6 +6175,7 @@ impl Runtime {
             connection,
             target,
             tab_id,
+            console_id,
             query_generation,
             transaction_generation,
             None,
@@ -6076,16 +6402,18 @@ impl Runtime {
         }
         let (proxy, mut receiver) = tokio::sync::mpsc::unbounded_channel();
         let active = Arc::clone(&self.connection);
+        let duckdb_sessions = Arc::clone(&self.duckdb_sessions);
         let sender = self.event_sender.clone();
         let connection = request.connection;
         let transaction_generation = request.edit_generation;
         let target = request.target.clone();
         let worker_target = target.clone();
+        let console_id = tab_id;
         let worker_request = request.clone();
         let forced_close = ForcedCloseHandle::new();
         let worker_forced_close = forced_close.clone();
         let worker_handle = tokio::spawn(async move {
-            let Some(database) =
+            let Some(mut database) =
                 active_database_for_target(active.clone(), connection, &worker_target).await
             else {
                 let _ = sender.send(Action::RelationTransactionStartFailed {
@@ -6101,6 +6429,32 @@ impl Runtime {
                 });
                 return crate::db::transaction::WorkerDisposition::Quarantine;
             };
+            if database.kind() == crate::profile::DatabaseKind::DuckDb {
+                let mut sessions = duckdb_sessions.lock().await;
+                match sessions.console_session(
+                    connection,
+                    worker_target.clone(),
+                    console_id,
+                    database,
+                ) {
+                    Ok(session) => database = session,
+                    Err(error) => {
+                        let message = error.to_string();
+                        let _ = sender.send(Action::RelationMutationFailed {
+                            request: worker_request.clone(),
+                            message: message.clone(),
+                            diagnostic: None,
+                        });
+                        let _ = sender.send(Action::RelationTransactionStartFailed {
+                            tab_id,
+                            generation: request.edit_generation,
+                            connection,
+                            message,
+                        });
+                        return crate::db::transaction::WorkerDisposition::Quarantine;
+                    }
+                }
+            }
             let invalidates = matches!(database, DatabaseConnection::Sqlite(_));
             let worker = match database
                 .start_transaction_worker_with_forced_close(worker_forced_close)
@@ -6164,6 +6518,7 @@ impl Runtime {
             ManualTransactionEntry {
                 connection,
                 target,
+                console_id: tab_id,
                 transaction_id: Uuid::new_v4(),
                 transaction_generation,
                 request_sender: proxy.clone(),
@@ -6179,11 +6534,13 @@ impl Runtime {
         });
     }
 
+    #[allow(clippy::too_many_arguments)]
     fn manual_execute(
         &mut self,
         connection: ConnectionIdentity,
         target: ExecutionTarget,
         tab_id: Uuid,
+        console_id: Uuid,
         query_generation: u64,
         transaction_generation: u64,
         sql: String,
@@ -6197,6 +6554,7 @@ impl Runtime {
             connection,
             target,
             tab_id,
+            console_id,
             query_generation,
             transaction_generation,
             None,
@@ -6336,6 +6694,7 @@ impl Runtime {
         connection: ConnectionIdentity,
         target: ExecutionTarget,
         tab_id: Uuid,
+        console_id: Uuid,
         query_generation: u64,
         transaction_generation: u64,
         source_sql: String,
@@ -6349,6 +6708,7 @@ impl Runtime {
             connection,
             target,
             tab_id,
+            console_id,
             query_generation,
             transaction_generation,
             source_sql,
@@ -6545,6 +6905,7 @@ impl Runtime {
         connection: ConnectionIdentity,
         target: ExecutionTarget,
         tab_id: Uuid,
+        console_id: Uuid,
         _query_generation: u64,
         transaction_generation: u64,
         source_sql: String,
@@ -6569,6 +6930,7 @@ impl Runtime {
         };
         if entry.connection != connection
             || entry.target != target
+            || entry.console_id != console_id
             || entry.transaction_generation != transaction_generation
         {
             let _ = reply.send(Err(crate::db::transaction::TransactionError(
@@ -6585,11 +6947,13 @@ impl Runtime {
         });
     }
 
+    #[allow(clippy::too_many_arguments)]
     fn ensure_manual_worker(
         &mut self,
         connection: ConnectionIdentity,
         target: ExecutionTarget,
         tab_id: Uuid,
+        console_id: Uuid,
         query_generation: u64,
         transaction_generation: u64,
         request: Option<(
@@ -6603,6 +6967,7 @@ impl Runtime {
         if let Some(entry) = self.manual_transactions.get(&tab_id) {
             let matches = entry.connection == connection
                 && entry.target == target
+                && entry.console_id == console_id
                 && entry.transaction_generation == transaction_generation;
             match (matches, request) {
                 (true, Some((sql, cancel, reply))) => {
@@ -6635,19 +7000,41 @@ impl Runtime {
         }
         let (proxy, mut receiver) = tokio::sync::mpsc::unbounded_channel();
         let active_connection = Arc::clone(&self.connection);
+        let duckdb_sessions = Arc::clone(&self.duckdb_sessions);
         let sender = self.event_sender.clone();
         let worker_target = target.clone();
         let forced_close = ForcedCloseHandle::new();
         let transaction_id = Uuid::new_v4();
         let worker_forced_close = forced_close.clone();
         let worker_handle = tokio::spawn(async move {
-            let Some(database) = active_database_for_target(
+            let duckdb_owner = duckdb_sessions.lock().await.root(connection);
+            let active_database = active_database_for_target(
                 Arc::clone(&active_connection),
                 connection,
                 &worker_target,
             )
-            .await
-            else {
+            .await;
+            let database = if let Some(active_database) = active_database {
+                duckdb_sessions
+                    .lock()
+                    .await
+                    .console_session(
+                        connection,
+                        worker_target.clone(),
+                        console_id,
+                        active_database,
+                    )
+                    .ok()
+            } else if let Some(owner) = duckdb_owner {
+                duckdb_sessions
+                    .lock()
+                    .await
+                    .console_session(connection, worker_target.clone(), console_id, owner)
+                    .ok()
+            } else {
+                None
+            };
+            let Some(database) = database else {
                 let _ = sender.send(Action::ManualStartFailed {
                     tab_id,
                     query_generation,
@@ -6667,6 +7054,7 @@ impl Runtime {
                 | DatabaseConnection::Redis(_)
                 | DatabaseConnection::MongoDb(_) => false,
                 DatabaseConnection::ClickHouse(_) => false,
+                DatabaseConnection::DuckDb(_) => false,
             };
             let worker = match database
                 .start_transaction_worker_with_forced_close(worker_forced_close)
@@ -6735,6 +7123,7 @@ impl Runtime {
             ManualTransactionEntry {
                 connection,
                 target,
+                console_id,
                 transaction_id,
                 transaction_generation,
                 request_sender: proxy,
@@ -6784,8 +7173,23 @@ impl Runtime {
             task.abort();
             let _ = task.await;
         }
-        for (_, task) in self.query_tasks.drain() {
-            task.abort();
+        for (_, (_, operation)) in self
+            .duckdb_query_interrupts
+            .lock()
+            .expect("DuckDB operation registry poisoned")
+            .drain()
+        {
+            operation.cancel();
+        }
+        for (key, task) in self.query_tasks.drain() {
+            if !self
+                .duckdb_query_generations
+                .lock()
+                .expect("DuckDB query registry poisoned")
+                .contains(&key)
+            {
+                task.abort();
+            }
             let _ = task.await;
         }
         for (_, (_, _, task)) in self.catalog_search_tasks.drain() {
@@ -6835,6 +7239,9 @@ impl Runtime {
             .map(|(_, connection)| connection)
         {
             connection.database.close().await;
+        }
+        for database in self.duckdb_sessions.lock().await.remove_all() {
+            database.close().await;
         }
         if let Some(recorder) = self.history_recorder.take() {
             let _ = recorder.flush().await;
@@ -8912,6 +9319,437 @@ mod tests {
     use super::*;
     use crate::{db::transaction::WorkerDisposition, profile::import_connection_url};
 
+    #[tokio::test]
+    async fn cancel_query_command_interrupts_duckdb_runtime_query() {
+        let profile = import_connection_url("duckdb::memory:", Some("runtime-cancel"))
+            .unwrap()
+            .profile;
+        let identity = ConnectionIdentity {
+            profile_id: profile.id,
+            generation: 1,
+        };
+        let root = DatabaseConnection::connect(&profile, None).await.unwrap();
+        let target = ExecutionTarget::from_profile(&profile);
+        let key = ConnectionKey::new(identity, target.clone());
+        let (event_sender, mut events) = mpsc::unbounded_channel();
+        let temp = tempfile::tempdir().unwrap();
+        let mut runtime = Runtime::new(
+            vec![profile],
+            HashSet::new(),
+            HashMap::new(),
+            None,
+            ProfileStore::new(temp.path().join("profiles.json")),
+            Arc::new(crate::persistence::secrets::NativeSecretStore),
+            event_sender,
+        );
+        runtime.connection.lock().await.insert(
+            key,
+            ActiveConnection {
+                database: root.clone(),
+                target: target.clone(),
+            },
+        );
+        let tab_id = Uuid::new_v4();
+        let console_id = Uuid::new_v4();
+        let generation = 17;
+        runtime.dispatch(Command::RunQuery {
+            connection: identity,
+            target: target.clone(),
+            tab_id,
+            generation,
+            console_id,
+            sql: "SELECT sum(i) FROM range(1000000000000) t(i)".to_owned(),
+        });
+
+        tokio::time::timeout(std::time::Duration::from_secs(5), async {
+            loop {
+                if runtime
+                    .duckdb_query_interrupts
+                    .lock()
+                    .unwrap()
+                    .contains_key(&(tab_id, generation))
+                {
+                    break;
+                }
+                tokio::task::yield_now().await;
+            }
+        })
+        .await
+        .expect("DuckDB operation should register before cancellation");
+
+        runtime.dispatch(Command::CancelQuery { tab_id, generation });
+        let failure = tokio::time::timeout(std::time::Duration::from_secs(10), async {
+            loop {
+                if let Some(Action::QueryFailed {
+                    tab_id: failed_tab,
+                    generation: failed_generation,
+                    message,
+                    ..
+                }) = events.recv().await
+                    && failed_tab == tab_id
+                    && failed_generation == generation
+                {
+                    break message;
+                }
+            }
+        })
+        .await
+        .expect("cancelled DuckDB query should finish promptly");
+        assert!(!failure.is_empty());
+        assert!(
+            !runtime
+                .duckdb_query_interrupts
+                .lock()
+                .unwrap()
+                .contains_key(&(tab_id, generation))
+        );
+        assert!(
+            !runtime
+                .duckdb_query_generations
+                .lock()
+                .unwrap()
+                .contains(&(tab_id, generation))
+        );
+
+        let session = runtime
+            .duckdb_sessions
+            .lock()
+            .await
+            .console_session(identity, target, console_id, root.clone())
+            .unwrap();
+        assert!(session.execute("SELECT 1").await.is_ok());
+        drop(session);
+
+        runtime.dispatch(Command::Disconnect {
+            connection: identity,
+        });
+        tokio::time::timeout(std::time::Duration::from_secs(5), async {
+            loop {
+                if matches!(events.recv().await, Some(Action::DisconnectCompleted { connection }) if connection == identity)
+                {
+                    break;
+                }
+            }
+        })
+        .await
+        .expect("generation disconnect should complete");
+        assert_eq!(runtime.duckdb_sessions.lock().await.generation_count(), 0);
+    }
+
+    #[tokio::test]
+    async fn stale_duckdb_relation_mutation_generation_is_rejected_without_session_or_write() {
+        use crate::db::mutation::{
+            InputValue, InsertRowMutation, MetadataFingerprint, RelationMutation,
+            RelationMutationRequest,
+        };
+        use crate::model::{relation::RelationKey, relation_edit::EditableRowId};
+
+        let profile = import_connection_url("duckdb::memory:", Some("runtime-stale-mutation"))
+            .unwrap()
+            .profile;
+        let active_identity = ConnectionIdentity {
+            profile_id: profile.id,
+            generation: 9,
+        };
+        let root = DatabaseConnection::connect(&profile, None).await.unwrap();
+        root.execute("CREATE TABLE runtime_rows (id INTEGER PRIMARY KEY, value VARCHAR); INSERT INTO runtime_rows VALUES (1, 'original')")
+            .await
+            .unwrap();
+        let target = ExecutionTarget::from_profile(&profile);
+        let (event_sender, mut events) = mpsc::unbounded_channel();
+        let temp = tempfile::tempdir().unwrap();
+        let mut runtime = Runtime::new(
+            vec![profile.clone()],
+            HashSet::new(),
+            HashMap::new(),
+            None,
+            ProfileStore::new(temp.path().join("profiles.json")),
+            Arc::new(crate::persistence::secrets::NativeSecretStore),
+            event_sender,
+        );
+        runtime.connection.lock().await.insert(
+            ConnectionKey::new(active_identity, target.clone()),
+            ActiveConnection {
+                database: root.clone(),
+                target: target.clone(),
+            },
+        );
+
+        let stale_identity = ConnectionIdentity {
+            profile_id: profile.id,
+            generation: 8,
+        };
+        let relation = crate::db::catalog::CatalogId::new(
+            profile.id,
+            crate::db::catalog::CatalogKind::Table,
+            ["memory", "main", "runtime_rows"],
+        );
+        let tab_id = Uuid::new_v4();
+        let request = RelationMutationRequest {
+            tab_id,
+            tab_generation: 1,
+            edit_generation: 1,
+            row_id: EditableRowId(2),
+            connection: stale_identity,
+            target: target.clone(),
+            relation: relation.clone(),
+            relation_key: RelationKey {
+                profile_id: profile.id,
+                object_id: relation,
+            },
+            scope: profile.catalog_scope.clone(),
+            metadata: MetadataFingerprint {
+                relation: "runtime_rows".into(),
+                columns: vec![
+                    ("id".into(), "INTEGER".into(), false),
+                    ("value".into(), "VARCHAR".into(), true),
+                ],
+                primary_key: vec!["id".into()],
+            },
+            operation: RelationMutation::InsertRow(InsertRowMutation {
+                columns: vec![0, 1],
+                values: vec![
+                    InputValue::Value(crate::db::value::CellValue::Integer(2)),
+                    InputValue::Value(crate::db::value::CellValue::Text("stale generation".into())),
+                ],
+            }),
+        };
+        runtime.dispatch(Command::RelationMutation {
+            request: request.clone(),
+        });
+
+        let failure = tokio::time::timeout(std::time::Duration::from_secs(5), async {
+            loop {
+                if let Some(Action::RelationMutationFailed {
+                    request: failed,
+                    message,
+                    ..
+                }) = events.recv().await
+                    && failed == request
+                {
+                    break message;
+                }
+            }
+        })
+        .await
+        .expect("stale-generation mutation must fail within its bound");
+        assert!(!failure.is_empty());
+        assert!(
+            !runtime
+                .duckdb_sessions
+                .lock()
+                .await
+                .has_session(stale_identity, &target, tab_id)
+        );
+        let state = root
+            .execute("SELECT count(*) FROM runtime_rows WHERE id = 2")
+            .await
+            .unwrap();
+        assert_eq!(
+            state.result_sets[0].rows[0][0],
+            crate::db::value::CellValue::Integer(0)
+        );
+        tokio::time::timeout(std::time::Duration::from_secs(5), async {
+            while runtime
+                .relation_transactions
+                .get(&tab_id)
+                .is_some_and(|entry| !entry.worker_handle.is_finished())
+            {
+                tokio::task::yield_now().await;
+            }
+        })
+        .await
+        .expect("rejected stale mutation worker must terminate");
+        root.close().await;
+    }
+
+    #[tokio::test]
+    async fn close_and_disconnect_interrupt_in_flight_duckdb_queries() {
+        let profile = import_connection_url("duckdb::memory:", Some("runtime-close-race"))
+            .unwrap()
+            .profile;
+        let identity = ConnectionIdentity {
+            profile_id: profile.id,
+            generation: 3,
+        };
+        let root = DatabaseConnection::connect(&profile, None).await.unwrap();
+        let target = ExecutionTarget::from_profile(&profile);
+        let console_id = Uuid::new_v4();
+        let (event_sender, mut events) = mpsc::unbounded_channel();
+        let temp = tempfile::tempdir().unwrap();
+        let mut runtime = Runtime::new(
+            vec![profile],
+            HashSet::new(),
+            HashMap::new(),
+            None,
+            ProfileStore::new(temp.path().join("profiles.json")),
+            Arc::new(crate::persistence::secrets::NativeSecretStore),
+            event_sender,
+        );
+        runtime.connection.lock().await.insert(
+            ConnectionKey::new(identity, target.clone()),
+            ActiveConnection {
+                database: root.clone(),
+                target: target.clone(),
+            },
+        );
+
+        for (generation, release_generation) in [(31, false), (32, true)] {
+            runtime.dispatch(Command::RunQuery {
+                connection: identity,
+                target: target.clone(),
+                tab_id: console_id,
+                generation,
+                console_id,
+                sql: "SELECT sum(i) FROM range(5000000000) t(i)".to_owned(),
+            });
+
+            let operation = tokio::time::timeout(std::time::Duration::from_secs(5), async {
+                loop {
+                    if let Some((_, operation)) = runtime
+                        .duckdb_query_interrupts
+                        .lock()
+                        .unwrap()
+                        .get(&(console_id, generation))
+                        .cloned()
+                    {
+                        break operation;
+                    }
+                    tokio::task::yield_now().await;
+                }
+            })
+            .await;
+            let Some(operation) = operation.ok() else {
+                tokio::time::timeout(std::time::Duration::from_secs(10), async {
+                    while !runtime.query_tasks[&(console_id, generation)].is_finished() {
+                        tokio::task::yield_now().await;
+                    }
+                })
+                .await
+                .expect("query with a missing operation handle must still finish");
+                panic!("native operation must be registered before release");
+            };
+
+            if release_generation {
+                runtime.dispatch(Command::Disconnect {
+                    connection: identity,
+                });
+            } else {
+                runtime.dispatch(Command::ReleaseDuckDbConsole {
+                    connection: identity,
+                    console_id,
+                });
+            }
+            if release_generation {
+                tokio::time::timeout(std::time::Duration::from_secs(5), async {
+                    loop {
+                        if matches!(events.recv().await, Some(Action::DisconnectCompleted { connection }) if connection == identity)
+                        {
+                            break;
+                        }
+                    }
+                })
+                .await
+                .expect("generation disconnect must finish");
+            }
+
+            let query_stopped = tokio::time::timeout(std::time::Duration::from_secs(10), async {
+                while runtime
+                    .query_tasks
+                    .get(&(console_id, generation))
+                    .is_some_and(|task| !task.is_finished())
+                {
+                    tokio::task::yield_now().await;
+                }
+            })
+            .await;
+            if query_stopped.is_err() {
+                // Prevent a regression failure from leaving a native query running.
+                operation.cancel();
+            }
+            query_stopped.expect("released DuckDB query task must stop within its bound");
+            let mut query_failed = false;
+            while let Ok(action) = events.try_recv() {
+                match action {
+                    Action::QueryFailed {
+                        tab_id,
+                        generation: failed_generation,
+                        ..
+                    } if tab_id == console_id && failed_generation == generation => {
+                        query_failed = true;
+                    }
+                    Action::QueryFinished {
+                        tab_id,
+                        generation: finished_generation,
+                        ..
+                    } if tab_id == console_id && finished_generation == generation => {
+                        panic!(
+                            "release command must cancel rather than finish the in-flight query"
+                        );
+                    }
+                    _ => {}
+                }
+            }
+            assert!(
+                query_failed,
+                "released DuckDB query must report cancellation"
+            );
+            assert!(
+                !runtime
+                    .duckdb_query_interrupts
+                    .lock()
+                    .unwrap()
+                    .contains_key(&(console_id, generation))
+            );
+            assert!(
+                !runtime
+                    .duckdb_query_generations
+                    .lock()
+                    .unwrap()
+                    .contains(&(console_id, generation))
+            );
+            tokio::time::timeout(std::time::Duration::from_secs(5), async {
+                while runtime
+                    .query_tasks
+                    .get(&(console_id, generation))
+                    .is_some_and(|task| !task.is_finished())
+                {
+                    tokio::task::yield_now().await;
+                }
+            })
+            .await
+            .expect("cancelled query task must exit before the next lifecycle case");
+
+            if release_generation {
+                assert_eq!(runtime.duckdb_sessions.lock().await.generation_count(), 0);
+            } else {
+                tokio::time::timeout(std::time::Duration::from_secs(5), async {
+                    while !runtime.background_tasks.iter().all(JoinHandle::is_finished) {
+                        tokio::task::yield_now().await;
+                    }
+                })
+                .await
+                .expect("console release must finish");
+                assert!(
+                    !runtime
+                        .duckdb_sessions
+                        .lock()
+                        .await
+                        .has_console_session(identity, &target, console_id)
+                );
+
+                let reopened = runtime
+                    .duckdb_sessions
+                    .lock()
+                    .await
+                    .console_session(identity, target.clone(), console_id, root.clone())
+                    .unwrap();
+                assert!(reopened.execute("SELECT 42").await.is_ok());
+                drop(reopened);
+            }
+        }
+    }
+
     #[test]
     fn clipboard_failure_feedback_is_not_payload_bearing() {
         let message = clipboard_write_failure_message();
@@ -9042,6 +9880,7 @@ mod tests {
                     database: ":memory:".to_owned(),
                     schema: Some("main".to_owned()),
                 },
+                console_id: tab_id,
                 transaction_id: Uuid::nil(),
                 transaction_generation: 1,
                 request_sender,

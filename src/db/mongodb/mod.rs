@@ -472,6 +472,7 @@ mod tests {
             database: Some("app".to_owned()),
             default_schema: None,
             sqlite_path: None,
+            duckdb_path: None,
             mongodb_options: Some(options),
             ssl_mode: SslMode::Prefer,
             credential_policy: CredentialPolicy::None,

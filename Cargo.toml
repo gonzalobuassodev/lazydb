@@ -21,6 +21,7 @@ chacha20poly1305 = "0.10"
 clap = { version = "4.5", features = ["derive"] }
 crossterm = { version = "0.29", features = ["event-stream"] }
 directories = "6.0"
+duckdb = { version = "=1.10506.0", default-features = false, features = ["bundled", "chrono", "json", "parquet"] }
 futures-util = { version = "0.3", features = ["io"] }
 keyring = "4.1.6"
 jsonc-parser = { version = "0.33", features = ["cst", "serde_json"] }

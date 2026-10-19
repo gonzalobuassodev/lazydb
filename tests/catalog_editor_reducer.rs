@@ -47,38 +47,30 @@ fn table_navigation_reaches_and_leaves_every_action() {
                     lazydb::model::catalog_editor::TableGeneralField::Schema
                 )
     ));
-    if let Some(lazydb::model::catalog_editor::CatalogDraft::Table(draft)) = app
+    let Some(CatalogDraft::Table(draft)) = app
         .catalog_editor
         .as_mut()
         .and_then(|editor| editor.draft.as_mut())
-    {
-        draft.focus = lazydb::model::catalog_editor::TableEditorFocus::Columns;
-    }
-    for expected in [
+    else {
+        panic!("table draft should be selected");
+    };
+    draft.columns.clear();
+    draft.focus = lazydb::model::catalog_editor::TableEditorFocus::Action(
         lazydb::model::catalog_editor::TableActionField::AddColumn,
+    );
+    for expected in [
+        lazydb::model::catalog_editor::TableActionField::AddConstraintPrimaryKey,
+        lazydb::model::catalog_editor::TableActionField::AddConstraintUnique,
+        lazydb::model::catalog_editor::TableActionField::AddConstraintCheck,
+        lazydb::model::catalog_editor::TableActionField::AddConstraintForeignKey,
         lazydb::model::catalog_editor::TableActionField::Review,
         lazydb::model::catalog_editor::TableActionField::Cancel,
     ] {
-        app.update(Action::CatalogEditorFieldNext);
-        assert!(matches!(
-            app.catalog_editor.as_ref().and_then(|editor| editor.draft.as_ref()),
-            Some(lazydb::model::catalog_editor::CatalogDraft::Table(draft))
-                if draft.focus == lazydb::model::catalog_editor::TableEditorFocus::Action(expected)
-        ));
-    }
-    for expected in [
-        lazydb::model::catalog_editor::TableActionField::Review,
-        lazydb::model::catalog_editor::TableActionField::AddColumn,
-        lazydb::model::catalog_editor::TableActionField::AddColumn,
-    ] {
-        app.update(Action::CatalogEditorFieldPrevious);
-        assert!(matches!(
-            app.catalog_editor.as_ref().and_then(|editor| editor.draft.as_ref()),
-            Some(lazydb::model::catalog_editor::CatalogDraft::Table(draft))
-                if draft.focus == lazydb::model::catalog_editor::TableEditorFocus::Action(expected)
-                    || expected == lazydb::model::catalog_editor::TableActionField::AddColumn
-                        && draft.focus == lazydb::model::catalog_editor::TableEditorFocus::Columns
-        ));
+        draft.focus_next();
+        assert_eq!(
+            draft.focus,
+            lazydb::model::catalog_editor::TableEditorFocus::Action(expected)
+        );
     }
 }
 

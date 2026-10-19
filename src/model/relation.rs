@@ -63,6 +63,7 @@ pub enum RelationRequestKind {
 #[derive(Clone, Debug, Eq, Hash, PartialEq)]
 pub struct RelationRequest {
     pub tab_id: Uuid,
+    pub console_id: Uuid,
     pub tab_generation: u64,
     pub request_id: u64,
     pub connection: ConnectionIdentity,
@@ -108,6 +109,7 @@ impl<T> OwnedSnapshot<T> {
 }
 
 #[derive(Clone, Debug, PartialEq)]
+#[allow(clippy::large_enum_variant)]
 pub enum RelationLoad<T> {
     Empty,
     Loading {

@@ -1946,9 +1946,84 @@ fn render_table(
             theme,
         );
     }
+    if let TableEditorFocus::Action(TableActionField::Constraint(index)) = draft.focus
+        && let Some(constraint) = draft.table_constraints.get(index)
+    {
+        let fields: Vec<(usize, &str, &TextInput)> = match constraint.kind {
+            crate::db::catalog_mutation::ConstraintDefinitionKind::PrimaryKey { .. }
+            | crate::db::catalog_mutation::ConstraintDefinitionKind::Unique { .. } => {
+                vec![
+                    (0, "Name", &constraint.name),
+                    (1, "Columns", &constraint.columns),
+                ]
+            }
+            crate::db::catalog_mutation::ConstraintDefinitionKind::Check { .. } => vec![
+                (0, "Name", &constraint.name),
+                (1, "Expression", &constraint.expression),
+            ],
+            crate::db::catalog_mutation::ConstraintDefinitionKind::ForeignKey { .. } => vec![
+                (0, "Name", &constraint.name),
+                (1, "Columns", &constraint.columns),
+                (2, "Target schema", &constraint.referenced_schema),
+                (3, "Target table", &constraint.referenced_relation),
+                (4, "Target columns", &constraint.referenced_columns),
+                (5, "On update", &constraint.on_update),
+                (6, "On delete", &constraint.on_delete),
+            ],
+        };
+        let top = area.y.saturating_add(2);
+        let content_bottom = area.y.saturating_add(area.height.saturating_sub(10));
+        for (field_index, (selection_index, label, input)) in fields.iter().enumerate() {
+            let y = top.saturating_add(field_index as u16);
+            if y >= content_bottom {
+                break;
+            }
+            let row = Rect::new(area.x, y, area.width, 1);
+            frame.render_widget(
+                Paragraph::new(format!(
+                    "{label:<16} {}",
+                    sanitize_terminal_text(input.value())
+                ))
+                .style(Style::new().fg(theme.text).bg(
+                    if constraint.selected_field == *selection_index {
+                        theme.selection
+                    } else {
+                        theme.surface
+                    },
+                )),
+                row,
+            );
+            ui.hit_regions.push(HitRegion {
+                area: row,
+                target: HitTarget::CatalogEditorConstraintField {
+                    constraint: index,
+                    field: *selection_index,
+                },
+            });
+        }
+    }
     let hints = table_shortcut_hints(draft, compact);
-    let footer_action_width =
-        dialog_footer::action_width(&["[ Add Column ]", "[ Review SQL ]", "[ Cancel ]"], 3);
+    let footer_action_width = dialog_footer::action_width(
+        &[
+            "[ Add Column ]",
+            "[ Add PK ]",
+            "[ Add UNIQUE ]",
+            "[ Add CHECK ]",
+            "[ Add FK ]",
+            "[ Edit name ]",
+            "[ Edit columns ]",
+            "[ Edit expression ]",
+            "[ Edit target schema ]",
+            "[ Edit target table ]",
+            "[ Edit target columns ]",
+            "[ Edit on update ]",
+            "[ Edit on delete ]",
+            "[ Remove Constraint ]",
+            "[ Review SQL ]",
+            "[ Cancel ]",
+        ],
+        1,
+    );
     let footer = dialog_footer::measure(
         area,
         footer_action_width,
@@ -2263,12 +2338,7 @@ fn render_table(
         Paragraph::new(summary_line).style(Style::new().bg(theme.surface)),
         footer.status_area(footer_action_width, 3),
     );
-    let bottom_actions = [
-        (
-            "[ Add Column ]",
-            TableEditorFocus::Action(TableActionField::AddColumn),
-            HitTarget::CatalogEditorAddTableColumn,
-        ),
+    let mut bottom_actions = vec![
         (
             "[ Review SQL ]",
             TableEditorFocus::Action(TableActionField::Review),
@@ -2279,12 +2349,82 @@ fn render_table(
             TableEditorFocus::Action(TableActionField::Cancel),
             HitTarget::CatalogEditorCancel,
         ),
+        (
+            "[ Add Column ]",
+            TableEditorFocus::Action(TableActionField::AddColumn),
+            HitTarget::CatalogEditorAddTableColumn,
+        ),
+        (
+            "[ Add PK ]",
+            TableEditorFocus::Action(TableActionField::AddConstraintPrimaryKey),
+            HitTarget::CatalogEditorAddTableConstraintPrimaryKey,
+        ),
+        (
+            "[ Add UNIQUE ]",
+            TableEditorFocus::Action(TableActionField::AddConstraintUnique),
+            HitTarget::CatalogEditorAddTableConstraintUnique,
+        ),
+        (
+            "[ Add CHECK ]",
+            TableEditorFocus::Action(TableActionField::AddConstraintCheck),
+            HitTarget::CatalogEditorAddTableConstraintCheck,
+        ),
+        (
+            "[ Add FK ]",
+            TableEditorFocus::Action(TableActionField::AddConstraintForeignKey),
+            HitTarget::CatalogEditorAddTableConstraintForeignKey,
+        ),
     ];
-    let action_width =
-        dialog_footer::action_width(&["[ Add Column ]", "[ Review SQL ]", "[ Cancel ]"], 3);
-    let mut x = footer.action_area(action_width, 3).x;
+    if !draft.table_constraints.is_empty() {
+        let constraint_index = match draft.focus {
+            TableEditorFocus::Action(
+                TableActionField::Constraint(index) | TableActionField::RemoveConstraint(index),
+            ) => index.min(draft.table_constraints.len() - 1),
+            _ => 0,
+        };
+        bottom_actions.push((
+            "[ Remove Constraint ]",
+            TableEditorFocus::Action(TableActionField::RemoveConstraint(constraint_index)),
+            HitTarget::CatalogEditorRemoveTableConstraint(constraint_index),
+        ));
+        let constraint = &draft.table_constraints[constraint_index];
+        let field_labels: Vec<(usize, &str)> = match constraint.kind {
+            crate::db::catalog_mutation::ConstraintDefinitionKind::PrimaryKey { .. }
+            | crate::db::catalog_mutation::ConstraintDefinitionKind::Unique { .. } => {
+                vec![(0, "Edit name"), (1, "Edit columns")]
+            }
+            crate::db::catalog_mutation::ConstraintDefinitionKind::Check { .. } => {
+                vec![(0, "Edit name"), (1, "Edit expression")]
+            }
+            crate::db::catalog_mutation::ConstraintDefinitionKind::ForeignKey { .. } => vec![
+                (0, "Edit name"),
+                (1, "Edit columns"),
+                (2, "Edit target schema"),
+                (3, "Edit target table"),
+                (4, "Edit target columns"),
+                (5, "Edit on update"),
+                (6, "Edit on delete"),
+            ],
+        };
+        for (field, label) in field_labels {
+            bottom_actions.push((
+                label,
+                TableEditorFocus::Action(TableActionField::Constraint(constraint_index)),
+                HitTarget::CatalogEditorConstraintField {
+                    constraint: constraint_index,
+                    field,
+                },
+            ));
+        }
+    }
+    let action_width = footer_action_width;
+    let mut x = footer.action_area(action_width, 1).x;
+    let action_right = footer.status_and_actions.right();
     for (label, field, target) in bottom_actions {
         let width = label.width() as u16;
+        if x.saturating_add(width) > action_right {
+            break;
+        }
         let action_area = Rect::new(x, footer.status_and_actions.y, width, 1);
         render_catalog_action(
             frame,
@@ -3067,6 +3207,7 @@ fn preview(
             }
             crate::profile::DatabaseKind::Oracle => SqlDialect::Generic,
             crate::profile::DatabaseKind::Sqlite => SqlDialect::Sqlite,
+            crate::profile::DatabaseKind::DuckDb => SqlDialect::DuckDb,
             crate::profile::DatabaseKind::SqlServer => SqlDialect::SqlServer,
             crate::profile::DatabaseKind::Redis | crate::profile::DatabaseKind::MongoDb => {
                 SqlDialect::Generic

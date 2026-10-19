@@ -15,7 +15,7 @@ pub(crate) const LOADING_DELAY: Duration = Duration::from_millis(250);
 pub(crate) enum LoadIdentity {
     Query { tab_id: Uuid, generation: u64 },
     Derived { tab_id: Uuid, generation: u64 },
-    Relation(RelationRequest),
+    Relation(Box<RelationRequest>),
     ProfileScope { request_id: u64 },
     Update { request_id: u64 },
 }

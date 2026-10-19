@@ -198,6 +198,29 @@ fn parses_connection_read_commands_and_upsert() {
 }
 
 #[test]
+fn parses_duckdb_connection_and_lsp_dialect() {
+    let cli = Cli::try_parse_from([
+        "lazydb",
+        "connections",
+        "add",
+        "--name",
+        "warehouse",
+        "--url",
+        "duckdb:./warehouse.duckdb?read_only=true&schema=main",
+        "--scope",
+        "project",
+    ])
+    .unwrap();
+    assert_eq!(
+        cli.url.as_deref(),
+        Some("duckdb:./warehouse.duckdb?read_only=true&schema=main")
+    );
+    assert!(Cli::try_parse_from(["lazydb", "lsp", "--stdio", "--dialect", "duckdb"]).is_ok());
+    let info = lazydb::cli::version_info();
+    assert!(info.drivers.contains(&"duckdb"));
+}
+
+#[test]
 fn rejects_conflicting_connection_password_sources() {
     assert!(
         Cli::try_parse_from([

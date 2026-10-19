@@ -362,6 +362,7 @@ async fn local_encrypted_password_is_persisted_and_resolved_after_restart() {
     second_runtime.dispatch(Command::Connect {
         profile_id,
         generation: 1,
+        console_id: Uuid::new_v4(),
         target: ExecutionTarget {
             profile_id,
             database: "outside-scope".to_owned(),
@@ -471,6 +472,7 @@ async fn remembered_password_is_resolved_after_runtime_reconstruction() {
     second_runtime.dispatch(Command::Connect {
         profile_id,
         generation: 1,
+        console_id: Uuid::new_v4(),
         target: invalid_target,
     });
 
@@ -547,6 +549,7 @@ async fn prompt_policy_without_a_runtime_password_requests_credentials() {
         profile_id,
         generation: 1,
         target,
+        console_id: Uuid::new_v4(),
     });
 
     assert!(matches!(
@@ -889,6 +892,7 @@ async fn deleting_the_active_profile_requests_an_explicit_disconnect() {
         profile_id,
         generation: 1,
         target,
+        console_id: Uuid::new_v4(),
     });
     assert!(matches!(
         next_action(&mut receiver).await,
@@ -964,6 +968,7 @@ async fn deleting_a_profile_invalidates_its_in_flight_connection() {
         profile_id,
         generation: 1,
         target,
+        console_id: Uuid::new_v4(),
     });
     timeout(Duration::from_secs(3), accepted_receiver)
         .await

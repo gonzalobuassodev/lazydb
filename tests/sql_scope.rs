@@ -189,6 +189,18 @@ fn dialect_specific_mysql_comments_and_unterminated_constructs_are_conservative(
 }
 
 #[test]
+fn duckdb_scanner_handles_dollar_quotes_lists_and_nested_comments() {
+    let text = "SELECT $$left;right$$, $tag$semi;colon$tag$, [1, 2]; /* outer ; /* inner ; */ end */ SELECT 3;";
+    let ranges = scan_statements(text, SqlDialect::DuckDb);
+    assert_eq!(ranges.len(), 2);
+    assert_eq!(
+        &text[ranges[0].start..ranges[0].end],
+        "SELECT $$left;right$$, $tag$semi;colon$tag$, [1, 2];"
+    );
+    assert!(text[ranges[1].start..ranges[1].end].contains("SELECT 3"));
+}
+
+#[test]
 fn sql_server_scope_ignores_semicolons_in_bracketed_identifiers() {
     let text = "SELECT [odd;name], N'value;still' FROM [dbo].[items]; SELECT @value;";
     let ranges = scan_statements(text, SqlDialect::SqlServer);

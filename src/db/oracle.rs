@@ -709,6 +709,7 @@ impl OracleAdapter {
                     columns,
                     indexes: Vec::new(),
                     constraints: Vec::new(),
+                    structured_constraints: Vec::new(),
                     baseline_fingerprint,
                 }))
             })

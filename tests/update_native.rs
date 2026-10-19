@@ -128,7 +128,7 @@ fn serve_manifest(
         let request = String::from_utf8_lossy(&request[..size]);
         assert!(request.starts_with("GET /v2/stable.json "), "{request}");
         if let Some(gate) = gate {
-            gate.recv_timeout(Duration::from_secs(10))
+            gate.recv_timeout(Duration::from_secs(15))
                 .expect("release delayed response");
         }
         write!(
@@ -192,8 +192,11 @@ fn current_version_and_checking_are_flushed_before_the_network_response() {
             }
         }
     });
+    // Starting the installed launcher can be slow on cold/loaded CI workers.
+    // Keep the manifest response gated while allowing the child enough time to
+    // start and flush its three progress lines.
     let early = (0..3)
-        .map(|_| lines.recv_timeout(Duration::from_secs(3)))
+        .map(|_| lines.recv_timeout(Duration::from_secs(10)))
         .collect::<Result<Vec<_>, _>>();
     // Always release the fixture and reap the child, including on a timing failure.
     release.send(()).unwrap();

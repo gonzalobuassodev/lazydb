@@ -210,6 +210,8 @@ pub enum LspDialect {
     SqlServer,
     Sqlite,
     ClickHouse,
+    #[value(name = "duckdb")]
+    DuckDb,
     #[default]
     Generic,
 }
@@ -221,6 +223,7 @@ impl From<crate::profile::DatabaseKind> for LspDialect {
             crate::sql::SqlDialect::MySql => Self::MySql,
             crate::sql::SqlDialect::MariaDb => Self::MySql,
             crate::sql::SqlDialect::SqlServer => Self::SqlServer,
+            crate::sql::SqlDialect::DuckDb => Self::DuckDb,
             crate::sql::SqlDialect::Sqlite
             | crate::sql::SqlDialect::Generic
             | crate::sql::SqlDialect::Oracle => Self::Sqlite,
@@ -731,6 +734,7 @@ mod tests {
                 "oracle",
                 "sqlserver",
                 "sqlite",
+                "duckdb",
                 "redis",
                 "mongodb",
                 "clickhouse"

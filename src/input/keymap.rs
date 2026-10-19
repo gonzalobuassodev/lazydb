@@ -3881,6 +3881,26 @@ fn map_table_editor(
     if editor_table_details_open(editor) {
         return map_table_column_details(event, field);
     }
+    if matches!(
+        field,
+        TableEditorFocus::Action(TableActionField::Constraint(_))
+    ) {
+        return match event.code {
+            KeyCode::Esc => Some(Action::CatalogEditorPreview),
+            KeyCode::Tab => Some(Action::CatalogEditorFieldNext),
+            KeyCode::BackTab => Some(Action::CatalogEditorFieldPrevious),
+            KeyCode::Up => Some(Action::CatalogEditorMove(-1)),
+            KeyCode::Down => Some(Action::CatalogEditorMove(1)),
+            KeyCode::Char(character) => Some(Action::CatalogEditorInsert(character)),
+            KeyCode::Backspace => Some(Action::CatalogEditorBackspace),
+            KeyCode::Delete => Some(Action::CatalogEditorDelete),
+            KeyCode::Left => Some(Action::CatalogEditorMoveLeft),
+            KeyCode::Right => Some(Action::CatalogEditorMoveRight),
+            KeyCode::Home => Some(Action::CatalogEditorMoveHome),
+            KeyCode::End => Some(Action::CatalogEditorMoveEnd),
+            _ => None,
+        };
+    }
     let text_focus = matches!(
         field,
         TableEditorFocus::General(_)
@@ -3987,6 +4007,26 @@ fn map_table_editor(
             TableEditorFocus::Action(TableActionField::AddColumn),
             KeyCode::Enter | KeyCode::Char(' '),
         ) => Some(Action::CatalogEditorAddTableColumn),
+        (
+            TableEditorFocus::Action(TableActionField::AddConstraintPrimaryKey),
+            KeyCode::Enter | KeyCode::Char(' '),
+        ) => Some(Action::CatalogEditorAddTableConstraintPrimaryKey),
+        (
+            TableEditorFocus::Action(TableActionField::AddConstraintUnique),
+            KeyCode::Enter | KeyCode::Char(' '),
+        ) => Some(Action::CatalogEditorAddTableConstraintUnique),
+        (
+            TableEditorFocus::Action(TableActionField::AddConstraintCheck),
+            KeyCode::Enter | KeyCode::Char(' '),
+        ) => Some(Action::CatalogEditorAddTableConstraintCheck),
+        (
+            TableEditorFocus::Action(TableActionField::AddConstraintForeignKey),
+            KeyCode::Enter | KeyCode::Char(' '),
+        ) => Some(Action::CatalogEditorAddTableConstraintForeignKey),
+        (
+            TableEditorFocus::Action(TableActionField::RemoveConstraint(index)),
+            KeyCode::Enter | KeyCode::Char(' '),
+        ) => Some(Action::CatalogEditorRemoveTableConstraint(index)),
         (
             TableEditorFocus::Action(TableActionField::Review),
             KeyCode::Enter | KeyCode::Char(' '),

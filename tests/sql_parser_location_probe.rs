@@ -8,6 +8,7 @@ fn dialect(dialect: SqlDialect) -> &'static dyn sqlparser::dialect::Dialect {
         SqlDialect::SqlServer => &sqlparser::dialect::MsSqlDialect {},
         SqlDialect::Sqlite => &sqlparser::dialect::SQLiteDialect {},
         SqlDialect::ClickHouse => &sqlparser::dialect::ClickHouseDialect {},
+        SqlDialect::DuckDb => &sqlparser::dialect::DuckDbDialect {},
         SqlDialect::Generic | SqlDialect::Oracle => &sqlparser::dialect::GenericDialect {},
     }
 }

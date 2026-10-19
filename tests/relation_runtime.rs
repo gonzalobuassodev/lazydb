@@ -27,6 +27,7 @@ fn request() -> RelationRequest {
     let profile_id = Uuid::new_v4();
     RelationRequest {
         tab_id: Uuid::new_v4(),
+        console_id: Uuid::new_v4(),
         tab_generation: 3,
         request_id: 9,
         connection: ConnectionIdentity {

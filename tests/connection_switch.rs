@@ -1944,6 +1944,7 @@ async fn connecting_second_profile_keeps_first_runtime_console_usable() {
                 .unwrap(),
         ),
         tab_id: Uuid::new_v4(),
+        console_id: Uuid::new_v4(),
         generation: 1,
         sql: "SELECT value FROM marker".into(),
     });
@@ -1953,6 +1954,7 @@ async fn connecting_second_profile_keeps_first_runtime_console_usable() {
     ));
     let relation_request = RelationRequest {
         tab_id: Uuid::new_v4(),
+        console_id: Uuid::new_v4(),
         tab_generation: 0,
         request_id: 1,
         connection: first_identity,
@@ -2024,6 +2026,7 @@ async fn late_disconnect_cannot_close_a_new_generation_of_the_same_profile() {
         profile_id,
         generation: new_generation,
         target,
+        console_id: app.active_console().id,
     });
     let connected = next_connection_result(&mut app, &mut runtime, &mut receiver, profile_id).await;
     assert!(matches!(
@@ -2116,6 +2119,7 @@ async fn runtime_accepts_same_generation_for_independent_profiles() {
         profile_id: second_id,
         generation: first_identity.generation,
         target: second_target,
+        console_id: app.active_console().id,
     });
     assert!(matches!(
         next_action(&mut receiver).await,
@@ -2154,6 +2158,7 @@ async fn runtime_rejects_target_mismatch_before_query_io() {
         profile_id,
         generation: 1,
         target: active_target,
+        console_id: Uuid::new_v4(),
     });
     assert!(matches!(
         next_action(&mut receiver).await,
@@ -2167,6 +2172,7 @@ async fn runtime_rejects_target_mismatch_before_query_io() {
         },
         target: mismatched_target,
         tab_id: Uuid::new_v4(),
+        console_id: Uuid::new_v4(),
         generation: 1,
         sql: "INSERT INTO marker VALUES ('must-not-run')".into(),
     });
@@ -2254,6 +2260,7 @@ async fn startup_password_is_never_reused_for_another_profile() {
         profile_id: second_id,
         generation: 1,
         target: second_target,
+        console_id: Uuid::new_v4(),
     });
     assert!(matches!(
         next_action(&mut receiver).await,
@@ -2273,6 +2280,7 @@ async fn startup_password_is_never_reused_for_another_profile() {
         profile_id: first_id,
         generation: 2,
         target: first_target,
+        console_id: Uuid::new_v4(),
     });
     assert!(matches!(
         next_action(&mut receiver).await,

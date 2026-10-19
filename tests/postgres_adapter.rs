@@ -352,6 +352,7 @@ fn table_definition_shape_includes_ordered_column_attributes_and_placeholders() 
         columns: vec![],
         indexes: vec![],
         constraints: vec![],
+        structured_constraints: vec![],
         baseline_fingerprint: "sha256:table".into(),
     };
     assert_eq!(definition.schema, "public");
@@ -838,6 +839,7 @@ async fn serialized_postgres_catalog_mutations_round_trip_catalog_definitions() 
                     clickhouse_baseline_fingerprint: None,
                     clickhouse_baseline_comment: None,
                     clickhouse_baseline_columns: None,
+                    table_constraints: vec![],
                 }),
             )
             .await;

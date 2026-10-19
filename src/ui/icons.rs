@@ -247,6 +247,7 @@ impl IconSet {
                 DatabaseKind::Oracle => md::MD_DATABASE,
                 DatabaseKind::SqlServer => md::MD_DATABASE,
                 DatabaseKind::Sqlite => dev::DEV_SQLITE,
+                DatabaseKind::DuckDb => md::MD_DATABASE,
                 DatabaseKind::Redis => dev::DEV_REDIS,
                 DatabaseKind::MongoDb => "M",
                 DatabaseKind::ClickHouse => md::MD_DATABASE,
@@ -258,6 +259,7 @@ impl IconSet {
                 DatabaseKind::Oracle => "OR",
                 DatabaseKind::SqlServer => "MS",
                 DatabaseKind::Sqlite => "SQ",
+                DatabaseKind::DuckDb => "DU",
                 DatabaseKind::Redis => "RD",
                 DatabaseKind::MongoDb => "MG",
                 DatabaseKind::ClickHouse => "CH",
@@ -269,6 +271,7 @@ impl IconSet {
                 DatabaseKind::Oracle => "OR",
                 DatabaseKind::SqlServer => "MS",
                 DatabaseKind::Sqlite => "SQ",
+                DatabaseKind::DuckDb => "DU",
                 DatabaseKind::Redis => "RD",
                 DatabaseKind::MongoDb => "MG",
                 DatabaseKind::ClickHouse => "CH",
@@ -283,6 +286,7 @@ impl IconSet {
             DatabaseKind::Oracle => ratatui::style::Color::Rgb(220, 70, 70),
             DatabaseKind::SqlServer => ratatui::style::Color::Rgb(13, 127, 228),
             DatabaseKind::Sqlite => ratatui::style::Color::Rgb(68, 184, 214),
+            DatabaseKind::DuckDb => ratatui::style::Color::Rgb(255, 191, 0),
             DatabaseKind::Redis => ratatui::style::Color::Rgb(220, 45, 45),
             DatabaseKind::MongoDb => ratatui::style::Color::Rgb(0, 150, 90),
             DatabaseKind::ClickHouse => ratatui::style::Color::Rgb(252, 199, 0),
@@ -508,11 +512,12 @@ impl IconSet {
 mod tests {
     use super::*;
 
-    const DATABASE_KINDS: [DatabaseKind; 4] = [
+    const DATABASE_KINDS: [DatabaseKind; 5] = [
         DatabaseKind::Postgres,
         DatabaseKind::MySql,
         DatabaseKind::SqlServer,
         DatabaseKind::Sqlite,
+        DatabaseKind::DuckDb,
     ];
 
     const CATALOG_KINDS: [CatalogKind; 16] = [

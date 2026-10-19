@@ -865,6 +865,7 @@ impl SqliteAdapter {
             columns: column_definitions.clone(),
             indexes: index_names,
             constraints,
+            structured_constraints: Vec::new(),
             baseline_fingerprint: sqlite_snapshot_fingerprint(&snapshot),
         }))
     }

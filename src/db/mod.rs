@@ -1,3 +1,6 @@
+use std::sync::Arc;
+use uuid::Uuid;
+
 pub mod capabilities;
 pub mod catalog;
 pub mod catalog_change_set;
@@ -7,6 +10,7 @@ pub mod clickhouse;
 pub mod column_type;
 pub(crate) mod ddl;
 pub mod descriptor;
+pub mod duckdb;
 pub mod mongodb;
 pub mod monitor;
 pub mod mssql;
@@ -118,6 +122,14 @@ pub struct DatabaseError {
 }
 
 impl DatabaseError {
+    pub(crate) fn internal(message: impl AsRef<str>) -> Self {
+        Self {
+            category: ErrorCategory::Internal,
+            code: Some("internal".into()),
+            message: sanitize_terminal_text(message.as_ref()),
+            diagnostic: None,
+        }
+    }
     pub fn history_snapshot(&self) -> HistoryErrorSnapshot {
         HistoryErrorSnapshot {
             category: self.category,
@@ -290,6 +302,7 @@ pub enum DatabaseConnection {
     MariaDb(MySqlAdapter),
     Oracle(OracleAdapter),
     Sqlite(SqliteAdapter),
+    DuckDb(duckdb::DuckDbAdapter),
     SqlServer(MsSqlAdapter),
     Redis(RedisAdapter),
     MongoDb(mongodb::MongoAdapter),
@@ -303,7 +316,9 @@ impl DatabaseConnection {
             Self::MySql(_) | Self::MariaDb(_) | Self::SqlServer(_) | Self::Oracle(_) => {
                 principal::PrincipalCapability::DdlOnly
             }
-            Self::Sqlite(_) | Self::Redis(_) => principal::PrincipalCapability::Unsupported,
+            Self::Sqlite(_) | Self::DuckDb(_) | Self::Redis(_) => {
+                principal::PrincipalCapability::Unsupported
+            }
             Self::MongoDb(_) => principal::PrincipalCapability::Unsupported,
             Self::ClickHouse(_) => ClickHouseAdapter::principal_capability(),
         }
@@ -335,7 +350,7 @@ impl DatabaseConnection {
                 privileges: Vec::new(),
                 memberships: false,
             },
-            Self::Sqlite(_) | Self::Redis(_) | Self::MongoDb(_) => {
+            Self::Sqlite(_) | Self::DuckDb(_) | Self::Redis(_) | Self::MongoDb(_) => {
                 principal::PrincipalMutationCapabilities {
                     permission_targets: Vec::new(),
                     privileges: Vec::new(),
@@ -353,6 +368,7 @@ impl DatabaseConnection {
             Self::SqlServer(adapter) => adapter.list_principals().await,
             Self::Oracle(adapter) => adapter.list_principals().await,
             Self::Sqlite(adapter) => adapter.list_principals().await,
+            Self::DuckDb(_) => Err(DatabaseError::unsupported("DuckDB has no SQL principals")),
             Self::Redis(_) => Err(DatabaseError::unsupported("Redis has no SQL principals")),
             Self::MongoDb(_) => Err(DatabaseError::unsupported(
                 "MongoDB uses document principals",
@@ -370,7 +386,9 @@ impl DatabaseConnection {
             Self::MySql(adapter) | Self::MariaDb(adapter) => adapter.principal_ddl(principal).await,
             Self::SqlServer(adapter) => adapter.principal_ddl(principal).await,
             Self::Oracle(adapter) => adapter.principal_ddl(principal).await,
-            Self::Sqlite(_) => Err(DatabaseError::unsupported("SQLite has no SQL principals")),
+            Self::Sqlite(_) | Self::DuckDb(_) => Err(DatabaseError::unsupported(
+                "This database has no SQL principals",
+            )),
             Self::Redis(_) => Err(DatabaseError::unsupported("Redis has no SQL principals")),
             Self::MongoDb(_) => Err(DatabaseError::unsupported(
                 "MongoDB uses document principals",
@@ -391,9 +409,11 @@ impl DatabaseConnection {
             }
             Self::SqlServer(adapter) => adapter.principal_details(principal, target).await,
             Self::Oracle(adapter) => adapter.principal_details(principal, target).await,
-            Self::Sqlite(_) | Self::Redis(_) | Self::MongoDb(_) => Err(DatabaseError::unsupported(
-                "This database does not support SQL principal permission details",
-            )),
+            Self::Sqlite(_) | Self::DuckDb(_) | Self::Redis(_) | Self::MongoDb(_) => {
+                Err(DatabaseError::unsupported(
+                    "This database does not support SQL principal permission details",
+                ))
+            }
             Self::ClickHouse(adapter) => adapter.principal_details(principal, target).await,
         }
     }
@@ -444,6 +464,9 @@ impl DatabaseConnection {
                 message: "SQLite does not expose server monitoring metrics".into(),
                 diagnostic: None,
             }),
+            Self::DuckDb(_) => Err(DatabaseError::unsupported(
+                "DuckDB does not expose server monitoring metrics",
+            )),
             Self::Redis(adapter) => adapter.load_monitor_snapshot().await,
             Self::MongoDb(_) => Err(DatabaseError::unsupported(
                 "MongoDB monitor integration is not implemented yet",
@@ -459,7 +482,7 @@ impl DatabaseConnection {
             Self::MariaDb(adapter) => adapter.load_monitor_metadata().await,
             Self::Oracle(_) => Ok(monitor::MonitorMetadata::default()),
             Self::SqlServer(adapter) => adapter.load_monitor_metadata().await,
-            Self::Sqlite(_) => Ok(monitor::MonitorMetadata::default()),
+            Self::Sqlite(_) | Self::DuckDb(_) => Ok(monitor::MonitorMetadata::default()),
             Self::Redis(_) => Ok(monitor::MonitorMetadata::default()),
             Self::MongoDb(_) => Ok(monitor::MonitorMetadata::default()),
             Self::ClickHouse(_) => Ok(monitor::MonitorMetadata::default()),
@@ -484,6 +507,9 @@ impl DatabaseConnection {
                 message: "SQLite does not expose a server process list".into(),
                 diagnostic: None,
             }),
+            Self::DuckDb(_) => Err(DatabaseError::unsupported(
+                "DuckDB does not expose a server process list",
+            )),
             Self::Redis(_) => Err(DatabaseError {
                 category: ErrorCategory::Unsupported,
                 code: Some("redis_process_list_unsupported".into()),
@@ -532,6 +558,12 @@ impl DatabaseConnection {
                     forced_close,
                 ),
             ),
+            Self::DuckDb(adapter) => Ok(
+                crate::runtime::transaction::spawn_transaction_worker_with_forced_close(
+                    adapter.transaction_backend().await?,
+                    forced_close,
+                ),
+            ),
             Self::SqlServer(adapter) => Ok(
                 crate::runtime::transaction::spawn_transaction_worker_with_forced_close(
                     adapter.transaction_backend().await?,
@@ -556,6 +588,9 @@ impl DatabaseConnection {
     ) -> Result<Self, DatabaseError> {
         match profile.kind {
             DatabaseKind::Sqlite => SqliteAdapter::connect(profile).await.map(Self::Sqlite),
+            DatabaseKind::DuckDb => duckdb::DuckDbAdapter::connect(profile)
+                .await
+                .map(Self::DuckDb),
             DatabaseKind::Postgres => PostgresAdapter::connect(profile, password)
                 .await
                 .map(Self::Postgres),
@@ -601,10 +636,18 @@ impl DatabaseConnection {
             Self::MariaDb(_) => DatabaseKind::MariaDb,
             Self::Oracle(_) => DatabaseKind::Oracle,
             Self::Sqlite(_) => DatabaseKind::Sqlite,
+            Self::DuckDb(_) => DatabaseKind::DuckDb,
             Self::SqlServer(_) => DatabaseKind::SqlServer,
             Self::Redis(_) => DatabaseKind::Redis,
             Self::MongoDb(_) => DatabaseKind::MongoDb,
             Self::ClickHouse(_) => DatabaseKind::ClickHouse,
+        }
+    }
+
+    pub fn duckdb_session_clone(&self) -> Result<Option<Self>, DatabaseError> {
+        match self {
+            Self::DuckDb(adapter) => adapter.database_clone().map(Self::DuckDb).map(Some),
+            _ => Ok(None),
         }
     }
 
@@ -635,6 +678,7 @@ impl DatabaseConnection {
                 supports_lazy_children: true,
             },
             Self::Sqlite(_) => SqliteAdapter::catalog_capabilities(),
+            Self::DuckDb(_) => duckdb::DuckDbAdapter::catalog_capabilities(),
             Self::SqlServer(_) => MsSqlAdapter::catalog_capabilities(),
             Self::Redis(_) => CatalogCapabilities {
                 namespace_model: catalog::NamespaceModel::DatabaseAndSchema,
@@ -671,6 +715,7 @@ impl DatabaseConnection {
             Self::MariaDb(_) => MySqlAdapter::catalog_mutation_capabilities(),
             Self::Oracle(_) => OracleAdapter::catalog_mutation_capabilities(),
             Self::Sqlite(_) => SqliteAdapter::catalog_mutation_capabilities(),
+            Self::DuckDb(_) => duckdb::DuckDbAdapter::catalog_mutation_capabilities(),
             Self::SqlServer(_) => MsSqlAdapter::catalog_mutation_capabilities(),
             Self::Redis(_) => CatalogMutationCapabilities::default(),
             Self::MongoDb(_) => CatalogMutationCapabilities::default(),
@@ -684,6 +729,22 @@ impl DatabaseConnection {
     ) -> catalog_mutation::CatalogMutationAvailability {
         match self {
             Self::Oracle(_) => OracleAdapter::catalog_drop_availability(kind),
+            Self::DuckDb(_)
+                if matches!(
+                    kind,
+                    CatalogKind::Schema
+                        | CatalogKind::Type
+                        | CatalogKind::Table
+                        | CatalogKind::View
+                        | CatalogKind::Sequence
+                        | CatalogKind::Index
+                ) =>
+            {
+                catalog_mutation::CatalogMutationAvailability::Available
+            }
+            Self::DuckDb(_) => catalog_mutation::CatalogMutationAvailability::Unavailable {
+                reason: "DuckDB DROP is not enabled for this catalog object kind",
+            },
             _ => catalog_mutation::CatalogMutationAvailability::Available,
         }
     }
@@ -699,6 +760,7 @@ impl DatabaseConnection {
             Self::MariaDb(_) => MySqlAdapter::plan_catalog_drop(request, entry),
             Self::Oracle(_) => OracleAdapter::plan_catalog_drop(request, entry),
             Self::Sqlite(_) => SqliteAdapter::plan_catalog_drop(request, entry),
+            Self::DuckDb(_) => duckdb::DuckDbAdapter::plan_catalog_drop(request, entry),
             Self::SqlServer(_) => MsSqlAdapter::plan_catalog_drop(request, entry),
             Self::Redis(_) => Err(catalog_drop::CatalogDropError::Unsupported {
                 kind: entry.kind,
@@ -736,6 +798,9 @@ impl DatabaseConnection {
                 MySqlAdapter::plan_catalog_mutation(request, draft, baseline)
             }
             Self::Sqlite(_) => SqliteAdapter::plan_catalog_mutation(request, draft, baseline),
+            Self::DuckDb(_) => {
+                duckdb::DuckDbAdapter::plan_catalog_mutation(request, draft, baseline)
+            }
             Self::SqlServer(_) => MsSqlAdapter::plan_catalog_mutation(request, draft, baseline),
             Self::Oracle(_) => OracleAdapter::plan_catalog_mutation(request, draft, baseline),
             Self::Redis(_) => Err(
@@ -767,6 +832,7 @@ impl DatabaseConnection {
                 adapter.execute_catalog_mutation(plan).await
             }
             Self::Sqlite(adapter) => adapter.execute_catalog_mutation(plan).await,
+            Self::DuckDb(adapter) => adapter.execute_catalog_mutation(plan).await,
             Self::SqlServer(adapter) => adapter.execute_catalog_mutation(plan).await,
             Self::Oracle(adapter) => adapter.execute_catalog_mutation(plan).await,
             Self::Redis(_) => Err(DatabaseError::configuration(
@@ -776,6 +842,18 @@ impl DatabaseConnection {
                 "MongoDB does not support SQL catalog mutation",
             )),
             Self::ClickHouse(adapter) => adapter.execute_catalog_mutation(plan).await,
+        }
+    }
+
+    pub async fn execute_catalog_drop(
+        &self,
+        plan: &catalog_drop::CatalogDropPlan,
+    ) -> Result<QueryOutcome, DatabaseError> {
+        plan.validate()
+            .map_err(|error| DatabaseError::configuration(error.to_string()))?;
+        match self {
+            Self::DuckDb(adapter) => adapter.execute(plan.sql()).await,
+            _ => self.execute(plan.sql()).await,
         }
     }
 
@@ -845,6 +923,7 @@ impl DatabaseConnection {
             Self::MariaDb(adapter) => adapter.probe().await,
             Self::Oracle(adapter) => adapter.probe().await,
             Self::Sqlite(adapter) => adapter.probe().await,
+            Self::DuckDb(adapter) => adapter.probe().await,
             Self::SqlServer(adapter) => adapter.probe().await,
             Self::Redis(adapter) => adapter.probe().await,
             Self::MongoDb(adapter) => adapter.probe().await,
@@ -876,6 +955,7 @@ impl DatabaseConnection {
             Self::MariaDb(adapter) => adapter.discover_catalog_scope().await,
             Self::Oracle(adapter) => adapter.discover_catalog_scope().await,
             Self::Sqlite(adapter) => adapter.discover_catalog_scope().await,
+            Self::DuckDb(adapter) => adapter.discover_catalog_scope().await,
             Self::SqlServer(adapter) => adapter.discover_catalog_scope().await,
             Self::Redis(_) => Err(DatabaseError::configuration(
                 "Redis uses keyspace discovery instead of SQL catalog discovery",
@@ -898,6 +978,7 @@ impl DatabaseConnection {
             | Self::MariaDb(_)
             | Self::Oracle(_)
             | Self::Sqlite(_)
+            | Self::DuckDb(_)
             | Self::SqlServer(_) => Ok(None),
             Self::Redis(_) => Ok(None),
             Self::MongoDb(_) => Ok(None),
@@ -915,6 +996,19 @@ impl DatabaseConnection {
             Self::MariaDb(adapter) => adapter.load_catalog_page(request).await,
             Self::Oracle(adapter) => adapter.load_catalog_page(request).await,
             Self::Sqlite(adapter) => adapter.load_catalog_page(request).await,
+            Self::DuckDb(adapter) => {
+                let discovery = adapter.discover_catalog_scope().await?;
+                let scope = request.scope.clone().with_discovered_databases(
+                    adapter.current_database(),
+                    discovery
+                        .databases
+                        .into_iter()
+                        .map(|database| database.name),
+                );
+                adapter
+                    .load_catalog_page(&request.clone().with_scope(scope))
+                    .await
+            }
             Self::SqlServer(adapter) => adapter.load_catalog_page(request).await,
             Self::Redis(_) => Err(DatabaseError::configuration(
                 "Redis does not support SQL catalog pages",
@@ -936,6 +1030,7 @@ impl DatabaseConnection {
             | Self::MariaDb(_)
             | Self::Oracle(_)
             | Self::Sqlite(_)
+            | Self::DuckDb(_)
             | Self::SqlServer(_) => Ok(None),
             Self::Redis(_) => Ok(None),
             Self::MongoDb(_) => Ok(None),
@@ -958,6 +1053,7 @@ impl DatabaseConnection {
             | Self::MariaDb(_)
             | Self::Oracle(_)
             | Self::Sqlite(_)
+            | Self::DuckDb(_)
             | Self::SqlServer(_) => Ok(None),
             Self::Redis(_) => Ok(None),
             Self::MongoDb(_) => Ok(None),
@@ -979,6 +1075,7 @@ impl DatabaseConnection {
                 adapter.load_catalog_object_definition(request).await
             }
             Self::Sqlite(adapter) => adapter.load_catalog_object_definition(request).await,
+            Self::DuckDb(adapter) => adapter.load_catalog_object_definition(request).await,
             Self::SqlServer(adapter) => adapter.load_catalog_object_definition(request).await,
             Self::Oracle(adapter) => adapter.load_catalog_object_definition(request).await,
             Self::Redis(_) => Err(DatabaseError::configuration(
@@ -1001,6 +1098,7 @@ impl DatabaseConnection {
             | Self::MariaDb(_)
             | Self::Oracle(_)
             | Self::Sqlite(_)
+            | Self::DuckDb(_)
             | Self::SqlServer(_) => Ok(None),
             Self::Redis(_) => Ok(None),
             Self::MongoDb(_) => Ok(None),
@@ -1020,6 +1118,19 @@ impl DatabaseConnection {
                 "Oracle catalog search is not implemented yet",
             )),
             Self::Sqlite(adapter) => adapter.search_catalog(request).await,
+            Self::DuckDb(adapter) => {
+                let discovery = adapter.discover_catalog_scope().await?;
+                let scope = request.scope.clone().with_discovered_databases(
+                    adapter.current_database(),
+                    discovery
+                        .databases
+                        .into_iter()
+                        .map(|database| database.name),
+                );
+                let mut request = request.clone();
+                request.scope = scope;
+                adapter.search_catalog(&request).await
+            }
             Self::SqlServer(adapter) => adapter.search_catalog(request).await,
             Self::Redis(_) => Err(DatabaseError::configuration(
                 "Redis does not support SQL catalog search",
@@ -1046,6 +1157,7 @@ impl DatabaseConnection {
             Self::MariaDb(adapter) => adapter.execute_pool_with_budget(sql, budget).await,
             Self::Oracle(adapter) => adapter.execute_pool_with_budget(sql, budget).await,
             Self::Sqlite(adapter) => adapter.execute_pool_with_budget(sql, budget).await,
+            Self::DuckDb(adapter) => adapter.execute_with_budget(sql, budget).await,
             Self::SqlServer(adapter) => adapter.execute_pool_with_budget(sql, budget).await,
             Self::ClickHouse(adapter) => adapter.execute_with_budget(sql, budget).await,
             Self::Redis(_) => Err(DatabaseError::configuration(
@@ -1054,6 +1166,24 @@ impl DatabaseConnection {
             Self::MongoDb(_) => Err(DatabaseError::unsupported(
                 "MongoDB does not support SQL execution",
             )),
+        }
+    }
+
+    pub(crate) async fn execute_with_budget_cancellable(
+        &self,
+        sql: &str,
+        budget: QueryBudget,
+        operation_id: Uuid,
+        cancelled: Arc<std::sync::atomic::AtomicBool>,
+        on_start: impl FnOnce(duckdb::DuckDbOperationHandle) + Send + 'static,
+    ) -> Result<QueryOutcome, DatabaseError> {
+        match self {
+            Self::DuckDb(adapter) => {
+                adapter
+                    .execute_with_budget_cancellable(sql, budget, operation_id, cancelled, on_start)
+                    .await
+            }
+            _ => self.execute_with_budget(sql, budget).await,
         }
     }
 
@@ -1069,6 +1199,11 @@ impl DatabaseConnection {
             Self::MariaDb(adapter) => adapter.preview_relation(relation, options, page).await,
             Self::Oracle(adapter) => adapter.preview_relation(relation, options, page).await,
             Self::Sqlite(adapter) => adapter.preview_relation(relation, options, page).await,
+            Self::DuckDb(adapter) => {
+                adapter
+                    .preview_relation(relation, adapter.profile_scope(), options, page)
+                    .await
+            }
             Self::SqlServer(adapter) => adapter.preview_relation(relation, options, page).await,
             Self::Redis(_) => Err(DatabaseError::configuration(
                 "Redis does not support relation previews",
@@ -1122,6 +1257,19 @@ impl DatabaseConnection {
                     .preview_relation_with_scope(relation, scope, options, page)
                     .await
             }
+            Self::DuckDb(adapter) => {
+                let discovery = adapter.discover_catalog_scope().await?;
+                let scope = scope.clone().with_attached_databases(
+                    adapter.current_database(),
+                    discovery
+                        .databases
+                        .into_iter()
+                        .map(|database| database.name),
+                );
+                adapter
+                    .preview_relation(relation, &scope, options, page)
+                    .await
+            }
             Self::SqlServer(adapter) => {
                 adapter
                     .preview_relation_with_scope(relation, scope, options, page)
@@ -1148,6 +1296,11 @@ impl DatabaseConnection {
             Self::MariaDb(adapter) => adapter.relation_ddl(relation).await,
             Self::Oracle(adapter) => adapter.relation_ddl(relation).await,
             Self::Sqlite(adapter) => adapter.relation_ddl(relation).await,
+            Self::DuckDb(adapter) => {
+                adapter
+                    .relation_ddl_with_scope(relation, adapter.profile_scope())
+                    .await
+            }
             Self::SqlServer(adapter) => adapter.relation_ddl(relation).await,
             Self::Redis(_) => Err(DatabaseError::configuration(
                 "Redis does not support relation DDL",
@@ -1181,6 +1334,7 @@ impl DatabaseConnection {
             Self::MariaDb(adapter) => adapter.relation_ddl_with_scope(relation, scope).await,
             Self::Oracle(adapter) => adapter.relation_ddl_with_scope(relation, scope).await,
             Self::Sqlite(adapter) => adapter.relation_ddl_with_scope(relation, scope).await,
+            Self::DuckDb(adapter) => adapter.relation_ddl_with_scope(relation, scope).await,
             Self::SqlServer(adapter) => adapter.relation_ddl_with_scope(relation, scope).await,
             Self::Redis(_) => Err(DatabaseError::configuration(
                 "Redis does not support relation DDL",
@@ -1204,6 +1358,7 @@ impl DatabaseConnection {
             Self::MariaDb(adapter) => adapter.object_ddl(kind, schema, name).await,
             Self::Oracle(_) => Ok(None),
             Self::Sqlite(adapter) => adapter.object_ddl(kind, schema, name).await,
+            Self::DuckDb(adapter) => adapter.object_ddl(kind, schema, name).await,
             Self::SqlServer(adapter) => adapter.object_ddl(kind, schema, name).await,
             Self::Redis(_) => Ok(None),
             Self::MongoDb(_) => Ok(None),
@@ -1218,6 +1373,7 @@ impl DatabaseConnection {
             Self::MariaDb(_) => mysql::quote_identifier(value),
             Self::Oracle(_) => format!("\"{}\"", value.replace('"', "\"\"")),
             Self::Sqlite(adapter) => adapter.quote_identifier(value),
+            Self::DuckDb(_) => format!("\"{}\"", value.replace('"', "\"\"")),
             Self::SqlServer(adapter) => adapter.quote_identifier(value),
             Self::Redis(_) => value.to_owned(),
             Self::MongoDb(_) => value.to_owned(),
@@ -1232,6 +1388,7 @@ impl DatabaseConnection {
             Self::MariaDb(adapter) => adapter.close().await,
             Self::Oracle(adapter) => adapter.close().await,
             Self::Sqlite(adapter) => adapter.close().await,
+            Self::DuckDb(adapter) => adapter.close().await,
             Self::SqlServer(adapter) => adapter.close().await,
             Self::Redis(adapter) => adapter.close().await,
             Self::MongoDb(adapter) => adapter.close().await,

@@ -4,10 +4,13 @@
 LazyDB lets you browse schemas, write and run SQL, inspect relations, manage
 connection profiles, and expose project-scoped database access to coding agents
 without leaving your terminal. It is written in Rust and supports PostgreSQL,
-MySQL, MariaDB, Oracle, SQL Server, SQLite, Redis, and MongoDB. MongoDB uses a
+MySQL, MariaDB, Oracle, SQL Server, SQLite, DuckDB, Redis, MongoDB, and ClickHouse. MongoDB uses a
 document explorer, bounded JSON console, and native BSON/EJSON handling; see the
 [MongoDB guide](docs/mongodb.md) for current scope and verification limits.
-MySQL, MariaDB, Oracle, SQL Server, SQLite, Redis, and ClickHouse.
+
+DuckDB is available as an embedded file or in-memory database. See the
+[DuckDB guide](docs/duckdb.md) for connection URLs, session behavior, and supported
+catalog and data operations.
 
 > **Project status:** LazyDB is currently in beta. The core database workspace,
 > connection management, SQL execution, and coding-agent interfaces are usable,

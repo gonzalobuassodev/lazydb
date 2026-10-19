@@ -269,6 +269,12 @@ pub enum TableColumnField {
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum TableActionField {
     AddColumn,
+    AddConstraintPrimaryKey,
+    AddConstraintUnique,
+    AddConstraintCheck,
+    AddConstraintForeignKey,
+    Constraint(usize),
+    RemoveConstraint(usize),
     Review,
     Cancel,
 }
@@ -844,6 +850,7 @@ pub struct TableDraft {
     pub clickhouse_baseline_comment: Option<String>,
     pub clickhouse_baseline_columns:
         Option<Vec<crate::db::catalog_mutation::ClickHouseColumnDefinition>>,
+    pub table_constraints: Vec<ConstraintDraft>,
 }
 
 #[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
@@ -1719,21 +1726,60 @@ impl ConstraintDraft {
     }
 
     pub fn move_field(&mut self, delta: isize) {
-        self.selected_field = (self.selected_field as isize + delta).rem_euclid(10) as usize;
+        let field_count = match self.kind {
+            crate::db::catalog_mutation::ConstraintDefinitionKind::PrimaryKey { .. }
+            | crate::db::catalog_mutation::ConstraintDefinitionKind::Unique { .. }
+            | crate::db::catalog_mutation::ConstraintDefinitionKind::Check { .. } => 2,
+            crate::db::catalog_mutation::ConstraintDefinitionKind::ForeignKey { .. } => 7,
+        };
+        self.selected_field =
+            (self.selected_field as isize + delta).rem_euclid(field_count) as usize;
     }
 
     pub fn selected_input_mut(&mut self) -> Option<&mut TextInput> {
         match self.selected_field {
             0 => Some(&mut self.name),
-            1 => Some(&mut self.columns),
-            2 => Some(&mut self.referenced_schema),
-            3 => Some(&mut self.referenced_relation),
-            4 => Some(&mut self.referenced_columns),
-            5 => Some(&mut self.match_type),
-            6 => Some(&mut self.on_update),
-            7 => Some(&mut self.on_delete),
-            8 => Some(&mut self.expression),
-            9 => Some(&mut self.schema),
+            1 => match self.kind {
+                crate::db::catalog_mutation::ConstraintDefinitionKind::Check { .. } => {
+                    Some(&mut self.expression)
+                }
+                _ => Some(&mut self.columns),
+            },
+            2 if matches!(
+                self.kind,
+                crate::db::catalog_mutation::ConstraintDefinitionKind::ForeignKey { .. }
+            ) =>
+            {
+                Some(&mut self.referenced_schema)
+            }
+            3 if matches!(
+                self.kind,
+                crate::db::catalog_mutation::ConstraintDefinitionKind::ForeignKey { .. }
+            ) =>
+            {
+                Some(&mut self.referenced_relation)
+            }
+            4 if matches!(
+                self.kind,
+                crate::db::catalog_mutation::ConstraintDefinitionKind::ForeignKey { .. }
+            ) =>
+            {
+                Some(&mut self.referenced_columns)
+            }
+            5 if matches!(
+                self.kind,
+                crate::db::catalog_mutation::ConstraintDefinitionKind::ForeignKey { .. }
+            ) =>
+            {
+                Some(&mut self.on_update)
+            }
+            6 if matches!(
+                self.kind,
+                crate::db::catalog_mutation::ConstraintDefinitionKind::ForeignKey { .. }
+            ) =>
+            {
+                Some(&mut self.on_delete)
+            }
             _ => None,
         }
     }
@@ -1905,6 +1951,46 @@ impl IndexDraft {
 }
 
 impl TableDraft {
+    pub fn move_selected_constraint_field(&mut self, delta: isize) {
+        if let TableEditorFocus::Action(TableActionField::Constraint(index)) = self.focus
+            && let Some(constraint) = self.table_constraints.get_mut(index)
+        {
+            let field_count = match constraint.kind {
+                crate::db::catalog_mutation::ConstraintDefinitionKind::PrimaryKey { .. }
+                | crate::db::catalog_mutation::ConstraintDefinitionKind::Unique { .. }
+                | crate::db::catalog_mutation::ConstraintDefinitionKind::Check { .. } => 2,
+                crate::db::catalog_mutation::ConstraintDefinitionKind::ForeignKey { .. } => 7,
+            };
+            constraint.selected_field =
+                (constraint.selected_field as isize + delta).rem_euclid(field_count) as usize;
+        }
+    }
+    pub fn add_constraint(&mut self, draft: ConstraintDraft) {
+        let index = self.table_constraints.len();
+        self.table_constraints.push(draft);
+        self.focus = TableEditorFocus::Action(TableActionField::Constraint(index));
+    }
+
+    pub fn remove_constraint(&mut self, index: usize) -> bool {
+        if index < self.table_constraints.len() {
+            self.table_constraints.remove(index);
+            if self.table_constraints.is_empty() {
+                self.focus = TableEditorFocus::Action(TableActionField::AddColumn);
+            } else if let TableEditorFocus::Action(
+                TableActionField::Constraint(selected)
+                | TableActionField::RemoveConstraint(selected),
+            ) = self.focus
+            {
+                self.focus = TableEditorFocus::Action(TableActionField::Constraint(
+                    selected.min(self.table_constraints.len() - 1),
+                ));
+            }
+            true
+        } else {
+            false
+        }
+    }
+
     pub fn new(schema: impl Into<String>) -> Self {
         Self::new_for_database(schema, crate::profile::DatabaseKind::Postgres)
     }
@@ -1933,6 +2019,7 @@ impl TableDraft {
             clickhouse_baseline_fingerprint: None,
             clickhouse_baseline_comment: None,
             clickhouse_baseline_columns: None,
+            table_constraints: Vec::new(),
         }
     }
 
@@ -1968,6 +2055,11 @@ impl TableDraft {
             clickhouse_baseline_fingerprint: None,
             clickhouse_baseline_comment: None,
             clickhouse_baseline_columns: None,
+            table_constraints: definition
+                .structured_constraints
+                .iter()
+                .map(ConstraintDraft::from_definition)
+                .collect(),
         }
     }
 
@@ -2066,6 +2158,9 @@ impl TableDraft {
         if self.database_kind != crate::profile::DatabaseKind::ClickHouse && column_count == 0 {
             return Err(invalid("a table requires at least one column"));
         }
+        for constraint in &self.table_constraints {
+            constraint.validate()?;
+        }
         Ok(())
     }
 
@@ -2074,7 +2169,8 @@ impl TableDraft {
             || self.owner.value() != ""
             || !self.comment.value().is_empty()
             || !self.indexes.is_empty()
-            || !self.constraints.is_empty();
+            || !self.constraints.is_empty()
+            || !self.table_constraints.is_empty();
         let mut summary = TableChangeSummary {
             properties_changed,
             ..TableChangeSummary::default()
@@ -2124,7 +2220,13 @@ impl TableDraft {
                 || self.owner.value() != baseline.owner
                 || self.comment.value() != optional_string(&baseline.comment)
                 || self.indexes != baseline.indexes
-                || self.constraints != baseline.constraints,
+                || self.constraints != baseline.constraints
+                || self.table_constraints.len() != baseline.structured_constraints.len()
+                || self
+                    .table_constraints
+                    .iter()
+                    .zip(&baseline.structured_constraints)
+                    .any(|(draft, definition)| !table_constraint_matches(draft, definition)),
             ..TableChangeSummary::default()
         };
         let baseline_order = baseline
@@ -2341,7 +2443,29 @@ impl TableDraft {
                 }
             }
             TableEditorFocus::Action(TableActionField::AddColumn) => {
+                TableEditorFocus::Action(TableActionField::AddConstraintPrimaryKey)
+            }
+            TableEditorFocus::Action(TableActionField::AddConstraintPrimaryKey) => {
+                TableEditorFocus::Action(TableActionField::AddConstraintUnique)
+            }
+            TableEditorFocus::Action(TableActionField::AddConstraintUnique) => {
+                TableEditorFocus::Action(TableActionField::AddConstraintCheck)
+            }
+            TableEditorFocus::Action(TableActionField::AddConstraintCheck) => {
+                TableEditorFocus::Action(TableActionField::AddConstraintForeignKey)
+            }
+            TableEditorFocus::Action(TableActionField::AddConstraintForeignKey) => {
                 TableEditorFocus::Action(TableActionField::Review)
+            }
+            TableEditorFocus::Action(TableActionField::Constraint(index)) => {
+                TableEditorFocus::Action(TableActionField::RemoveConstraint(index))
+            }
+            TableEditorFocus::Action(TableActionField::RemoveConstraint(index)) => {
+                if index + 1 < self.table_constraints.len() {
+                    TableEditorFocus::Action(TableActionField::Constraint(index + 1))
+                } else {
+                    TableEditorFocus::Action(TableActionField::Review)
+                }
             }
             TableEditorFocus::Action(TableActionField::Review) => {
                 TableEditorFocus::Action(TableActionField::Cancel)
@@ -2351,6 +2475,14 @@ impl TableDraft {
     }
 
     pub fn focus_previous(&mut self) {
+        if matches!(
+            self.focus,
+            TableEditorFocus::Action(TableActionField::AddColumn)
+        ) && self.columns.is_empty()
+        {
+            self.focus = TableEditorFocus::General(TableGeneralField::Comment);
+            return;
+        }
         self.focus = match self.focus {
             TableEditorFocus::General(TableGeneralField::Name) => self.focus,
             TableEditorFocus::General(TableGeneralField::Schema) => {
@@ -2413,7 +2545,42 @@ impl TableDraft {
                 }
             }
             TableEditorFocus::Action(TableActionField::Review) => {
-                TableEditorFocus::Action(TableActionField::AddColumn)
+                if let Some(index) = self.table_constraints.len().checked_sub(1) {
+                    TableEditorFocus::Action(TableActionField::RemoveConstraint(index))
+                } else {
+                    TableEditorFocus::Action(TableActionField::AddConstraintForeignKey)
+                }
+            }
+            TableEditorFocus::Action(
+                TableActionField::AddConstraintForeignKey
+                | TableActionField::AddConstraintCheck
+                | TableActionField::AddConstraintUnique
+                | TableActionField::AddConstraintPrimaryKey,
+            ) => match self.focus {
+                TableEditorFocus::Action(TableActionField::AddConstraintPrimaryKey) => {
+                    TableEditorFocus::Action(TableActionField::AddColumn)
+                }
+                TableEditorFocus::Action(TableActionField::AddConstraintUnique) => {
+                    TableEditorFocus::Action(TableActionField::AddConstraintPrimaryKey)
+                }
+                TableEditorFocus::Action(TableActionField::AddConstraintCheck) => {
+                    TableEditorFocus::Action(TableActionField::AddConstraintUnique)
+                }
+                _ => TableEditorFocus::Action(TableActionField::AddConstraintCheck),
+            },
+            TableEditorFocus::Action(TableActionField::Constraint(index)) => {
+                if index > 0 {
+                    TableEditorFocus::Action(TableActionField::RemoveConstraint(index - 1))
+                } else {
+                    TableEditorFocus::Action(TableActionField::AddColumn)
+                }
+            }
+            TableEditorFocus::Action(TableActionField::RemoveConstraint(index)) => {
+                if index > 0 {
+                    TableEditorFocus::Action(TableActionField::Constraint(index - 1))
+                } else {
+                    TableEditorFocus::Action(TableActionField::AddConstraintForeignKey)
+                }
             }
             TableEditorFocus::Action(TableActionField::Cancel) => {
                 TableEditorFocus::Action(TableActionField::Review)
@@ -2705,6 +2872,54 @@ impl TableDraft {
                     TableColumnField::Nullable | TableColumnField::Identity => None,
                 })
             }
+            TableEditorFocus::Action(TableActionField::Constraint(index)) => self
+                .table_constraints
+                .get(*index)
+                .and_then(|constraint| match constraint.selected_field {
+                    0 => Some(&constraint.name),
+                    1 => match constraint.kind {
+                        crate::db::catalog_mutation::ConstraintDefinitionKind::Check { .. } => {
+                            Some(&constraint.expression)
+                        }
+                        _ => Some(&constraint.columns),
+                    },
+                    2 if matches!(
+                        constraint.kind,
+                        crate::db::catalog_mutation::ConstraintDefinitionKind::ForeignKey { .. }
+                    ) =>
+                    {
+                        Some(&constraint.referenced_schema)
+                    }
+                    3 if matches!(
+                        constraint.kind,
+                        crate::db::catalog_mutation::ConstraintDefinitionKind::ForeignKey { .. }
+                    ) =>
+                    {
+                        Some(&constraint.referenced_relation)
+                    }
+                    4 if matches!(
+                        constraint.kind,
+                        crate::db::catalog_mutation::ConstraintDefinitionKind::ForeignKey { .. }
+                    ) =>
+                    {
+                        Some(&constraint.referenced_columns)
+                    }
+                    5 if matches!(
+                        constraint.kind,
+                        crate::db::catalog_mutation::ConstraintDefinitionKind::ForeignKey { .. }
+                    ) =>
+                    {
+                        Some(&constraint.on_update)
+                    }
+                    6 if matches!(
+                        constraint.kind,
+                        crate::db::catalog_mutation::ConstraintDefinitionKind::ForeignKey { .. }
+                    ) =>
+                    {
+                        Some(&constraint.on_delete)
+                    }
+                    _ => None,
+                }),
             _ => None,
         }
     }
@@ -2746,6 +2961,10 @@ impl TableDraft {
                 .column_editor
                 .as_mut()
                 .map(|session| &mut session.draft.comment),
+            TableEditorFocus::Action(TableActionField::Constraint(index)) => self
+                .table_constraints
+                .get_mut(*index)
+                .and_then(ConstraintDraft::selected_input_mut),
             _ => None,
         }
     }
@@ -2852,6 +3071,27 @@ fn clickhouse_order_by_clause(ddl: &str) -> Option<String> {
     .min()
     .unwrap_or(tail.len());
     Some(tail[..end].trim().to_owned()).filter(|value| !value.is_empty())
+}
+
+pub(crate) fn table_constraint_matches(
+    draft: &ConstraintDraft,
+    definition: &crate::db::catalog_mutation::ConstraintDefinition,
+) -> bool {
+    let restored = ConstraintDraft::from_definition(definition);
+    draft.name == restored.name
+        && draft.kind == restored.kind
+        && draft.columns == restored.columns
+        && draft.referenced_schema == restored.referenced_schema
+        && draft.referenced_relation == restored.referenced_relation
+        && draft.referenced_columns == restored.referenced_columns
+        && draft.match_type == restored.match_type
+        && draft.on_update == restored.on_update
+        && draft.on_delete == restored.on_delete
+        && draft.expression == restored.expression
+        && draft.no_inherit == restored.no_inherit
+        && draft.deferrable == restored.deferrable
+        && draft.initially_deferred == restored.initially_deferred
+        && draft.not_valid == restored.not_valid
 }
 
 fn optional_string(value: &crate::db::catalog::OptionalMetadata<String>) -> &str {

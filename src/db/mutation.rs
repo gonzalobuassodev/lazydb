@@ -187,6 +187,9 @@ pub fn relation_mutation_capabilities(
         DatabaseKind::Postgres | DatabaseKind::MariaDb => InsertResultStrategy::Returning,
         DatabaseKind::SqlServer => InsertResultStrategy::Output,
         DatabaseKind::Sqlite => InsertResultStrategy::LookupByRowId,
+        DatabaseKind::DuckDb if !metadata.primary_key.is_empty() => {
+            InsertResultStrategy::LookupByPrimaryKey
+        }
         DatabaseKind::MySql if !metadata.primary_key.is_empty() => {
             InsertResultStrategy::LookupByPrimaryKey
         }

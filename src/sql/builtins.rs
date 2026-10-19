@@ -202,6 +202,7 @@ fn dialect_builtins(dialect: SqlDialect) -> &'static [Builtin] {
         SqlDialect::SqlServer => SQL_SERVER,
         SqlDialect::Sqlite => SQLITE,
         SqlDialect::ClickHouse => CLICKHOUSE,
+        SqlDialect::DuckDb => &[],
         SqlDialect::Generic | SqlDialect::Oracle => &[],
     }
 }
@@ -228,6 +229,7 @@ fn default_value_dialect_builtins(dialect: SqlDialect) -> &'static [Builtin] {
         SqlDialect::MySql
         | SqlDialect::MariaDb
         | SqlDialect::Sqlite
+        | SqlDialect::DuckDb
         | SqlDialect::Generic
         | SqlDialect::Oracle
         | SqlDialect::ClickHouse => &[],

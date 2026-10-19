@@ -1150,6 +1150,11 @@ impl CatalogRequest {
             })
         }
     }
+
+    pub fn with_scope(mut self, scope: CatalogScope) -> Self {
+        self.scope = scope;
+        self
+    }
 }
 
 #[derive(Clone, Copy, Debug, Deserialize, Eq, PartialEq, Serialize)]

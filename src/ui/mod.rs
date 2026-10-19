@@ -236,6 +236,16 @@ pub enum HitTarget {
     CatalogEditorTableField(crate::model::catalog_editor::TableEditorFocus),
     CatalogEditorTableColumn(usize),
     CatalogEditorAddTableColumn,
+    CatalogEditorAddTableConstraintPrimaryKey,
+    CatalogEditorAddTableConstraintUnique,
+    CatalogEditorAddTableConstraintCheck,
+    CatalogEditorAddTableConstraintForeignKey,
+    CatalogEditorFocusTableConstraint(usize),
+    CatalogEditorRemoveTableConstraint(usize),
+    CatalogEditorConstraintField {
+        constraint: usize,
+        field: usize,
+    },
     CatalogEditorRemoveTableColumn,
     CatalogEditorRestoreTableColumn,
     CatalogEditorRemoveTableColumnRow(uuid::Uuid),
@@ -1821,12 +1831,12 @@ fn animation_observation(app: &App) -> animation::AnimationObservation {
             if let RelationLoad::Loading { request, .. } = &tab.data {
                 observation
                     .active_loads
-                    .insert(animation::LoadIdentity::Relation(request.clone()));
+                    .insert(animation::LoadIdentity::Relation(Box::new(request.clone())));
             }
             if let RelationLoad::Loading { request, .. } = &tab.ddl {
                 observation
                     .active_loads
-                    .insert(animation::LoadIdentity::Relation(request.clone()));
+                    .insert(animation::LoadIdentity::Relation(Box::new(request.clone())));
             }
         }
         WorkspaceTab::Dashboard(_) | WorkspaceTab::MongoDashboard(_) => {}

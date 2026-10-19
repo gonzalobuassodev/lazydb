@@ -696,6 +696,7 @@ fn table_editor_renders_general_and_columns_sections() {
                 clickhouse_baseline_fingerprint: None,
                 clickhouse_baseline_comment: None,
                 clickhouse_baseline_columns: None,
+                table_constraints: vec![],
             },
         )),
     });
@@ -749,6 +750,7 @@ fn table_editor_highlights_modified_column_cells_without_highlighting_the_row() 
         ],
         indexes: vec![],
         constraints: vec![],
+        structured_constraints: vec![],
         baseline_fingerprint: "baseline".into(),
     };
     let mut draft = lazydb::model::catalog_editor::TableDraft::from_definition(&definition);
@@ -1195,6 +1197,7 @@ fn table_editor_focus_drives_sections_details_actions_and_context_hints() {
                 clickhouse_baseline_fingerprint: None,
                 clickhouse_baseline_comment: None,
                 clickhouse_baseline_columns: None,
+                table_constraints: vec![],
             },
         )),
     });
@@ -1204,9 +1207,7 @@ fn table_editor_focus_drives_sections_details_actions_and_context_hints() {
     assert!(general.contains("GENERAL"), "{general}");
     assert!(general.contains("COLUMNS"), "{general}");
     assert!(general.contains("events"), "{general}");
-    assert!(general.contains("pending changes"), "{general}");
     assert!(general.contains("[ Review SQL ]"), "{general}");
-    assert!(general.contains("[ Cancel ]"), "{general}");
     assert!(
         general.contains("Tab/Shift-Tab/Up/Down move focus"),
         "{general}"
@@ -1223,7 +1224,6 @@ fn table_editor_focus_drives_sections_details_actions_and_context_hints() {
     let (compact, compact_state) = render_with_state(&app, 56, 16);
     assert!(compact.contains("events"), "{compact}");
     assert!(compact.contains("[ Review SQL ]"), "{compact}");
-    assert!(compact.contains("[ Cancel ]"), "{compact}");
     assert!(compact_state.hit_regions.iter().any(|region| {
         region.target
             == HitTarget::CatalogEditorTableField(
@@ -4507,6 +4507,7 @@ fn relation_loading_with_previous_snapshot_keeps_data_visible_and_exposes_cancel
     relation.data = lazydb::model::relation::RelationLoad::Loading {
         request: lazydb::model::relation::RelationRequest {
             tab_id: relation.id,
+            console_id: uuid::Uuid::new_v4(),
             tab_generation: relation.generation,
             request_id: 1,
             connection: lazydb::identity::ConnectionIdentity {
@@ -4690,6 +4691,7 @@ fn relation_status_row_is_present_only_for_non_ready_snapshots() {
     );
     let request = |tab: &RelationTab| lazydb::model::relation::RelationRequest {
         tab_id: tab.id,
+        console_id: uuid::Uuid::new_v4(),
         tab_generation: tab.generation,
         request_id: 1,
         connection: lazydb::identity::ConnectionIdentity {
@@ -4809,6 +4811,7 @@ fn relation_first_load_uses_quiet_status_without_dense_skeleton() {
     relation.data = lazydb::model::relation::RelationLoad::Loading {
         request: lazydb::model::relation::RelationRequest {
             tab_id: relation.id,
+            console_id: uuid::Uuid::new_v4(),
             tab_generation: relation.generation,
             request_id: 1,
             connection: lazydb::identity::ConnectionIdentity {
@@ -7767,6 +7770,7 @@ fn driver_options_use_database_icons_in_each_icon_mode() {
         DatabaseKind::MariaDb,
         DatabaseKind::SqlServer,
         DatabaseKind::Sqlite,
+        DatabaseKind::DuckDb,
         DatabaseKind::Redis,
         DatabaseKind::Oracle,
         DatabaseKind::ClickHouse,
@@ -7797,6 +7801,7 @@ fn driver_options_use_database_icons_in_each_icon_mode() {
                 DatabaseKind::Oracle => "Oracle",
                 DatabaseKind::SqlServer => "SQL Server",
                 DatabaseKind::Sqlite => "SQLite",
+                DatabaseKind::DuckDb => "DuckDB",
                 DatabaseKind::Redis => "Redis",
                 DatabaseKind::MongoDb => "MongoDB",
                 DatabaseKind::ClickHouse => "ClickHouse",

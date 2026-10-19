@@ -70,6 +70,14 @@ impl DatabaseCapabilities {
                 manual_transactions: true,
                 cancellation: true,
             },
+            DatabaseKind::DuckDb => Self {
+                catalog: true,
+                relation_ddl: true,
+                relation_edit: true,
+                monitoring: false,
+                manual_transactions: true,
+                cancellation: true,
+            },
             DatabaseKind::Oracle => Self {
                 catalog: true,
                 relation_ddl: true,

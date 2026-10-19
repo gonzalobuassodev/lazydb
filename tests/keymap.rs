@@ -1798,6 +1798,10 @@ fn table_editor_action_buttons_keep_enter_and_space_semantics() {
     let mut keymap = Keymap::default();
     for action_field in [
         lazydb::model::catalog_editor::TableActionField::AddColumn,
+        lazydb::model::catalog_editor::TableActionField::AddConstraintPrimaryKey,
+        lazydb::model::catalog_editor::TableActionField::AddConstraintUnique,
+        lazydb::model::catalog_editor::TableActionField::AddConstraintCheck,
+        lazydb::model::catalog_editor::TableActionField::AddConstraintForeignKey,
         lazydb::model::catalog_editor::TableActionField::Review,
         lazydb::model::catalog_editor::TableActionField::Cancel,
     ] {
@@ -1813,8 +1817,21 @@ fn table_editor_action_buttons_keep_enter_and_space_semantics() {
             lazydb::model::catalog_editor::TableActionField::AddColumn => {
                 Action::CatalogEditorAddTableColumn
             }
+            lazydb::model::catalog_editor::TableActionField::AddConstraintPrimaryKey => {
+                Action::CatalogEditorAddTableConstraintPrimaryKey
+            }
+            lazydb::model::catalog_editor::TableActionField::AddConstraintUnique => {
+                Action::CatalogEditorAddTableConstraintUnique
+            }
+            lazydb::model::catalog_editor::TableActionField::AddConstraintCheck => {
+                Action::CatalogEditorAddTableConstraintCheck
+            }
+            lazydb::model::catalog_editor::TableActionField::AddConstraintForeignKey => {
+                Action::CatalogEditorAddTableConstraintForeignKey
+            }
             lazydb::model::catalog_editor::TableActionField::Review => Action::CatalogEditorPreview,
             lazydb::model::catalog_editor::TableActionField::Cancel => Action::CatalogEditorCancel,
+            _ => unreachable!("only fixed action buttons are covered here"),
         };
         assert_eq!(
             keymap.map(key(KeyCode::Enter), &app),
