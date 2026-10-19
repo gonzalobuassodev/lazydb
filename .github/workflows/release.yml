@@ -125,10 +125,11 @@ jobs:
           TARGET: ${{ matrix.target }}
           VERSION: ${{ needs.plan.outputs.version }}
           IMAGE: ${{ matrix.target == 'x86_64-unknown-linux-gnu' && 'ubuntu:24.04@sha256:f610ab94648195aa356059f5b41d6085c9d4d903c072430cdd1af7bdb646106b' || 'ubuntu:24.04@sha256:08571ca13e00ca07a2a84eab83a959b4242e22cceb16486a11bef1428c9e93a7' }}
+          BUILD_IMAGE_TAG: lazydb-linux-build:${{ matrix.target == 'x86_64-unknown-linux-gnu' && 'x86_64' || 'aarch64' }}
         run: |
           set -eu
           mkdir -p dist
-          docker run --rm --platform "linux/${{ matrix.target == 'x86_64-unknown-linux-gnu' && 'amd64' || 'arm64' }}" "$IMAGE" bash -lc 'readelf --version' > dist/readelf-version.txt
+          docker run --rm --platform "linux/${{ matrix.target == 'x86_64-unknown-linux-gnu' && 'amd64' || 'arm64' }}" "$BUILD_IMAGE_TAG" bash -lc 'readelf --version' > dist/readelf-version.txt
           python3 - "$TARGET" "$IMAGE" "$RUNNER_ARCH" "$(sed -n '1p' dist/readelf-version.txt)" \
             > "dist/lazydb_${VERSION}_${TARGET}.build.json" <<'PY'
           import json, sys
