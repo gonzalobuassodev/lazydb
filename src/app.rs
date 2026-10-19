@@ -3081,6 +3081,21 @@ impl App {
             return self.execute_semantic_command(command_id, context);
         }
         use crate::help::HelpShortcutId as Id;
+        match id {
+            Id::RelationWhere => {
+                self.focus_data_query_input(crate::model::data_query::DataQueryInput::Where);
+                return Vec::new();
+            }
+            Id::RelationOrderBy => {
+                self.focus_data_query_input(crate::model::data_query::DataQueryInput::OrderBy);
+                return Vec::new();
+            }
+            Id::RelationApplyInputs => {
+                self.finish_active_data_query_edit_group();
+                return self.submit_data_query();
+            }
+            _ => {}
+        }
         let editor_key = |code| Action::EditorKey(KeyEvent::new(code, KeyModifiers::NONE));
         let editor_control_key =
             |code| Action::EditorKey(KeyEvent::new(code, KeyModifiers::CONTROL));
@@ -3304,13 +3319,6 @@ impl App {
                 .redis_pane_resize('<', 1)
                 .map_or_else(Vec::new, |resize| vec![Action::ResizePane(resize)]),
             Id::ResetPaneSizes => vec![Action::ResetPaneSizes],
-            Id::RelationWhere => vec![Action::FocusRelationQueryInput(
-                crate::model::relation::RelationQueryInput::Where,
-            )],
-            Id::RelationOrderBy => vec![Action::FocusRelationQueryInput(
-                crate::model::relation::RelationQueryInput::OrderBy,
-            )],
-            Id::RelationApplyInputs => vec![Action::SubmitRelationQuery],
             Id::RelationResizeLeft => vec![Action::ResizeRelationColumn(-1)],
             Id::RelationResizeRight => vec![Action::ResizeRelationColumn(1)],
             Id::RelationResetWidth => vec![Action::GridResetColumnWidth],
@@ -4253,6 +4261,20 @@ impl App {
     }
 
     pub fn update(&mut self, action: Action) -> Vec<Command> {
+        let action = match action {
+            Action::FocusRelationQueryInput(input) => Action::FocusDataQueryInput(input),
+            Action::RelationQueryInsert(character) => Action::DataQueryInsert(character),
+            Action::RelationQueryBackspace => Action::DataQueryBackspace,
+            Action::RelationQueryDelete => Action::DataQueryDelete,
+            Action::RelationQueryMoveLeft => Action::DataQueryMoveLeft,
+            Action::RelationQueryMoveRight => Action::DataQueryMoveRight,
+            Action::RelationQueryMoveHome => Action::DataQueryMoveHome,
+            Action::RelationQueryMoveEnd => Action::DataQueryMoveEnd,
+            Action::RelationQueryClear => Action::DataQueryClear,
+            Action::CancelRelationQueryInput => Action::CancelDataQueryInput,
+            Action::SubmitRelationQuery => Action::SubmitDataQuery,
+            action => action,
+        };
         let leader_context = (
             self.focus,
             self.tabs.get(self.active_tab).map(WorkspaceTab::id),
@@ -4426,18 +4448,7 @@ impl App {
                         | Action::DataQueryCompletionDismiss
                         | Action::SubmitDataQuery
                         | Action::CancelDataQueryInput
-                        | Action::FocusRelationQueryInput(_)
-                        | Action::RelationQueryInsert(_)
-                        | Action::RelationQueryBackspace
-                        | Action::RelationQueryDelete
-                        | Action::RelationQueryMoveLeft
-                        | Action::RelationQueryMoveRight
-                        | Action::RelationQueryMoveHome
-                        | Action::RelationQueryMoveEnd
-                        | Action::RelationQueryClear
-                        | Action::SubmitRelationQuery
                         | Action::CycleDataColumnSort(_)
-                        | Action::CancelRelationQueryInput
                         | Action::RelationEditCell
                         | Action::RelationEditBooleanMove(_)
                         | Action::RelationEditBooleanToggle
@@ -13027,29 +13038,7 @@ impl App {
                 }
                 Vec::new()
             }
-            Action::FocusDataQueryInput(input) => {
-                if let Some(query) = self.active_data_query_mut()
-                    && matches!(
-                        query.capability,
-                        DataQueryCapability::Relation | DataQueryCapability::Sql
-                    )
-                {
-                    if query.focus != Some(input) {
-                        match query.focus {
-                            Some(DataQueryInput::Where) => query.where_input.finish_edit_group(),
-                            Some(DataQueryInput::OrderBy) => {
-                                query.order_by_input.finish_edit_group()
-                            }
-                            None => {}
-                        }
-                    }
-                    query.focus = Some(input);
-                    query.error = None;
-                    self.focus = Focus::Results;
-                }
-                self.refresh_active_data_query_completion();
-                Vec::new()
-            }
+            Action::FocusDataQueryInput(input) => self.focus_data_query_input(input),
             Action::SetDataQueryCursor { input, cursor } => {
                 if let Some(query) = self.active_data_query_mut()
                     && matches!(
@@ -13168,21 +13157,6 @@ impl App {
                 self.finish_active_data_query_edit_group();
                 self.submit_data_query()
             }
-            Action::FocusRelationQueryInput(input) => {
-                self.update(Action::FocusDataQueryInput(input))
-            }
-            Action::RelationQueryInsert(character) => {
-                self.update(Action::DataQueryInsert(character))
-            }
-            Action::RelationQueryBackspace => self.update(Action::DataQueryBackspace),
-            Action::RelationQueryDelete => self.update(Action::DataQueryDelete),
-            Action::RelationQueryMoveLeft => self.update(Action::DataQueryMoveLeft),
-            Action::RelationQueryMoveRight => self.update(Action::DataQueryMoveRight),
-            Action::RelationQueryMoveHome => self.update(Action::DataQueryMoveHome),
-            Action::RelationQueryMoveEnd => self.update(Action::DataQueryMoveEnd),
-            Action::RelationQueryClear => self.update(Action::DataQueryClear),
-            Action::CancelRelationQueryInput => self.update(Action::CancelDataQueryInput),
-            Action::SubmitRelationQuery => self.update(Action::SubmitDataQuery),
             Action::CycleDataColumnSort(column) => {
                 let Some((order_by, columns, dialect)) =
                     self.tabs.get(self.active_tab).and_then(|tab| match tab {
@@ -18711,6 +18685,19 @@ impl App {
                     view.fail(&request, message);
                 }
                 Vec::new()
+            }
+            Action::FocusRelationQueryInput(_)
+            | Action::RelationQueryInsert(_)
+            | Action::RelationQueryBackspace
+            | Action::RelationQueryDelete
+            | Action::RelationQueryMoveLeft
+            | Action::RelationQueryMoveRight
+            | Action::RelationQueryMoveHome
+            | Action::RelationQueryMoveEnd
+            | Action::RelationQueryClear
+            | Action::SubmitRelationQuery
+            | Action::CancelRelationQueryInput => {
+                unreachable!("relation query aliases are normalized before dispatch")
             }
         }
     }
@@ -26907,6 +26894,31 @@ impl App {
             }
             _ => None,
         }
+    }
+
+    fn focus_data_query_input(
+        &mut self,
+        input: crate::model::data_query::DataQueryInput,
+    ) -> Vec<Command> {
+        if let Some(query) = self.active_data_query_mut()
+            && matches!(
+                query.capability,
+                DataQueryCapability::Relation | DataQueryCapability::Sql
+            )
+        {
+            if query.focus != Some(input) {
+                match query.focus {
+                    Some(DataQueryInput::Where) => query.where_input.finish_edit_group(),
+                    Some(DataQueryInput::OrderBy) => query.order_by_input.finish_edit_group(),
+                    None => {}
+                }
+            }
+            query.focus = Some(input);
+            query.error = None;
+            self.focus = Focus::Results;
+        }
+        self.refresh_active_data_query_completion();
+        Vec::new()
     }
 
     fn refresh_active_data_query_completion(&mut self) {
