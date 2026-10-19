@@ -61,8 +61,8 @@ class LinuxElfIntegrationTests(unittest.TestCase):
             subprocess.run([strip, "--strip-all", str(binary)], check=True)
             stripped = self.scanner.inspect_elf(binary, target)
             self.assertEqual(stripped["glibc"]["version_needs"], report["glibc"]["version_needs"])
-            archive = Path(temporary) / "lazydb_0.0.0_x86_64-unknown-linux-gnu.tar.xz"
-            root = Path(temporary) / "lazydb_0.0.0_x86_64-unknown-linux-gnu"
+            archive = Path(temporary) / f"lazydb_0.0.0_{target}.tar.xz"
+            root = Path(temporary) / f"lazydb_0.0.0_{target}"
             root.mkdir()
             archived_binary = root / "lazydb"
             shutil.copyfile(binary, archived_binary)

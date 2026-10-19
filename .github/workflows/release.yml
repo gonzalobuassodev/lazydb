@@ -72,7 +72,7 @@ jobs:
         run: |
           sh scripts/release/test-distribution.sh
           python3 -B scripts/release/test-linux-runtime.py
-          test "$(uname -s)" != Linux || python3 -B -c 'import unittest, sys; sys.path.insert(0, "scripts/release"); from test_linux_runtime import LinuxElfIntegrationTests; suite=unittest.defaultTestLoader.loadTestsFromTestCase(LinuxElfIntegrationTests); result=unittest.TextTestRunner(verbosity=2).run(suite); raise SystemExit(not result.wasSuccessful() or result.skipped != [])'
+          test "$(uname -s)" != Linux || python3 -B -c 'import runpy, unittest; module=runpy.run_path("scripts/release/test-linux-runtime.py"); suite=unittest.defaultTestLoader.loadTestsFromTestCase(module["LinuxElfIntegrationTests"]); result=unittest.TextTestRunner(verbosity=2).run(suite); raise SystemExit(not result.wasSuccessful() or result.skipped != [])'
       - run: cargo +1.94.0 fmt --all -- --check
       - run: cargo +1.94.0 clippy --all-targets --all-features -- -D warnings
       - run: cargo +1.94.0 test --all-targets --all-features
