@@ -1479,15 +1479,6 @@ LIMIT 2001
         draft: crate::model::catalog_editor::CatalogDraft,
         baseline: Option<CatalogObjectDefinition>,
     ) -> Result<CatalogMutationPlan, CatalogMutationError> {
-        if request.object_type == CatalogObjectType::Catalog(CatalogKind::Database) {
-            return Self::plan_database_mutation(request, draft, baseline);
-        }
-        if matches!(
-            request.object_type,
-            CatalogObjectType::LoginRole | CatalogObjectType::Role
-        ) {
-            return Self::plan_role_mutation(request, draft, baseline);
-        }
         Self::plan_catalog_mutation_for_version(request, draft, baseline, 120_000)
     }
 
@@ -1875,6 +1866,15 @@ LIMIT 2001
         baseline: Option<CatalogObjectDefinition>,
         server_version_num: i32,
     ) -> Result<CatalogMutationPlan, CatalogMutationError> {
+        if request.object_type == CatalogObjectType::Catalog(CatalogKind::Database) {
+            return Self::plan_database_mutation(request, draft, baseline);
+        }
+        if matches!(
+            request.object_type,
+            CatalogObjectType::LoginRole | CatalogObjectType::Role
+        ) {
+            return Self::plan_role_mutation(request, draft, baseline);
+        }
         if request.object_type == CatalogObjectType::Catalog(CatalogKind::Sequence) {
             return Self::plan_sequence_mutation(request, draft, baseline);
         }
@@ -8223,6 +8223,442 @@ mod tests {
         ] {
             assert_eq!(stale_relation_identity(profile, &invalid), None);
         }
+    }
+
+    fn catalog_dispatch_connection(
+        profile_id: Uuid,
+        server_version_num: i32,
+    ) -> crate::db::DatabaseConnection {
+        crate::db::DatabaseConnection::Postgres(super::PostgresAdapter {
+            pool: sqlx::postgres::PgPoolOptions::new()
+                .connect_lazy("postgres://localhost/test")
+                .unwrap(),
+            connection_id: profile_id,
+            catalog_scope: crate::profile::CatalogScope::for_profile(
+                crate::profile::DatabaseKind::Postgres,
+                "test",
+                None,
+            ),
+            server_version_num,
+        })
+    }
+
+    fn catalog_dispatch_request(
+        profile_id: Uuid,
+        request_id: u64,
+        mode: crate::db::catalog_mutation::CatalogMutationMode,
+        anchor: crate::db::catalog_mutation::CatalogMutationAnchor,
+        object_type: crate::db::catalog_mutation::CatalogObjectType,
+    ) -> crate::db::catalog_mutation::CatalogMutationRequest {
+        crate::db::catalog_mutation::CatalogMutationRequest::new(
+            crate::identity::ConnectionIdentity {
+                profile_id,
+                generation: 1,
+            },
+            request_id,
+            1,
+            mode,
+            anchor,
+            object_type,
+        )
+        .unwrap()
+        .with_current_database("test")
+    }
+
+    fn catalog_dispatch_database_definition() -> crate::db::catalog_mutation::DatabaseDefinition {
+        crate::db::catalog_mutation::DatabaseDefinition {
+            name: "app".into(),
+            owner: "postgres".into(),
+            template: "template0".into(),
+            encoding: "UTF8".into(),
+            locale_provider: "libc".into(),
+            locale: "C".into(),
+            collation: "C".into(),
+            ctype: "C".into(),
+            tablespace: "pg_default".into(),
+            connection_limit: -1,
+            allow_connections: true,
+            is_template: false,
+            comment: crate::db::catalog::OptionalMetadata::Supported(None),
+            baseline_fingerprint: "sha256:app".into(),
+        }
+    }
+
+    fn catalog_dispatch_role_definition(
+        login: bool,
+    ) -> crate::db::catalog_mutation::RoleDefinition {
+        crate::db::catalog_mutation::RoleDefinition {
+            name: "alice".into(),
+            login,
+            superuser: false,
+            createdb: false,
+            createrole: false,
+            inherit: true,
+            replication: false,
+            bypass_rls: false,
+            connection_limit: -1,
+            valid_until: crate::db::catalog::OptionalMetadata::Supported(Some("infinity".into())),
+            memberships: vec!["old_group".into()],
+            comment: crate::db::catalog::OptionalMetadata::Supported(None),
+            baseline_fingerprint: "sha256:role".into(),
+        }
+    }
+
+    #[tokio::test]
+    async fn catalog_mutation_dispatch_creates_roles() {
+        use crate::db::catalog_mutation::{
+            CatalogMutationAnchor, CatalogMutationMode, CatalogObjectType,
+        };
+        use crate::model::catalog_editor::{CatalogDraft, RoleDraft};
+
+        let profile_id = Uuid::from_u128(101);
+        for (object_type, login) in [
+            (CatalogObjectType::Role, false),
+            (CatalogObjectType::LoginRole, true),
+        ] {
+            for server_version_num in [120_000, 150_000, 180_000] {
+                let mut draft = RoleDraft::new(login);
+                draft.name = "test1".into();
+                if login {
+                    draft.set_password("dispatch-test-password");
+                }
+                let request = catalog_dispatch_request(
+                    profile_id,
+                    1,
+                    CatalogMutationMode::Create,
+                    CatalogMutationAnchor::Profile { profile_id },
+                    object_type,
+                );
+                let connection = catalog_dispatch_connection(profile_id, server_version_num);
+                let plan = connection
+                    .plan_catalog_mutation(request.clone(), CatalogDraft::Role(draft.clone()), None)
+                    .unwrap();
+                let version_plan = super::PostgresAdapter::plan_catalog_mutation_for_version(
+                    request.clone(),
+                    CatalogDraft::Role(draft.clone()),
+                    None,
+                    server_version_num,
+                )
+                .unwrap();
+                let default_plan = super::PostgresAdapter::plan_catalog_mutation(
+                    request,
+                    CatalogDraft::Role(draft),
+                    None,
+                )
+                .unwrap();
+
+                assert_eq!(plan.sql(), version_plan.sql());
+                assert_eq!(plan.sql(), default_plan.sql());
+                assert_eq!(plan.object_type, object_type);
+                assert_eq!(
+                    plan.execution_mode,
+                    crate::db::catalog_mutation::CatalogMutationExecutionMode::Transactional
+                );
+                assert_eq!(plan.execution_target.database(), "test");
+                assert!(
+                    plan.execution_target
+                        .execution_target(profile_id)
+                        .schema
+                        .is_none()
+                );
+                assert!(plan.baseline_fingerprint.is_none());
+                assert!(
+                    plan.sql()
+                        .contains(if login { " LOGIN " } else { " NOLOGIN " })
+                );
+                if login {
+                    assert!(plan.sql().contains("PASSWORD '<REDACTED>'"));
+                    assert!(!plan.sql().contains("dispatch-test-password"));
+                    assert!(!format!("{plan:?}").contains("dispatch-test-password"));
+                }
+            }
+        }
+    }
+
+    #[tokio::test]
+    async fn catalog_mutation_dispatch_edits_roles() {
+        use crate::db::catalog_mutation::{
+            CatalogMutationAnchor, CatalogMutationMode, CatalogObjectDefinition, CatalogObjectType,
+        };
+        use crate::model::catalog_editor::{CatalogDraft, RoleDraft};
+
+        let profile_id = Uuid::from_u128(102);
+        for (object_type, login) in [
+            (CatalogObjectType::Role, false),
+            (CatalogObjectType::LoginRole, true),
+        ] {
+            for server_version_num in [120_000, 150_000, 180_000] {
+                let definition = catalog_dispatch_role_definition(login);
+                let mut draft = RoleDraft::from_definition(&definition);
+                draft.name = "bob".into();
+                draft.memberships = "new_group".into();
+                let request = catalog_dispatch_request(
+                    profile_id,
+                    2,
+                    CatalogMutationMode::Edit,
+                    CatalogMutationAnchor::Catalog(CatalogId::new(
+                        profile_id,
+                        CatalogKind::Database,
+                        ["__role__", "alice"],
+                    )),
+                    object_type,
+                );
+                let baseline = Some(CatalogObjectDefinition::Role(definition));
+                let connection = catalog_dispatch_connection(profile_id, server_version_num);
+                let plan = connection
+                    .plan_catalog_mutation(
+                        request.clone(),
+                        CatalogDraft::Role(draft.clone()),
+                        baseline.clone(),
+                    )
+                    .unwrap();
+                let version_plan = super::PostgresAdapter::plan_catalog_mutation_for_version(
+                    request.clone(),
+                    CatalogDraft::Role(draft.clone()),
+                    baseline.clone(),
+                    server_version_num,
+                )
+                .unwrap();
+                let default_plan = super::PostgresAdapter::plan_catalog_mutation(
+                    request,
+                    CatalogDraft::Role(draft),
+                    baseline,
+                )
+                .unwrap();
+
+                assert_eq!(plan.sql(), version_plan.sql());
+                assert_eq!(plan.sql(), default_plan.sql());
+                assert!(
+                    plan.sql()
+                        .contains("ALTER ROLE \"alice\" RENAME TO \"bob\"")
+                );
+                assert!(plan.sql().contains("GRANT \"new_group\" TO \"bob\""));
+                assert!(plan.sql().contains("REVOKE \"old_group\" FROM \"bob\""));
+                assert_eq!(plan.object_type, object_type);
+                assert_eq!(
+                    plan.execution_mode,
+                    crate::db::catalog_mutation::CatalogMutationExecutionMode::Transactional
+                );
+                assert_eq!(plan.execution_target.database(), "test");
+                assert_eq!(plan.baseline_fingerprint.as_deref(), Some("sha256:role"));
+                assert!(!plan.sql().contains("PASSWORD"));
+            }
+        }
+    }
+
+    #[tokio::test]
+    async fn catalog_mutation_dispatch_creates_database() {
+        use crate::db::catalog::CatalogTarget;
+        use crate::db::catalog_mutation::{
+            CatalogMutationAnchor, CatalogMutationExecutionMode, CatalogMutationMode,
+            CatalogObjectType, CatalogSelectionHint,
+        };
+        use crate::model::catalog_editor::{CatalogDraft, DatabaseDraft};
+
+        let profile_id = Uuid::from_u128(103);
+        let mut draft = DatabaseDraft::new("test");
+        draft.name = "app".into();
+        draft.owner = "postgres".into();
+        draft.comment = "created by dispatch test".into();
+        let request = catalog_dispatch_request(
+            profile_id,
+            3,
+            CatalogMutationMode::Create,
+            CatalogMutationAnchor::Profile { profile_id },
+            CatalogObjectType::Catalog(CatalogKind::Database),
+        );
+        let plan = catalog_dispatch_connection(profile_id, 150_000)
+            .plan_catalog_mutation(request, CatalogDraft::Database(draft), None)
+            .unwrap();
+
+        assert!(
+            plan.sql()
+                .contains("CREATE DATABASE \"app\" OWNER \"postgres\"")
+        );
+        assert!(plan.sql().contains("COMMENT ON DATABASE \"app\""));
+        assert_eq!(
+            plan.execution_mode,
+            CatalogMutationExecutionMode::Autocommit
+        );
+        assert_eq!(plan.execution_target.database(), "test");
+        assert_eq!(plan.refresh, vec![CatalogTarget::Databases]);
+        assert!(
+            matches!(plan.selection, CatalogSelectionHint::Object(ref id) if id.native_path == ["app"])
+        );
+        assert!(plan.baseline_fingerprint.is_none());
+        assert_eq!(
+            plan.object_type,
+            CatalogObjectType::Catalog(CatalogKind::Database)
+        );
+    }
+
+    #[tokio::test]
+    async fn catalog_mutation_dispatch_edits_database() {
+        use crate::db::catalog_mutation::{
+            CatalogMutationAnchor, CatalogMutationExecutionMode, CatalogMutationMode,
+            CatalogObjectDefinition, CatalogObjectType, CatalogSelectionHint,
+        };
+        use crate::model::catalog_editor::{CatalogDraft, DatabaseDraft};
+
+        let profile_id = Uuid::from_u128(104);
+        let definition = catalog_dispatch_database_definition();
+        let mut draft = DatabaseDraft::from_definition(&definition);
+        draft.connection_limit = "12".into();
+        let request = catalog_dispatch_request(
+            profile_id,
+            4,
+            CatalogMutationMode::Edit,
+            CatalogMutationAnchor::Catalog(CatalogId::new(
+                profile_id,
+                CatalogKind::Database,
+                ["app"],
+            )),
+            CatalogObjectType::Catalog(CatalogKind::Database),
+        );
+        let plan = catalog_dispatch_connection(profile_id, 150_000)
+            .plan_catalog_mutation(
+                request,
+                CatalogDraft::Database(draft),
+                Some(CatalogObjectDefinition::Database(definition)),
+            )
+            .unwrap();
+
+        assert!(
+            plan.sql()
+                .contains("ALTER DATABASE \"app\" CONNECTION LIMIT 12")
+        );
+        assert_eq!(
+            plan.execution_mode,
+            CatalogMutationExecutionMode::Autocommit
+        );
+        assert_eq!(plan.execution_target.database(), "test");
+        assert_eq!(plan.baseline_fingerprint.as_deref(), Some("sha256:app"));
+        assert!(
+            matches!(plan.selection, CatalogSelectionHint::Object(ref id) if id.native_path == ["app"])
+        );
+        assert_eq!(
+            plan.object_type,
+            CatalogObjectType::Catalog(CatalogKind::Database)
+        );
+    }
+
+    #[tokio::test]
+    async fn catalog_mutation_dispatch_preserves_validation() {
+        use crate::db::catalog_mutation::{
+            CatalogMutationAnchor, CatalogMutationError, CatalogMutationMode,
+            CatalogObjectDefinition, CatalogObjectType,
+        };
+        use crate::model::catalog_editor::{CatalogDraft, DatabaseDraft, RoleDraft};
+
+        let profile_id = Uuid::from_u128(105);
+        let mut role = RoleDraft::new(false);
+        role.name = "  ".into();
+        let error = catalog_dispatch_connection(profile_id, 150_000)
+            .plan_catalog_mutation(
+                catalog_dispatch_request(
+                    profile_id,
+                    5,
+                    CatalogMutationMode::Create,
+                    CatalogMutationAnchor::Profile { profile_id },
+                    CatalogObjectType::Role,
+                ),
+                CatalogDraft::Role(role),
+                None,
+            )
+            .unwrap_err();
+        assert!(matches!(error, CatalogMutationError::InvalidDraft { .. }));
+
+        let definition = catalog_dispatch_database_definition();
+        let mut database = DatabaseDraft::from_definition(&definition);
+        database.name = "new_app".into();
+        let error = catalog_dispatch_connection(profile_id, 150_000)
+            .plan_catalog_mutation(
+                crate::db::catalog_mutation::CatalogMutationRequest::new(
+                    crate::identity::ConnectionIdentity {
+                        profile_id,
+                        generation: 1,
+                    },
+                    6,
+                    1,
+                    CatalogMutationMode::Edit,
+                    CatalogMutationAnchor::Catalog(CatalogId::new(
+                        profile_id,
+                        CatalogKind::Database,
+                        ["app"],
+                    )),
+                    CatalogObjectType::Catalog(CatalogKind::Database),
+                )
+                .unwrap()
+                .with_current_database("app"),
+                CatalogDraft::Database(database),
+                Some(CatalogObjectDefinition::Database(definition)),
+            )
+            .unwrap_err();
+        assert!(
+            matches!(error, CatalogMutationError::InvalidPlan { reason } if reason.contains("currently connected database"))
+        );
+    }
+
+    #[tokio::test]
+    async fn catalog_mutation_dispatch_preserves_server_version() {
+        use crate::db::catalog_mutation::{
+            CatalogMutationAnchor, CatalogMutationError, CatalogMutationMode, CatalogObjectType,
+            ViewMutationOptionAvailability, ViewOption,
+        };
+        use crate::model::catalog_editor::{CatalogDraft, CatalogFormFocus, ViewDraft};
+
+        let profile_id = Uuid::from_u128(106);
+        let request = || {
+            catalog_dispatch_request(
+                profile_id,
+                7,
+                CatalogMutationMode::Create,
+                CatalogMutationAnchor::Catalog(CatalogId::new(
+                    profile_id,
+                    CatalogKind::Schema,
+                    ["test", "public"],
+                )),
+                CatalogObjectType::Catalog(CatalogKind::View),
+            )
+        };
+        let draft = || {
+            CatalogDraft::View(ViewDraft {
+                name: "versioned_view".into(),
+                schema: "public".into(),
+                owner: "postgres".into(),
+                comment: "".into(),
+                query: "SELECT 1".into(),
+                output_columns: "".into(),
+                security_barrier: ViewOption::available(None),
+                security_invoker: ViewOption::available(Some(true)),
+                check_option: ViewOption::available(None),
+                focus: CatalogFormFocus::Name,
+                clickhouse_native: None,
+            })
+        };
+
+        let error = catalog_dispatch_connection(profile_id, 140_000)
+            .plan_catalog_mutation(request(), draft(), None)
+            .unwrap_err();
+        assert!(matches!(
+            error,
+            CatalogMutationError::UnsupportedOperation {
+                object_type: CatalogObjectType::Catalog(CatalogKind::View)
+            }
+        ));
+        let old_version_capabilities =
+            catalog_dispatch_connection(profile_id, 140_000).catalog_mutation_capabilities();
+        assert!(matches!(
+            old_version_capabilities.view_options.security_invoker,
+            ViewMutationOptionAvailability::Unavailable {
+                reason: "security_invoker requires PostgreSQL 15 or newer"
+            }
+        ));
+
+        let plan = catalog_dispatch_connection(profile_id, 150_000)
+            .plan_catalog_mutation(request(), draft(), None)
+            .unwrap();
+        assert!(plan.sql().contains("security_invoker=true"));
     }
 
     #[tokio::test]
