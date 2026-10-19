@@ -12,7 +12,7 @@ use crate::{
     security::RedactedSecret,
 };
 
-#[derive(Clone, Debug, Eq, PartialEq)]
+#[derive(Clone, Eq, PartialEq)]
 pub struct RoleDraft {
     pub name: TextInput,
     pub login: bool,
@@ -30,6 +30,29 @@ pub struct RoleDraft {
     pub comment: TextInput,
     pub selected_field: usize,
     pub focus: CatalogFormFocus,
+}
+
+impl std::fmt::Debug for RoleDraft {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        formatter
+            .debug_struct("RoleDraft")
+            .field("name", &self.name)
+            .field("login", &self.login)
+            .field("superuser", &self.superuser)
+            .field("createdb", &self.createdb)
+            .field("createrole", &self.createrole)
+            .field("inherit", &self.inherit)
+            .field("replication", &self.replication)
+            .field("bypass_rls", &self.bypass_rls)
+            .field("connection_limit", &self.connection_limit)
+            .field("password_set", &self.password.is_some())
+            .field("valid_until", &self.valid_until)
+            .field("memberships", &self.memberships)
+            .field("comment", &self.comment)
+            .field("selected_field", &self.selected_field)
+            .field("focus", &self.focus)
+            .finish()
+    }
 }
 
 impl RoleDraft {

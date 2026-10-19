@@ -4292,7 +4292,14 @@ impl App {
             self.cancel_editor_leader();
         }
         let review_session = self.review_preview_session_id();
-        let commands = self.update_inner(action);
+        let commands = match action {
+            Action::ExecuteHelpShortcut(id) => self.execute_help_shortcut(id),
+            Action::OmniConfirm => self.confirm_omni_item(),
+            Action::ExecuteSemanticCommand { id, context } => {
+                self.execute_semantic_command(id, context)
+            }
+            action => self.update_inner(action),
+        };
         if leader_context
             != (
                 self.focus,
@@ -7732,9 +7739,8 @@ impl App {
                 }
                 Vec::new()
             }
-            Action::OmniConfirm => self.confirm_omni_item(),
-            Action::ExecuteSemanticCommand { id, context } => {
-                self.execute_semantic_command(id, context)
+            Action::OmniConfirm | Action::ExecuteSemanticCommand { .. } => {
+                unreachable!("omni and semantic commands are handled before reducer dispatch")
             }
             Action::OpenRecordView => {
                 if self.focus == Focus::Results {
@@ -7982,7 +7988,6 @@ impl App {
                 }
                 Vec::new()
             }
-            Action::ExecuteHelpShortcut(id) => self.execute_help_shortcut(id),
             Action::DismissOverlay => {
                 if matches!(self.overlay, Some(Overlay::Help(_))) {
                     self.overlay = None;
@@ -18698,6 +18703,9 @@ impl App {
             | Action::SubmitRelationQuery
             | Action::CancelRelationQueryInput => {
                 unreachable!("relation query aliases are normalized before dispatch")
+            }
+            Action::ExecuteHelpShortcut(_) => {
+                unreachable!("help shortcuts are handled before reducer dispatch")
             }
         }
     }

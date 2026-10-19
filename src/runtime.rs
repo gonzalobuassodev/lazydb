@@ -9640,12 +9640,20 @@ mod tests {
                     console_id,
                 });
             }
+            let mut pending_events = Vec::new();
             if release_generation {
                 tokio::time::timeout(std::time::Duration::from_secs(5), async {
                     loop {
-                        if matches!(events.recv().await, Some(Action::DisconnectCompleted { connection }) if connection == identity)
-                        {
-                            break;
+                        match events.recv().await {
+                            Some(Action::DisconnectCompleted { connection })
+                                if connection == identity =>
+                            {
+                                break;
+                            }
+                            Some(action) => pending_events.push(action),
+                            None => panic!(
+                                "runtime event channel closed before generation disconnect completed"
+                            ),
                         }
                     }
                 })
@@ -9669,7 +9677,10 @@ mod tests {
             }
             query_stopped.expect("released DuckDB query task must stop within its bound");
             let mut query_failed = false;
-            while let Ok(action) = events.try_recv() {
+            for action in pending_events
+                .into_iter()
+                .chain(std::iter::from_fn(|| events.try_recv().ok()))
+            {
                 match action {
                     Action::QueryFailed {
                         tab_id,
