@@ -1521,6 +1521,45 @@
 - [`3035063`](https://github.com/yelog/lazydb/commit/30350631c09e7b81fa86f83e2f1c3a2809603a19) build(deps): bump actions/download-artifact from 8.0.1 to 8.0.2 (#14)
 - [`3cbb4ef`](https://github.com/yelog/lazydb/commit/3cbb4ef38b3c74031a9ce161a085c7349b43c24a) fix(update): show immediate feedback and live update progress
 
+## [0.2.1] - 2026-10-19
+
+### Added
+
+- Added native MongoDB, ClickHouse, and DuckDB support across connection management, database browsing, query workflows, and database operations.
+
+### Changed
+
+- Added Linux runtime compatibility checks and updated release packaging and installation workflows to validate supported runtime requirements.
+
+### Fixed
+
+- Fixed catalog profile form input and default ownership for new PostgreSQL databases.
+- Unified PostgreSQL catalog mutation dispatch.
+- Prevented reducer stack overflows when executing relation shortcuts, help shortcuts, and Omni actions.
+- Preserved cancellation events while waiting for DuckDB connection shutdown.
+- Redacted role passwords from debug output.
+
+### Internal
+
+- Expanded database adapter, catalog editor, keymap, installer, runtime compatibility, and release distribution coverage; added supporting documentation and implementation plans.
+
+### Commits
+
+- [`fc5bf4b`](https://github.com/yelog/lazydb/commit/fc5bf4b4551a7f955ce7055c941a4b58d7240750) fix(app): handle nested actions outside reducer dispatch
+- [`1281851`](https://github.com/yelog/lazydb/commit/1281851e20640dc8d1df5900f7b7dd10f4545111) fix(app): avoid recursive relation query reducer dispatch
+- [`e4fbb5b`](https://github.com/yelog/lazydb/commit/e4fbb5b89ccec23f33c6f64f77e7800f11494806) Merge branch 'task/fix-postgres-catalog-mutation-dispatch'
+- [`057237a`](https://github.com/yelog/lazydb/commit/057237afae886f662bcbcba74698ea19c4939a60) fix(postgres): unify catalog mutation dispatch
+- [`bd7b5c7`](https://github.com/yelog/lazydb/commit/bd7b5c7a229e27ddf12508ac9d1373d007d1b82b) fix(catalog): default owner for new PostgreSQL databases
+- [`7091bbc`](https://github.com/yelog/lazydb/commit/7091bbc746d040f8441224d134179e224f82c868) fix(catalog-editor): enable profile form input
+- [`0fa5d24`](https://github.com/yelog/lazydb/commit/0fa5d249ffabc8f8014107e09f6e0dd80cee703e) Merge branch 'task/add-duckdb-support'
+- [`8e63b0b`](https://github.com/yelog/lazydb/commit/8e63b0b15ed8be2a84111cb36b3f87680e65b2cf) feat(duckdb): add native DuckDB support
+- [`02feee5`](https://github.com/yelog/lazydb/commit/02feee580b09575146453ea86b294895a65cc8f4) Merge branch 'task/clickhouse-database-support'
+- [`36e2659`](https://github.com/yelog/lazydb/commit/36e26592537f1979441c4b80ab67fc84b50cd41e) feat(clickhouse): add full ClickHouse support
+- [`5c5e79b`](https://github.com/yelog/lazydb/commit/5c5e79b3230d814188c196d6638ce645bf01bee5) Merge branch 'task/mongodb-full-support'
+- [`e6ebbfc`](https://github.com/yelog/lazydb/commit/e6ebbfcd5c6ea94c2a4364d0f49d293f4a22d9e5) feat(mongodb): add full MongoDB client support
+- [`f7f33bd`](https://github.com/yelog/lazydb/commit/f7f33bdae221423a5924c448abcf18b536b494ac) feat(linux): enforce runtime compatibility for releases
+- [`f2bb2aa`](https://github.com/yelog/lazydb/commit/f2bb2aac0e7024d20b5b6c6ac23b742f455216c8) docs: add Linux runtime compatibility implementation plan
+
 ## Unreleased
 
 - Add persistent Explorer connection groups, group membership, and profile ordering.
