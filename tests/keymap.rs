@@ -2180,6 +2180,289 @@ fn role_editor_uses_catalog_editor_field_keymap() {
         keymap.map(key(KeyCode::Enter), &app),
         Some(Action::CatalogEditorPreview)
     );
+    app.update(Action::CatalogEditorFocusFormField(
+        lazydb::model::catalog_editor::CatalogFormFocus::Review,
+    ));
+    assert_eq!(
+        keymap.map(key(KeyCode::Enter), &app),
+        Some(Action::CatalogEditorPreview)
+    );
+    app.update(Action::CatalogEditorFocusFormField(
+        lazydb::model::catalog_editor::CatalogFormFocus::Cancel,
+    ));
+    assert_eq!(
+        keymap.map(key(KeyCode::Enter), &app),
+        Some(Action::CatalogEditorCancel)
+    );
+
+    app.update(Action::CatalogEditorFocusFormField(
+        lazydb::model::catalog_editor::CatalogFormFocus::Password,
+    ));
+    assert_eq!(
+        keymap.map(key(KeyCode::Char('s')), &app),
+        Some(Action::CatalogEditorPasswordInsert('s'.into()))
+    );
+    let password_action = keymap.map(key(KeyCode::Char('s')), &app).unwrap();
+    assert!(!format!("{password_action:?}").contains("ProfileInput(\"s\")"));
+    assert!(!format!("{password_action:?}").contains("\"s\""));
+    app.update(password_action);
+    let role = match app
+        .catalog_editor
+        .as_ref()
+        .and_then(|editor| editor.draft.as_ref())
+        .unwrap()
+    {
+        lazydb::model::catalog_editor::CatalogDraft::Role(role) => role,
+        _ => panic!("role draft expected"),
+    };
+    assert_eq!(role.password.as_ref().unwrap().expose(), "s");
+    assert!(!format!("{role:?}").contains("password: Some"));
+    assert!(!format!("{role:?}").contains("SecretTextInput"));
+}
+
+#[test]
+fn catalog_profile_form_keymap_inserts_text_into_all_three_create_forms() {
+    let cases = [
+        (
+            lazydb::db::catalog_mutation::CatalogObjectType::Catalog(
+                lazydb::db::catalog::CatalogKind::Database,
+            ),
+            "database",
+        ),
+        (
+            lazydb::db::catalog_mutation::CatalogObjectType::LoginRole,
+            "login role",
+        ),
+        (
+            lazydb::db::catalog_mutation::CatalogObjectType::Role,
+            "role",
+        ),
+    ];
+
+    for (object_type, label) in cases {
+        let mut app = App::new(Vec::new());
+        let mut editor = lazydb::model::catalog_editor::CatalogEditorState::new(
+            lazydb::db::catalog_mutation::CatalogMutationMode::Create,
+            lazydb::db::catalog_mutation::CatalogMutationAnchor::Profile {
+                profile_id: Uuid::nil(),
+            },
+            0,
+            vec![],
+        );
+        assert!(editor.select_object_type(object_type));
+        app.catalog_editor = Some(editor);
+        app.overlay = Some(Overlay::CatalogEditor);
+        let mut keymap = Keymap::default();
+
+        for character in ['a', '界', 'b'] {
+            let action = keymap
+                .map(key(KeyCode::Char(character)), &app)
+                .unwrap_or_else(|| panic!("{label} should map printable text"));
+            app.update(action);
+        }
+
+        let name = match app
+            .catalog_editor
+            .as_ref()
+            .and_then(|editor| editor.draft.as_ref())
+            .unwrap()
+        {
+            lazydb::model::catalog_editor::CatalogDraft::Database(draft) => draft.name.value(),
+            lazydb::model::catalog_editor::CatalogDraft::Role(draft) => draft.name.value(),
+            _ => panic!("{label} should create a database or role draft"),
+        };
+        assert_eq!(name, "a界b", "{label} input should reach its draft");
+    }
+}
+
+#[test]
+fn catalog_profile_form_paste_edits_database_and_role_name_fields() {
+    let cases = [
+        lazydb::db::catalog_mutation::CatalogObjectType::Catalog(
+            lazydb::db::catalog::CatalogKind::Database,
+        ),
+        lazydb::db::catalog_mutation::CatalogObjectType::LoginRole,
+        lazydb::db::catalog_mutation::CatalogObjectType::Role,
+    ];
+
+    for object_type in cases {
+        let mut app = App::new(Vec::new());
+        let mut editor = lazydb::model::catalog_editor::CatalogEditorState::new(
+            lazydb::db::catalog_mutation::CatalogMutationMode::Create,
+            lazydb::db::catalog_mutation::CatalogMutationAnchor::Profile {
+                profile_id: Uuid::nil(),
+            },
+            0,
+            vec![],
+        );
+        assert!(editor.select_object_type(object_type));
+        app.catalog_editor = Some(editor);
+        app.overlay = Some(Overlay::CatalogEditor);
+
+        let actions = map_paste("alpha 界 beta".into(), &app);
+        assert_eq!(actions.len(), 1);
+        for action in actions {
+            app.update(action);
+        }
+
+        app.update(Action::CatalogEditorUndo);
+        let undone_name = match app
+            .catalog_editor
+            .as_ref()
+            .and_then(|editor| editor.draft.as_ref())
+            .unwrap()
+        {
+            lazydb::model::catalog_editor::CatalogDraft::Database(draft) => draft.name.value(),
+            lazydb::model::catalog_editor::CatalogDraft::Role(draft) => draft.name.value(),
+            _ => panic!("database or role draft expected"),
+        };
+        assert_eq!(undone_name, "");
+        app.update(Action::CatalogEditorRedo);
+
+        let name = match app
+            .catalog_editor
+            .as_ref()
+            .and_then(|editor| editor.draft.as_ref())
+            .unwrap()
+        {
+            lazydb::model::catalog_editor::CatalogDraft::Database(draft) => draft.name.value(),
+            lazydb::model::catalog_editor::CatalogDraft::Role(draft) => draft.name.value(),
+            _ => panic!("database or role draft expected"),
+        };
+        assert_eq!(name, "alpha 界 beta");
+    }
+}
+
+#[test]
+fn catalog_profile_form_enter_preserves_preview_and_toggle_semantics() {
+    let cases = [
+        lazydb::db::catalog_mutation::CatalogObjectType::Catalog(
+            lazydb::db::catalog::CatalogKind::Database,
+        ),
+        lazydb::db::catalog_mutation::CatalogObjectType::LoginRole,
+        lazydb::db::catalog_mutation::CatalogObjectType::Role,
+    ];
+
+    for object_type in cases {
+        let mut editor = lazydb::model::catalog_editor::CatalogEditorState::new(
+            lazydb::db::catalog_mutation::CatalogMutationMode::Create,
+            lazydb::db::catalog_mutation::CatalogMutationAnchor::Profile {
+                profile_id: Uuid::nil(),
+            },
+            0,
+            vec![],
+        );
+        assert!(editor.select_object_type(object_type));
+        let mut app = App::new(Vec::new());
+        app.catalog_editor = Some(editor);
+        app.overlay = Some(Overlay::CatalogEditor);
+        let mut keymap = Keymap::default();
+
+        assert_eq!(
+            keymap.map(key(KeyCode::Enter), &app),
+            Some(Action::CatalogEditorPreview)
+        );
+
+        let toggle = if matches!(
+            object_type,
+            lazydb::db::catalog_mutation::CatalogObjectType::Catalog(_)
+        ) {
+            lazydb::model::catalog_editor::CatalogFormFocus::AllowConnections
+        } else {
+            lazydb::model::catalog_editor::CatalogFormFocus::Login
+        };
+        app.update(Action::CatalogEditorFocusFormField(toggle));
+        assert_eq!(
+            keymap.map(key(KeyCode::Enter), &app),
+            Some(Action::CatalogEditorToggleFocused)
+        );
+
+        app.update(Action::CatalogEditorFocusFormField(
+            lazydb::model::catalog_editor::CatalogFormFocus::Review,
+        ));
+        assert_eq!(
+            keymap.map(key(KeyCode::Enter), &app),
+            Some(Action::CatalogEditorPreview)
+        );
+        app.update(Action::CatalogEditorFocusFormField(
+            lazydb::model::catalog_editor::CatalogFormFocus::Cancel,
+        ));
+        assert_eq!(
+            keymap.map(key(KeyCode::Enter), &app),
+            Some(Action::CatalogEditorCancel)
+        );
+    }
+}
+
+#[test]
+fn catalog_profile_form_paste_rejects_non_text_focus() {
+    let mut editor = lazydb::model::catalog_editor::CatalogEditorState::new(
+        lazydb::db::catalog_mutation::CatalogMutationMode::Create,
+        lazydb::db::catalog_mutation::CatalogMutationAnchor::Profile {
+            profile_id: Uuid::nil(),
+        },
+        0,
+        vec![],
+    );
+    assert!(editor.select_object_type(lazydb::db::catalog_mutation::CatalogObjectType::LoginRole));
+    let mut app = App::new(Vec::new());
+    app.catalog_editor = Some(editor);
+    app.overlay = Some(Overlay::CatalogEditor);
+
+    for focus in [
+        lazydb::model::catalog_editor::CatalogFormFocus::Login,
+        lazydb::model::catalog_editor::CatalogFormFocus::Review,
+        lazydb::model::catalog_editor::CatalogFormFocus::Cancel,
+    ] {
+        app.update(Action::CatalogEditorFocusFormField(focus));
+        assert!(map_paste("must not be inserted".into(), &app).is_empty());
+    }
+
+    app.update(Action::CatalogEditorFocusFormField(
+        lazydb::model::catalog_editor::CatalogFormFocus::Password,
+    ));
+    let actions = map_paste("safe synthetic".into(), &app);
+    assert_eq!(actions.len(), 1);
+    assert!(!format!("{:?}", actions[0]).contains("safe synthetic"));
+    app.update(actions.into_iter().next().unwrap());
+    let role = match app
+        .catalog_editor
+        .as_ref()
+        .and_then(|editor| editor.draft.as_ref())
+        .unwrap()
+    {
+        lazydb::model::catalog_editor::CatalogDraft::Role(role) => role,
+        _ => panic!("role draft expected"),
+    };
+    assert_eq!(role.password.as_ref().unwrap().expose(), "safe synthetic");
+    assert!(!format!("{role:?}").contains("safe synthetic"));
+}
+
+#[test]
+fn catalog_profile_form_text_field_reports_preview_on_enter() {
+    let mut editor = lazydb::model::catalog_editor::CatalogEditorState::new(
+        lazydb::db::catalog_mutation::CatalogMutationMode::Create,
+        lazydb::db::catalog_mutation::CatalogMutationAnchor::Profile {
+            profile_id: Uuid::nil(),
+        },
+        0,
+        vec![],
+    );
+    assert!(
+        editor.select_object_type(lazydb::db::catalog_mutation::CatalogObjectType::Catalog(
+            lazydb::db::catalog::CatalogKind::Database
+        ))
+    );
+    let mut app = App::new(Vec::new());
+    app.catalog_editor = Some(editor);
+    app.overlay = Some(Overlay::CatalogEditor);
+    app.update(Action::CatalogEditorInsert('x'));
+
+    let mut keymap = Keymap::default();
+    assert_eq!(
+        keymap.map(key(KeyCode::Enter), &app),
+        Some(Action::CatalogEditorPreview)
+    );
 }
 
 #[test]

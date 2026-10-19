@@ -431,6 +431,13 @@ fn form(
             {
                 crate::model::catalog_editor::CatalogFormFocusKind::Text => {
                     hints.push(ShortcutHint::new("Type", "edit"));
+                    if matches!(draft, CatalogDraft::Database(_) | CatalogDraft::Role(_)) {
+                        hints.push(ShortcutHint::with_keys(
+                            "Enter",
+                            "preview",
+                            [KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE)],
+                        ));
+                    }
                 }
                 crate::model::catalog_editor::CatalogFormFocusKind::Choice => {
                     hints.push(ShortcutHint::new("Left/Right", "change"));

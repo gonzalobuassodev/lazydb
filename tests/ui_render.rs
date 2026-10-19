@@ -653,6 +653,46 @@ fn role_editor_renders_secret_as_status_only() {
 }
 
 #[test]
+fn catalog_profile_form_footer_matches_text_toggle_and_action_focus() {
+    let mut editor = lazydb::model::catalog_editor::CatalogEditorState::new(
+        lazydb::db::catalog_mutation::CatalogMutationMode::Create,
+        lazydb::db::catalog_mutation::CatalogMutationAnchor::Profile {
+            profile_id: uuid::Uuid::nil(),
+        },
+        0,
+        vec![],
+    );
+    assert!(
+        editor.select_object_type(lazydb::db::catalog_mutation::CatalogObjectType::Catalog(
+            CatalogKind::Database
+        ))
+    );
+    let mut app = App::new(Vec::new());
+    app.catalog_editor = Some(editor);
+    app.overlay = Some(Overlay::CatalogEditor);
+
+    let output = render(&app, 100, 30);
+    assert!(output.contains("Type edit"), "{output}");
+    assert!(output.contains("Enter preview"), "{output}");
+
+    let output = render(&app, 100, 30);
+    assert!(!output.contains("Read only"), "{output}");
+
+    app.update(Action::CatalogEditorFocusFormField(
+        lazydb::model::catalog_editor::CatalogFormFocus::AllowConnections,
+    ));
+    let output = render(&app, 100, 30);
+    assert!(output.contains("Space toggle"), "{output}");
+    assert!(output.contains("Enter preview"), "{output}");
+
+    app.update(Action::CatalogEditorFocusFormField(
+        lazydb::model::catalog_editor::CatalogFormFocus::Review,
+    ));
+    let output = render(&app, 100, 30);
+    assert!(output.contains("Enter activate"), "{output}");
+}
+
+#[test]
 fn table_editor_renders_general_and_columns_sections() {
     let mut app = App::new(Vec::new());
     app.catalog_editor = Some(lazydb::model::catalog_editor::CatalogEditorState {

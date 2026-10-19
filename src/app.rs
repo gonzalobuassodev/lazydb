@@ -9132,12 +9132,7 @@ impl App {
                             draft.focus(focus)
                         }
                         crate::model::catalog_editor::CatalogDraft::Database(draft) => {
-                            if draft.focus_enabled(focus) {
-                                draft.focus = focus;
-                                true
-                            } else {
-                                false
-                            }
+                            draft.focus(focus)
                         }
                         crate::model::catalog_editor::CatalogDraft::Role(draft) => {
                             draft.focus = focus;
@@ -9540,7 +9535,21 @@ impl App {
                 Vec::new()
             }
             Action::CatalogEditorInsert(character) => {
+                if self.catalog_editor.as_ref().is_some_and(|editor| {
+                    editor.page != crate::model::catalog_editor::CatalogEditorPage::Form
+                        || editor.is_busy()
+                }) {
+                    return Vec::new();
+                }
                 if let Some(draft) = self.catalog_editor.as_mut().and_then(|e| e.draft.as_mut()) {
+                    if matches!(
+                        draft,
+                        crate::model::catalog_editor::CatalogDraft::Database(_)
+                            | crate::model::catalog_editor::CatalogDraft::Role(_)
+                    ) {
+                        draft.insert(character);
+                        return Vec::new();
+                    }
                     if matches!(draft, crate::model::catalog_editor::CatalogDraft::Table(_)) {
                         draft.insert(character);
                         return Vec::new();
@@ -9585,11 +9594,42 @@ impl App {
                 }
                 Vec::new()
             }
-            Action::CatalogEditorPaste(text) => {
-                if let Some(draft) = self
+            Action::CatalogEditorPasswordInsert(input) => {
+                if let Some(crate::model::catalog_editor::CatalogDraft::Role(draft)) = self
                     .catalog_editor
                     .as_mut()
+                    .filter(|editor| {
+                        editor.page == crate::model::catalog_editor::CatalogEditorPage::Form
+                            && !editor.is_busy()
+                    })
                     .and_then(|editor| editor.draft.as_mut())
+                    && draft.focus == crate::model::catalog_editor::CatalogFormFocus::Password
+                    && let Some(character) = input.character()
+                {
+                    draft.password_insert(character);
+                }
+                Vec::new()
+            }
+            Action::CatalogEditorPasswordPaste(input) => {
+                if let Some(crate::model::catalog_editor::CatalogDraft::Role(draft)) = self
+                    .catalog_editor
+                    .as_mut()
+                    .filter(|editor| {
+                        editor.page == crate::model::catalog_editor::CatalogEditorPage::Form
+                            && !editor.is_busy()
+                    })
+                    .and_then(|editor| editor.draft.as_mut())
+                    && draft.focus == crate::model::catalog_editor::CatalogFormFocus::Password
+                {
+                    draft.password_paste(input.value());
+                }
+                Vec::new()
+            }
+            Action::CatalogEditorPaste(text) => {
+                if let Some(editor) = self.catalog_editor.as_mut().filter(|editor| {
+                    editor.page == crate::model::catalog_editor::CatalogEditorPage::Form
+                        && !editor.is_busy()
+                }) && let Some(draft) = editor.draft.as_mut()
                 {
                     draft.paste(&text);
                 }
@@ -9611,7 +9651,12 @@ impl App {
             }
             Action::CatalogEditorBackspace => {
                 if let Some(draft) = self.catalog_editor.as_mut().and_then(|e| e.draft.as_mut())
-                    && matches!(draft, crate::model::catalog_editor::CatalogDraft::Table(_))
+                    && matches!(
+                        draft,
+                        crate::model::catalog_editor::CatalogDraft::Database(_)
+                            | crate::model::catalog_editor::CatalogDraft::Role(_)
+                            | crate::model::catalog_editor::CatalogDraft::Table(_)
+                    )
                 {
                     draft.backspace();
                     return Vec::new();
@@ -9658,7 +9703,12 @@ impl App {
             }
             Action::CatalogEditorDeletePreviousWord => {
                 if let Some(draft) = self.catalog_editor.as_mut().and_then(|e| e.draft.as_mut())
-                    && matches!(draft, crate::model::catalog_editor::CatalogDraft::Table(_))
+                    && matches!(
+                        draft,
+                        crate::model::catalog_editor::CatalogDraft::Database(_)
+                            | crate::model::catalog_editor::CatalogDraft::Role(_)
+                            | crate::model::catalog_editor::CatalogDraft::Table(_)
+                    )
                 {
                     draft.delete_previous_word();
                     return Vec::new();
@@ -9705,7 +9755,12 @@ impl App {
             }
             Action::CatalogEditorDeleteToStart => {
                 if let Some(draft) = self.catalog_editor.as_mut().and_then(|e| e.draft.as_mut())
-                    && matches!(draft, crate::model::catalog_editor::CatalogDraft::Table(_))
+                    && matches!(
+                        draft,
+                        crate::model::catalog_editor::CatalogDraft::Database(_)
+                            | crate::model::catalog_editor::CatalogDraft::Role(_)
+                            | crate::model::catalog_editor::CatalogDraft::Table(_)
+                    )
                 {
                     draft.delete_to_start();
                     return Vec::new();
@@ -9752,7 +9807,12 @@ impl App {
             }
             Action::CatalogEditorDelete => {
                 if let Some(draft) = self.catalog_editor.as_mut().and_then(|e| e.draft.as_mut())
-                    && matches!(draft, crate::model::catalog_editor::CatalogDraft::Table(_))
+                    && matches!(
+                        draft,
+                        crate::model::catalog_editor::CatalogDraft::Database(_)
+                            | crate::model::catalog_editor::CatalogDraft::Role(_)
+                            | crate::model::catalog_editor::CatalogDraft::Table(_)
+                    )
                 {
                     draft.delete();
                     return Vec::new();
@@ -9799,7 +9859,12 @@ impl App {
             }
             Action::CatalogEditorMoveLeft => {
                 if let Some(draft) = self.catalog_editor.as_mut().and_then(|e| e.draft.as_mut())
-                    && matches!(draft, crate::model::catalog_editor::CatalogDraft::Table(_))
+                    && matches!(
+                        draft,
+                        crate::model::catalog_editor::CatalogDraft::Database(_)
+                            | crate::model::catalog_editor::CatalogDraft::Role(_)
+                            | crate::model::catalog_editor::CatalogDraft::Table(_)
+                    )
                 {
                     draft.move_left();
                     return Vec::new();
@@ -9846,7 +9911,12 @@ impl App {
             }
             Action::CatalogEditorMoveRight => {
                 if let Some(draft) = self.catalog_editor.as_mut().and_then(|e| e.draft.as_mut())
-                    && matches!(draft, crate::model::catalog_editor::CatalogDraft::Table(_))
+                    && matches!(
+                        draft,
+                        crate::model::catalog_editor::CatalogDraft::Database(_)
+                            | crate::model::catalog_editor::CatalogDraft::Role(_)
+                            | crate::model::catalog_editor::CatalogDraft::Table(_)
+                    )
                 {
                     draft.move_right();
                     return Vec::new();
@@ -9893,7 +9963,12 @@ impl App {
             }
             Action::CatalogEditorMoveHome => {
                 if let Some(draft) = self.catalog_editor.as_mut().and_then(|e| e.draft.as_mut())
-                    && matches!(draft, crate::model::catalog_editor::CatalogDraft::Table(_))
+                    && matches!(
+                        draft,
+                        crate::model::catalog_editor::CatalogDraft::Database(_)
+                            | crate::model::catalog_editor::CatalogDraft::Role(_)
+                            | crate::model::catalog_editor::CatalogDraft::Table(_)
+                    )
                 {
                     draft.move_home();
                     return Vec::new();
@@ -9940,7 +10015,12 @@ impl App {
             }
             Action::CatalogEditorMoveEnd => {
                 if let Some(draft) = self.catalog_editor.as_mut().and_then(|e| e.draft.as_mut())
-                    && matches!(draft, crate::model::catalog_editor::CatalogDraft::Table(_))
+                    && matches!(
+                        draft,
+                        crate::model::catalog_editor::CatalogDraft::Database(_)
+                            | crate::model::catalog_editor::CatalogDraft::Role(_)
+                            | crate::model::catalog_editor::CatalogDraft::Table(_)
+                    )
                 {
                     draft.move_end();
                     return Vec::new();

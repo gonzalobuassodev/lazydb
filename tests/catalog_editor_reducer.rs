@@ -118,6 +118,209 @@ fn simple_catalog_editor(mode: CatalogMutationMode, draft: CatalogDraft) -> App 
     app
 }
 
+fn catalog_profile_form(draft: CatalogDraft) -> App {
+    let mut app = simple_catalog_editor(CatalogMutationMode::Create, draft);
+    let editor = app.catalog_editor.as_mut().expect("catalog editor");
+    editor.object_type = match editor.draft.as_ref().expect("catalog draft") {
+        CatalogDraft::Database(_) => Some(CatalogObjectType::Catalog(CatalogKind::Database)),
+        CatalogDraft::Role(role) if role.login => Some(CatalogObjectType::LoginRole),
+        CatalogDraft::Role(_) => Some(CatalogObjectType::Role),
+        _ => panic!("profile form must be a database or role"),
+    };
+    app
+}
+
+fn catalog_profile_form_name(app: &App) -> &str {
+    match app
+        .catalog_editor
+        .as_ref()
+        .and_then(|editor| editor.draft.as_ref())
+        .expect("catalog draft")
+    {
+        CatalogDraft::Database(draft) => draft.name.value(),
+        CatalogDraft::Role(draft) => draft.name.value(),
+        _ => panic!("profile form must be a database or role"),
+    }
+}
+
+#[test]
+fn catalog_profile_form_reducer_inserts_text_for_database_and_both_role_types() {
+    let drafts = [
+        CatalogDraft::Database(lazydb::model::catalog_editor::DatabaseDraft::new("")),
+        CatalogDraft::Role(lazydb::model::catalog_editor::RoleDraft::new(true)),
+        CatalogDraft::Role(lazydb::model::catalog_editor::RoleDraft::new(false)),
+    ];
+
+    for draft in drafts {
+        let mut app = catalog_profile_form(draft);
+        for character in ['a', '界', 'b'] {
+            app.update(Action::CatalogEditorInsert(character));
+        }
+        assert_eq!(catalog_profile_form_name(&app), "a界b");
+    }
+}
+
+#[test]
+fn catalog_profile_form_reducer_edits_unicode_text_at_the_cursor() {
+    let drafts = [
+        CatalogDraft::Database(lazydb::model::catalog_editor::DatabaseDraft::new("")),
+        CatalogDraft::Role(lazydb::model::catalog_editor::RoleDraft::new(true)),
+        CatalogDraft::Role(lazydb::model::catalog_editor::RoleDraft::new(false)),
+    ];
+
+    for draft in drafts {
+        let mut app = catalog_profile_form(draft);
+        for character in ['a', '界', 'b'] {
+            app.update(Action::CatalogEditorInsert(character));
+        }
+
+        app.update(Action::CatalogEditorMoveHome);
+        app.update(Action::CatalogEditorMoveRight);
+        app.update(Action::CatalogEditorDelete);
+        assert_eq!(catalog_profile_form_name(&app), "ab");
+
+        app.update(Action::CatalogEditorInsert('中'));
+        assert_eq!(catalog_profile_form_name(&app), "a中b");
+
+        app.update(Action::CatalogEditorMoveEnd);
+        app.update(Action::CatalogEditorMoveLeft);
+        app.update(Action::CatalogEditorBackspace);
+        assert_eq!(catalog_profile_form_name(&app), "ab");
+
+        app.update(Action::CatalogEditorMoveRight);
+        app.update(Action::CatalogEditorInsert('x'));
+        assert_eq!(catalog_profile_form_name(&app), "abx");
+    }
+}
+
+#[test]
+fn catalog_profile_form_reducer_deletes_previous_word_and_to_start() {
+    let drafts = [
+        CatalogDraft::Database(lazydb::model::catalog_editor::DatabaseDraft::new("")),
+        CatalogDraft::Role(lazydb::model::catalog_editor::RoleDraft::new(true)),
+        CatalogDraft::Role(lazydb::model::catalog_editor::RoleDraft::new(false)),
+    ];
+
+    for draft in drafts {
+        let mut app = catalog_profile_form(draft);
+        for character in "alpha beta".chars() {
+            app.update(Action::CatalogEditorInsert(character));
+        }
+        app.update(Action::CatalogEditorDeletePreviousWord);
+        assert_eq!(catalog_profile_form_name(&app), "alpha ");
+        app.update(Action::CatalogEditorDeleteToStart);
+        assert_eq!(catalog_profile_form_name(&app), "");
+    }
+}
+
+#[test]
+fn catalog_profile_form_password_actions_are_secret_and_only_edit_password_focus() {
+    let mut app = catalog_profile_form(CatalogDraft::Role(
+        lazydb::model::catalog_editor::RoleDraft::new(true),
+    ));
+    app.update(Action::CatalogEditorFocusFormField(
+        CatalogFormFocus::Password,
+    ));
+
+    let input = lazydb::model::profile_manager::ProfileInput::from("sensitive-value");
+    let insert_action = Action::CatalogEditorPasswordInsert(
+        lazydb::model::profile_manager::ProfileInput::from('x'),
+    );
+    let paste_action = Action::CatalogEditorPasswordPaste(input);
+    assert!(!format!("{insert_action:?}").contains('x'));
+    assert!(!format!("{paste_action:?}").contains("sensitive-value"));
+
+    app.update(paste_action);
+    let role = match app
+        .catalog_editor
+        .as_ref()
+        .and_then(|editor| editor.draft.as_ref())
+        .unwrap()
+    {
+        CatalogDraft::Role(role) => role,
+        _ => panic!("role draft expected"),
+    };
+    assert_eq!(role.password.as_ref().unwrap().expose(), "sensitive-value");
+    assert!(!format!("{role:?}").contains("sensitive-value"));
+
+    app.update(Action::CatalogEditorFocusFormField(CatalogFormFocus::Name));
+    app.update(insert_action);
+    assert_eq!(catalog_profile_form_name(&app), "");
+    let role = match app
+        .catalog_editor
+        .as_ref()
+        .and_then(|editor| editor.draft.as_ref())
+        .unwrap()
+    {
+        CatalogDraft::Role(role) => role,
+        _ => panic!("role draft expected"),
+    };
+    assert_eq!(role.password.as_ref().unwrap().expose(), "sensitive-value");
+}
+
+#[test]
+fn catalog_profile_form_paste_is_one_undoable_edit_including_passwords() {
+    let drafts = [
+        CatalogDraft::Database(lazydb::model::catalog_editor::DatabaseDraft::new("")),
+        CatalogDraft::Role(lazydb::model::catalog_editor::RoleDraft::new(true)),
+        CatalogDraft::Role(lazydb::model::catalog_editor::RoleDraft::new(false)),
+    ];
+
+    for draft in drafts {
+        let password_focus = matches!(&draft, CatalogDraft::Role(_));
+        let mut app = catalog_profile_form(draft);
+        if password_focus {
+            app.update(Action::CatalogEditorFocusFormField(
+                CatalogFormFocus::Password,
+            ));
+            app.update(Action::CatalogEditorPasswordPaste(
+                lazydb::model::profile_manager::ProfileInput::from("alpha 界 beta"),
+            ));
+        } else {
+            app.update(Action::CatalogEditorPaste("alpha 界 beta".into()));
+        }
+
+        app.update(Action::CatalogEditorUndo);
+        if password_focus {
+            let CatalogDraft::Role(role) = app
+                .catalog_editor
+                .as_ref()
+                .and_then(|editor| editor.draft.as_ref())
+                .unwrap()
+            else {
+                panic!("role draft expected");
+            };
+            assert!(role.password.is_none());
+            app.update(Action::CatalogEditorRedo);
+            let CatalogDraft::Role(role) = app
+                .catalog_editor
+                .as_ref()
+                .and_then(|editor| editor.draft.as_ref())
+                .unwrap()
+            else {
+                panic!("role draft expected");
+            };
+            assert_eq!(role.password.as_ref().unwrap().expose(), "alpha 界 beta");
+            assert!(!format!("{role:?}").contains("alpha 界 beta"));
+        } else {
+            assert_eq!(catalog_profile_form_name(&app), "");
+            app.update(Action::CatalogEditorRedo);
+            assert_eq!(catalog_profile_form_name(&app), "alpha 界 beta");
+        }
+    }
+}
+
+#[test]
+fn catalog_profile_form_reducer_ignores_paste_during_busy_operations() {
+    let mut app = catalog_profile_form(CatalogDraft::Database(
+        lazydb::model::catalog_editor::DatabaseDraft::new(""),
+    ));
+    app.catalog_editor.as_mut().unwrap().operation =
+        Some(lazydb::model::catalog_editor::CatalogEditorOperation::Applying { request_id: 1 });
+    app.update(Action::CatalogEditorPaste("must not insert".into()));
+    assert_eq!(catalog_profile_form_name(&app), "");
+}
+
 fn materialized_view_editor(mode: CatalogMutationMode, focus: CatalogFormFocus) -> App {
     simple_catalog_editor(
         mode,

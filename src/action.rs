@@ -356,6 +356,8 @@ pub enum Action {
     CatalogOwnerPickerChoose(String),
     CatalogEditorInsert(char),
     CatalogEditorPaste(String),
+    CatalogEditorPasswordInsert(ProfileInput),
+    CatalogEditorPasswordPaste(ProfileInput),
     CatalogEditorBackspace,
     CatalogEditorDeletePreviousWord,
     CatalogEditorDeleteToStart,

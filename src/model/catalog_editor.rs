@@ -160,6 +160,20 @@ impl RoleDraft {
             i.backspace()
         }
     }
+    pub fn delete_previous_word(&mut self) {
+        if self.focus == CatalogFormFocus::Password {
+            self.password_delete_previous_word();
+        } else if let Some(input) = self.selected_input_mut() {
+            input.delete_previous_word();
+        }
+    }
+    pub fn delete_to_start(&mut self) {
+        if self.focus == CatalogFormFocus::Password {
+            self.password_delete_to_start();
+        } else if let Some(input) = self.selected_input_mut() {
+            input.delete_to_start();
+        }
+    }
     pub fn delete(&mut self) {
         if self.focus == CatalogFormFocus::Password {
             self.password_delete();
@@ -719,6 +733,14 @@ impl DatabaseDraft {
             .position(|item| *item == self.focus)
             .unwrap_or(0)
     }
+    pub fn focus(&mut self, focus: CatalogFormFocus) -> bool {
+        if !self.focus_enabled(focus) {
+            return false;
+        }
+        self.focus = focus;
+        self.selected_field = self.focus_index();
+        true
+    }
     pub fn focus_enabled(&self, focus: CatalogFormFocus) -> bool {
         if self.database_kind == crate::profile::DatabaseKind::ClickHouse {
             return matches!(focus, CatalogFormFocus::Name | CatalogFormFocus::Comment);
@@ -796,6 +818,16 @@ impl DatabaseDraft {
     pub fn backspace(&mut self) {
         if let Some(input) = self.selected_input_mut() {
             input.backspace();
+        }
+    }
+    pub fn delete_previous_word(&mut self) {
+        if let Some(input) = self.selected_input_mut() {
+            input.delete_previous_word();
+        }
+    }
+    pub fn delete_to_start(&mut self) {
+        if let Some(input) = self.selected_input_mut() {
+            input.delete_to_start();
         }
     }
     pub fn delete(&mut self) {
@@ -3434,17 +3466,24 @@ impl CatalogDraft {
     }
 
     pub fn focus_kind(&self, create_mode: bool) -> CatalogFormFocusKind {
-        if self.focused_action().is_some() {
-            return CatalogFormFocusKind::Action;
-        }
         if self.focus_is_toggle(create_mode) {
             return CatalogFormFocusKind::Toggle;
+        }
+        if matches!(
+            self,
+            Self::Database(draft) if !draft.focus_enabled(draft.focus)
+        ) {
+            return CatalogFormFocusKind::Disabled;
+        }
+        if self.focused_action().is_some() {
+            return CatalogFormFocusKind::Action;
         }
         if self.focus_is_choice() {
             return CatalogFormFocusKind::Choice;
         }
         if !self.focus_accepts_text() {
             return match self {
+                Self::Role(_) => CatalogFormFocusKind::ReadOnly,
                 Self::MaterializedView(draft) if draft.focus == CatalogFormFocus::Query => {
                     CatalogFormFocusKind::ReadOnly
                 }
@@ -3602,20 +3641,8 @@ impl CatalogDraft {
 
     pub fn focused_action(&self) -> Option<CatalogFormFocus> {
         let focus = match self {
-            Self::Database(draft) => {
-                return Some(if draft.focus == CatalogFormFocus::Cancel {
-                    CatalogFormFocus::Cancel
-                } else {
-                    CatalogFormFocus::Review
-                });
-            }
-            Self::Role(draft) => {
-                return Some(if draft.focus == CatalogFormFocus::Cancel {
-                    CatalogFormFocus::Cancel
-                } else {
-                    CatalogFormFocus::Review
-                });
-            }
+            Self::Database(draft) => draft.focus,
+            Self::Role(draft) => draft.focus,
             Self::View(draft) => draft.focus,
             Self::MaterializedView(draft) => draft.focus,
             Self::Sequence(draft) => draft.focus,
@@ -3691,9 +3718,8 @@ impl CatalogDraft {
             Self::View(d) => d.delete_previous_word(),
             Self::MaterializedView(d) => d.delete_previous_word(),
             Self::Sequence(d) => d.delete_previous_word(),
-            Self::Role(d) if d.focus == CatalogFormFocus::Password => {
-                d.password_delete_previous_word()
-            }
+            Self::Database(draft) => draft.delete_previous_word(),
+            Self::Role(draft) => draft.delete_previous_word(),
             _ => {}
         }
     }
@@ -3704,7 +3730,8 @@ impl CatalogDraft {
             Self::View(d) => d.delete_to_start(),
             Self::MaterializedView(d) => d.delete_to_start(),
             Self::Sequence(d) => d.delete_to_start(),
-            Self::Role(d) if d.focus == CatalogFormFocus::Password => d.password_delete_to_start(),
+            Self::Database(draft) => draft.delete_to_start(),
+            Self::Role(draft) => draft.delete_to_start(),
             _ => {}
         }
     }
@@ -3715,6 +3742,11 @@ impl CatalogDraft {
             Self::View(d) => d.move_left(),
             Self::MaterializedView(d) => d.move_left(),
             Self::Sequence(d) => d.move_left(),
+            Self::Database(_) => {
+                if let Some(input) = self.selected_input_mut() {
+                    input.move_left();
+                }
+            }
             Self::Role(d) => d.move_left(),
             _ => {}
         }
@@ -3726,6 +3758,11 @@ impl CatalogDraft {
             Self::View(d) => d.move_right(),
             Self::MaterializedView(d) => d.move_right(),
             Self::Sequence(d) => d.move_right(),
+            Self::Database(_) => {
+                if let Some(input) = self.selected_input_mut() {
+                    input.move_right();
+                }
+            }
             Self::Role(d) => d.move_right(),
             _ => {}
         }
@@ -3737,6 +3774,11 @@ impl CatalogDraft {
             Self::View(d) => d.move_home(),
             Self::MaterializedView(d) => d.move_home(),
             Self::Sequence(d) => d.move_home(),
+            Self::Database(_) => {
+                if let Some(input) = self.selected_input_mut() {
+                    input.move_home();
+                }
+            }
             Self::Role(d) => d.move_home(),
             _ => {}
         }
@@ -3748,6 +3790,11 @@ impl CatalogDraft {
             Self::View(d) => d.move_end(),
             Self::MaterializedView(d) => d.move_end(),
             Self::Sequence(d) => d.move_end(),
+            Self::Database(_) => {
+                if let Some(input) = self.selected_input_mut() {
+                    input.move_end();
+                }
+            }
             Self::Role(d) => d.move_end(),
             _ => {}
         }

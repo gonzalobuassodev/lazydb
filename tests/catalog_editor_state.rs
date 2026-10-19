@@ -168,6 +168,157 @@ fn role_form_toggle_changes_only_the_focused_permission() {
 }
 
 #[test]
+fn catalog_profile_form_focus_kind_tracks_text_toggles_and_actions() {
+    use lazydb::model::catalog_editor::{CatalogFormFocusKind, RoleDraft};
+
+    let mut database = CatalogDraft::Database(DatabaseDraft::new(""));
+    for focus in [CatalogFormFocus::Name, CatalogFormFocus::Comment] {
+        let accepted = if let CatalogDraft::Database(draft) = &mut database {
+            draft.focus(focus)
+        } else {
+            false
+        };
+        assert!(accepted);
+        assert_eq!(database.focus_kind(true), CatalogFormFocusKind::Text);
+    }
+    for focus in [
+        CatalogFormFocus::AllowConnections,
+        CatalogFormFocus::IsTemplate,
+    ] {
+        let accepted = if let CatalogDraft::Database(draft) = &mut database {
+            draft.focus(focus)
+        } else {
+            false
+        };
+        assert!(accepted);
+        assert_eq!(database.focus_kind(true), CatalogFormFocusKind::Toggle);
+        assert_eq!(database.focused_action(), None);
+    }
+    for focus in [CatalogFormFocus::Review, CatalogFormFocus::Cancel] {
+        let accepted = if let CatalogDraft::Database(draft) = &mut database {
+            draft.focus(focus)
+        } else {
+            false
+        };
+        assert!(accepted);
+        assert_eq!(database.focus_kind(true), CatalogFormFocusKind::Action);
+        assert_eq!(database.focused_action(), Some(focus));
+    }
+    for focus in [
+        CatalogFormFocus::Name,
+        CatalogFormFocus::Comment,
+        CatalogFormFocus::Template,
+        CatalogFormFocus::Review,
+        CatalogFormFocus::Cancel,
+    ] {
+        let accepted = if let CatalogDraft::Database(draft) = &mut database {
+            draft.focus(focus)
+        } else {
+            false
+        };
+        assert!(accepted);
+        assert_ne!(database.focus_kind(true), CatalogFormFocusKind::Disabled);
+    }
+    if let CatalogDraft::Database(draft) = &mut database {
+        draft.database_kind = lazydb::profile::DatabaseKind::ClickHouse;
+        assert!(!draft.focus(CatalogFormFocus::Owner));
+    }
+    assert_eq!(database.focus_kind(true), CatalogFormFocusKind::Disabled);
+
+    let edited_database =
+        DatabaseDraft::from_definition(&lazydb::db::catalog_mutation::DatabaseDefinition {
+            name: "existing".into(),
+            owner: "owner".into(),
+            template: "template0".into(),
+            encoding: "UTF8".into(),
+            locale_provider: "libc".into(),
+            locale: "C".into(),
+            collation: "C".into(),
+            ctype: "C".into(),
+            tablespace: "".into(),
+            connection_limit: -1,
+            allow_connections: true,
+            is_template: false,
+            comment: lazydb::db::catalog::OptionalMetadata::Supported(None),
+            baseline_fingerprint: "baseline".into(),
+        });
+    assert!(!edited_database.focus_enabled(CatalogFormFocus::Template));
+    let mut editable_database = DatabaseDraft::new("");
+    editable_database.move_field(1);
+    assert_eq!(editable_database.focus, CatalogFormFocus::Owner);
+    assert_eq!(editable_database.selected_field, 1);
+
+    let mut edited_database = CatalogDraft::Database(edited_database);
+    assert!(
+        matches!(&edited_database, CatalogDraft::Database(draft) if draft.focus == CatalogFormFocus::Name)
+    );
+    assert!(matches!(&edited_database, CatalogDraft::Database(draft) if draft.selected_field == 0));
+    let name_before = edited_database
+        .input_for_target(&CatalogEditorCursorTarget::FormField(
+            CatalogFormFocus::Name,
+        ))
+        .unwrap()
+        .value()
+        .to_owned();
+    let template_was_rejected = if let CatalogDraft::Database(draft) = &mut edited_database {
+        !draft.focus(CatalogFormFocus::Template)
+    } else {
+        false
+    };
+    assert!(template_was_rejected);
+    edited_database.insert('x');
+    assert_eq!(
+        edited_database
+            .input_for_target(&CatalogEditorCursorTarget::FormField(
+                CatalogFormFocus::Name
+            ))
+            .unwrap()
+            .value(),
+        "existingx"
+    );
+    assert_eq!(name_before, "existing");
+
+    let mut role = CatalogDraft::Role(RoleDraft::new(true));
+    for focus in [
+        CatalogFormFocus::Name,
+        CatalogFormFocus::Comment,
+        CatalogFormFocus::Password,
+    ] {
+        if let CatalogDraft::Role(draft) = &mut role {
+            draft.focus = focus;
+        }
+        assert_eq!(role.focus_kind(true), CatalogFormFocusKind::Text);
+    }
+    for focus in [CatalogFormFocus::Login, CatalogFormFocus::Superuser] {
+        if let CatalogDraft::Role(draft) = &mut role {
+            draft.focus = focus;
+        }
+        assert_eq!(role.focus_kind(true), CatalogFormFocusKind::Toggle);
+        assert_eq!(role.focused_action(), None);
+    }
+    for focus in [CatalogFormFocus::Review, CatalogFormFocus::Cancel] {
+        if let CatalogDraft::Role(draft) = &mut role {
+            draft.focus = focus;
+        }
+        assert_eq!(role.focus_kind(true), CatalogFormFocusKind::Action);
+        assert_eq!(role.focused_action(), Some(focus));
+    }
+    for focus in [
+        CatalogFormFocus::Name,
+        CatalogFormFocus::Comment,
+        CatalogFormFocus::Password,
+        CatalogFormFocus::Login,
+        CatalogFormFocus::Review,
+        CatalogFormFocus::Cancel,
+    ] {
+        if let CatalogDraft::Role(draft) = &mut role {
+            draft.focus = focus;
+        }
+        assert_ne!(role.focus_kind(true), CatalogFormFocusKind::ReadOnly);
+    }
+}
+
+#[test]
 fn role_password_editing_keeps_value_redacted_and_syncs_secret_state() {
     let mut role = lazydb::model::catalog_editor::RoleDraft::new(true);
     role.focus = CatalogFormFocus::Password;

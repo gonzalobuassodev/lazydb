@@ -3833,6 +3833,16 @@ fn map_catalog_editor_form(
         KeyCode::Tab | KeyCode::Down => Some(Action::CatalogEditorFieldNext),
         KeyCode::BackTab | KeyCode::Up => Some(Action::CatalogEditorFieldPrevious),
         KeyCode::Enter if toggle_focus => Some(Action::CatalogEditorToggleFocused),
+        KeyCode::Enter
+            if text_focus
+                && matches!(
+                    draft,
+                    crate::model::catalog_editor::CatalogDraft::Database(_)
+                        | crate::model::catalog_editor::CatalogDraft::Role(_)
+                ) =>
+        {
+            Some(Action::CatalogEditorPreview)
+        }
         KeyCode::Enter => match draft.focused_action() {
             Some(crate::model::catalog_editor::CatalogFormFocus::Review) => {
                 Some(Action::CatalogEditorPreview)
@@ -3850,9 +3860,14 @@ fn map_catalog_editor_form(
         }
         KeyCode::Left if choice_focus && !text_focus => Some(Action::CatalogEditorCycleChoice(-1)),
         KeyCode::Right if choice_focus && !text_focus => Some(Action::CatalogEditorCycleChoice(1)),
-        KeyCode::Char(character) if event.modifiers.is_empty() && text_focus => {
-            Some(Action::CatalogEditorInsert(character))
-        }
+        KeyCode::Char(character) if event.modifiers.is_empty() && text_focus => Some(match draft {
+            crate::model::catalog_editor::CatalogDraft::Role(role)
+                if role.focus == crate::model::catalog_editor::CatalogFormFocus::Password =>
+            {
+                Action::CatalogEditorPasswordInsert(character.into())
+            }
+            _ => Action::CatalogEditorInsert(character),
+        }),
         KeyCode::Backspace if text_focus => Some(Action::CatalogEditorBackspace),
         KeyCode::Delete if text_focus => Some(Action::CatalogEditorDelete),
         KeyCode::Left if text_focus => Some(Action::CatalogEditorMoveLeft),
@@ -4387,6 +4402,25 @@ pub fn map_paste(value: String, app: &App) -> Vec<Action> {
         });
         if editable_table {
             return vec![Action::CatalogEditorPaste(value)];
+        } else if let Some(editor) = editor.filter(|editor| {
+            editor.page == crate::model::catalog_editor::CatalogEditorPage::Form
+                && !editor.is_busy()
+        }) && let Some(draft) = editor.draft.as_ref()
+            && matches!(
+                draft,
+                crate::model::catalog_editor::CatalogDraft::Database(_)
+                    | crate::model::catalog_editor::CatalogDraft::Role(_)
+            )
+            && draft.focus_accepts_text()
+        {
+            return match draft {
+                crate::model::catalog_editor::CatalogDraft::Role(role)
+                    if role.focus == crate::model::catalog_editor::CatalogFormFocus::Password =>
+                {
+                    vec![Action::CatalogEditorPasswordPaste(value.into())]
+                }
+                _ => vec![Action::CatalogEditorPaste(value)],
+            };
         } else if editor.is_some_and(|editor| {
             editor.page == crate::model::catalog_editor::CatalogEditorPage::Form
                 && !editor.is_busy()
