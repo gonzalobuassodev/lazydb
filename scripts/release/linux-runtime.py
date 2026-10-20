@@ -28,6 +28,19 @@ TARGETS = {
     },
 }
 SUPPORTED_TARGETS = frozenset(TARGETS)
+GLIBC_VERSION_LIBRARIES = frozenset(
+    {
+        "libc.so.6",
+        "libm.so.6",
+        "libpthread.so.0",
+        "libdl.so.2",
+        "librt.so.1",
+        "libutil.so.1",
+        "libresolv.so.2",
+        "ld-linux-x86-64.so.2",
+        "ld-linux-aarch64.so.1",
+    }
+)
 VERSION_RE = re.compile(r"^([A-Z][A-Z0-9_]*)_(\d+(?:\.\d+)+)$")
 NEED_FILE_RE = re.compile(r"\bFile:\s+(\S+)\s+Cnt:\s+(\d+)")
 NEED_NAME_RE = re.compile(r"\bName:\s+(\S+)\s+Flags:\s+(\S+)\s+Version:\s+(\d+)")
@@ -125,7 +138,7 @@ def parse_version_requirements(output: str) -> tuple[list[dict[str, Any]], dict[
             raise ScannerError(f"unrecognized version requirement flags: {flags}")
         if flags == "BASE":
             raise ScannerError(f"unexpected base version in needs section: {name}")
-        if current_library in {"libc.so.6", "ld-linux-x86-64.so.2", "ld-linux-aarch64.so.1"} and not name.startswith("GLIBC_"):
+        if current_library in GLIBC_VERSION_LIBRARIES and not name.startswith("GLIBC_"):
             raise ScannerError(f"unrecognized glibc ABI label: {name}")
         index = int(raw_index)
         needs.append({"library": current_library, "name": name, "weak": weak})
@@ -226,7 +239,7 @@ def parse_readelf_outputs(
     glibc_needs = [
         {"library": item["library"], "version": item["name"], "weak": item["weak"]}
         for item in version_needs
-        if item["library"] in {"libc.so.6", "ld-linux-x86-64.so.2", "ld-linux-aarch64.so.1"}
+        if item["library"] in GLIBC_VERSION_LIBRARIES
         and item["name"].startswith("GLIBC_")
     ]
     if not glibc_needs:
@@ -241,7 +254,7 @@ def parse_readelf_outputs(
     other_needs = [
         item for item in version_needs
         if not (
-            item["library"] in {"libc.so.6", "ld-linux-x86-64.so.2", "ld-linux-aarch64.so.1"}
+            item["library"] in GLIBC_VERSION_LIBRARIES
             and item["name"].startswith("GLIBC_")
         )
     ]
@@ -451,14 +464,13 @@ def validate_report(report: Any) -> dict[str, Any]:
         raise ScannerError("runtime report dynamic ELF field contains an invalid value")
     if any("GLIBC_PRIVATE" in item["version"] for item in symbols + needs):
         raise ScannerError("runtime report contains unsupported GLIBC_PRIVATE ABI")
-    allowed_glibc_libraries = {"libc.so.6", "ld-linux-x86-64.so.2", "ld-linux-aarch64.so.1"}
     for item in needs:
         match = VERSION_RE.fullmatch(item["version"])
-        if item["library"] not in allowed_glibc_libraries or match is None or match.group(1) != "GLIBC":
+        if item["library"] not in GLIBC_VERSION_LIBRARIES or match is None or match.group(1) != "GLIBC":
             raise ScannerError("runtime report contains an unknown glibc version node/library")
     for item in symbols:
         match = VERSION_RE.fullmatch(item["version"])
-        if item["library"] not in allowed_glibc_libraries or match is None or match.group(1) != "GLIBC":
+        if item["library"] not in GLIBC_VERSION_LIBRARIES or match is None or match.group(1) != "GLIBC":
             raise ScannerError("runtime report contains an unknown glibc symbol version/library")
     required = [item["version"][6:] for item in needs if not item["weak"]]
     calculated_minimum = required[0] if required else None

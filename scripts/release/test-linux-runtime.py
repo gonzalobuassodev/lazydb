@@ -126,6 +126,62 @@ class RuntimeScannerContractTests(unittest.TestCase):
             [{"library": "libgcc_s.so.1", "name": "GCC_4.2.0", "weak": False}],
         )
 
+    def test_glibc_symbols_from_component_libraries_resolve_to_requirements(self):
+        version_info = (FIXTURES / "x86_64-version-info.txt").read_text()
+        version_info = version_info.replace(
+            "  0x0030:   Name: GLIBC_2.2.5  Flags: none  Version: 2",
+            "  0x0030:   Name: GLIBC_2.2.5  Flags: none  Version: 2\n"
+            "  0x0040: Version: 1  File: libm.so.6  Cnt: 1\n"
+            "  0x0050:   Name: GLIBC_2.2.5  Flags: none  Version: 5\n",
+        ).replace(
+            "Version needs section '.gnu.version_r' contains 2 entries:",
+            "Version needs section '.gnu.version_r' contains 3 entries:",
+        )
+        dynamic_symbols = (FIXTURES / "x86_64-dynamic-symbols.txt").read_text().replace(
+            "Symbol table '.dynsym' contains 5 entries:",
+            "Symbol table '.dynsym' contains 6 entries:",
+        ).replace(
+            "     4: 0000000000000000     0 FUNC    GLOBAL DEFAULT  UND weak_node_strong_symbol@GLIBC_2.39 (4)",
+            "     4: 0000000000000000     0 FUNC    GLOBAL DEFAULT  UND weak_node_strong_symbol@GLIBC_2.39 (4)\n"
+            "      5: 0000000000000000     0 FUNC    GLOBAL DEFAULT  UND cos@GLIBC_2.2.5 (5)\n",
+        )
+        parsed = self.scanner.parse_readelf_outputs(
+            "x86_64-unknown-linux-gnu",
+            version_info,
+            dynamic_symbols,
+            "ELF Header:\n  Class: ELF64\n  Data: 2's complement, little endian\n  Machine: Advanced Micro Devices X86-64\n",
+            "Program Headers:\n  INTERP 0x0 0x0 0x0 0x1 0x1 R 0x1\n      [Requesting program interpreter: /lib64/ld-linux-x86-64.so.2]\n",
+            "Dynamic section at offset 0x0 contains 4 entries:\n"
+            " 0x0000000000000001 (NEEDED) Shared library: [libc.so.6]\n"
+            " 0x0000000000000001 (NEEDED) Shared library: [libm.so.6]\n",
+        )
+        self.assertIn(
+            {"library": "libm.so.6", "version": "GLIBC_2.2.5", "weak": False},
+            parsed["glibc"]["version_needs"],
+        )
+        self.assertIn(
+            {"name": "cos", "version": "GLIBC_2.2.5", "binding": "GLOBAL", "library": "libm.so.6"},
+            parsed["glibc"]["symbol_references"],
+        )
+        elf = {
+            "elf": {
+                key: parsed[key]
+                for key in ("machine", "class", "endianness", "interpreter", "needed", "rpath", "runpath")
+            },
+            "glibc": parsed["glibc"],
+            "other_version_needs": parsed["other_version_needs"],
+        }
+        with tempfile.TemporaryDirectory(prefix="lazydb-runtime-component-library-") as temporary:
+            directory = Path(temporary)
+            archive = directory / "lazydb_1.2.3_x86_64-unknown-linux-gnu.tar.xz"
+            binary = directory / "lazydb"
+            archive.write_bytes(b"archive")
+            binary.write_bytes(b"binary")
+            report = self.scanner.build_report(
+                "1.2.3", "x86_64-unknown-linux-gnu", archive, binary, elf
+            )
+            self.scanner.validate_report(report)
+
     def test_version_needs_without_version_definitions_are_valid(self):
         fixture = (FIXTURES / "aarch64-version-info.txt").read_text()
         no_definitions = fixture.split("Version definition section", 1)[0]
@@ -215,12 +271,16 @@ class RuntimeScannerContractTests(unittest.TestCase):
     def test_build_wrapper_requires_native_architecture_and_exact_image_digest(self):
         script = ROOT / "scripts/release/build-linux.sh"
         environment = dict(os.environ)
-        environment["LAZYDB_LINUX_BUILD_IMAGE"] = (
-            "ubuntu:24.04@sha256:f610ab94648195aa356059f5b41d6085c9d4d903c072430cdd1af7bdb646106b"
-        )
+        if os.uname().machine.lower() in {"aarch64", "arm64"}:
+            target = "x86_64-unknown-linux-gnu"
+            image_digest = "f610ab94648195aa356059f5b41d6085c9d4d903c072430cdd1af7bdb646106b"
+        else:
+            target = "aarch64-unknown-linux-gnu"
+            image_digest = "08571ca13e00ca07a2a84eab83a959b4242e22cceb16486a11bef1428c9e93a7"
+        environment["LAZYDB_LINUX_BUILD_IMAGE"] = f"ubuntu:24.04@sha256:{image_digest}"
         environment["PATH"] = "/usr/bin:/bin"
         result = subprocess.run(
-            ["sh", str(script), "aarch64-unknown-linux-gnu"],
+            ["sh", str(script), target],
             env=environment,
             capture_output=True,
             text=True,
