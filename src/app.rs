@@ -10620,6 +10620,54 @@ impl App {
                 self.notify_error("Catalog", error.to_string());
                 Vec::new()
             }
+            Action::CatalogDropCascadeRequired {
+                original_plan,
+                cascade_plan,
+            } => {
+                let Some(Overlay::CatalogDropConfirm {
+                    plan: expected,
+                    busy,
+                    ..
+                }) = self.overlay.as_ref()
+                else {
+                    return Vec::new();
+                };
+                let current_epoch = self
+                    .explorer
+                    .normalized
+                    .profiles
+                    .get(&original_plan.request.connection.profile_id)
+                    .map(|state| state.catalog_epoch);
+                if !*busy
+                    || **expected != *original_plan
+                    || self.connection.active_identity() != Some(original_plan.request.connection)
+                    || current_epoch != Some(original_plan.request.catalog_epoch)
+                    || cascade_plan.behavior()
+                        != crate::db::catalog_drop::CatalogDropBehavior::Cascade
+                    || cascade_plan.validate().is_err()
+                    || cascade_plan.object != original_plan.object
+                    || cascade_plan.request.connection != original_plan.request.connection
+                    || cascade_plan.request.catalog_epoch != original_plan.request.catalog_epoch
+                {
+                    return Vec::new();
+                }
+                let cascade_plan =
+                    match (*cascade_plan).with_request_id(self.next_profile_request_id()) {
+                        Ok(plan) => plan,
+                        Err(error) => {
+                            self.notify_error("Catalog", error.to_string());
+                            return Vec::new();
+                        }
+                    };
+                self.overlay = Some(Overlay::CatalogDropConfirm {
+                    plan: Box::new(cascade_plan),
+                    maintenance_database: None,
+                    delete_selected: false,
+                    busy: false,
+                    error: None,
+                });
+                Vec::new()
+            }
             Action::CatalogDropMaintenanceInsert(character) => {
                 if let Some(Overlay::CatalogDropConfirm {
                     maintenance_database: Some(input),
@@ -10776,13 +10824,13 @@ impl App {
                         return Vec::new();
                     }
                 };
-                let removed_set = removed.into_iter().collect();
+                let removed_set = removed.into_iter().collect::<HashSet<_>>();
                 for index in self.explorer.completion_indexes.values_mut() {
                     index.remove_ids(&removed_set);
                 }
                 for tab in &mut self.tabs {
                     if let WorkspaceTab::Relation(tab) = tab
-                        && tab.descriptor.key.object_id == plan.object
+                        && removed_set.contains(&tab.descriptor.key.object_id)
                     {
                         tab.invalidate_deleted_catalog_object();
                     }
@@ -10792,11 +10840,104 @@ impl App {
                 self.explorer
                     .rebuild_projection(plan.request.connection.profile_id);
                 self.explorer.refresh_frontend_search();
+                let mut refresh_commands = Vec::new();
+                if plan.kind == crate::db::catalog::CatalogKind::Schema
+                    && plan.behavior() == crate::db::catalog_drop::CatalogDropBehavior::Cascade
+                {
+                    let database = plan
+                        .request
+                        .entry
+                        .as_ref()
+                        .and_then(|entry| entry.qualified_name.database.as_deref())
+                        .and_then(|database| {
+                            self.explorer.normalized.profiles[&plan.request.connection.profile_id]
+                                .catalog
+                                .entries()
+                                .values()
+                                .find(|entry| {
+                                    entry.kind == crate::db::catalog::CatalogKind::Database
+                                        && entry.qualified_name.object == database
+                                })
+                                .map(|entry| entry.id.clone())
+                        });
+                    if let Some(database) = database
+                        && let Ok(target) = CatalogTarget::schemas(database)
+                    {
+                        let database_name = plan
+                            .request
+                            .entry
+                            .as_ref()
+                            .and_then(|entry| entry.qualified_name.database.as_deref())
+                            .unwrap_or_default()
+                            .to_owned();
+                        let targets = self
+                            .explorer
+                            .normalized
+                            .profiles
+                            .get_mut(&plan.request.connection.profile_id)
+                            .map(|state| {
+                                let schemas = state.catalog.schemas_in_database(&database_name);
+                                let mut targets = Vec::new();
+                                for schema in &schemas {
+                                    if let Ok(groups) = CatalogTarget::groups(schema.clone()) {
+                                        targets.push(groups);
+                                    }
+                                    for group in state.catalog.groups(schema).to_vec() {
+                                        if let Ok(objects) =
+                                            CatalogTarget::objects(schema.clone(), group)
+                                        {
+                                            targets.push(objects);
+                                        }
+                                    }
+                                }
+                                targets
+                            })
+                            .unwrap_or_default();
+                        refresh_commands = self.commands_for_catalog_targets(
+                            plan.request.connection.profile_id,
+                            &[target],
+                        );
+                        refresh_commands.extend(self.commands_for_catalog_targets(
+                            plan.request.connection.profile_id,
+                            &targets,
+                        ));
+                        for tab in &mut self.tabs {
+                            if let WorkspaceTab::Relation(tab) = tab
+                                && tab.descriptor.key.profile_id
+                                    == plan.request.connection.profile_id
+                                && tab.descriptor.qualified_name.database.as_deref()
+                                    == Some(database_name.as_str())
+                                && !removed_set.contains(&tab.descriptor.key.object_id)
+                            {
+                                tab.invalidate_catalog_mutation(true);
+                            }
+                        }
+                    }
+                }
                 self.overlay = None;
                 self.notify_success("Catalog", "Catalog object dropped");
-                Vec::new()
+                refresh_commands
             }
             Action::CatalogDropFailed { plan, message } => {
+                let Some(Overlay::CatalogDropConfirm {
+                    plan: expected,
+                    busy: true,
+                    ..
+                }) = self.overlay.as_ref()
+                else {
+                    return Vec::new();
+                };
+                if **expected != plan
+                    || self.connection.active_identity() != Some(plan.request.connection)
+                    || self
+                        .explorer
+                        .normalized
+                        .profiles
+                        .get(&plan.request.connection.profile_id)
+                        .is_none_or(|state| state.catalog_epoch != plan.request.catalog_epoch)
+                {
+                    return Vec::new();
+                }
                 self.overlay = Some(Overlay::CatalogDropConfirm {
                     maintenance_database: match plan.execution_target {
                         crate::db::catalog_drop::CatalogDropExecutionTarget::MaintenanceDatabase(

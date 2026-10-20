@@ -7368,13 +7368,20 @@ fn render_catalog_drop_confirm(
     let popup = centered(
         area,
         82,
-        if maintenance_database.is_some() {
+        if plan.behavior() == crate::db::catalog_drop::CatalogDropBehavior::Cascade {
+            20
+        } else if maintenance_database.is_some() {
             19
         } else {
             16
         },
     );
     let title = match plan.kind {
+        CatalogKind::Schema
+            if plan.behavior() == crate::db::catalog_drop::CatalogDropBehavior::Cascade =>
+        {
+            " DROP SCHEMA CASCADE ".to_owned()
+        }
         CatalogKind::MaterializedView => " DROP MATERIALIZED VIEW ".to_owned(),
         CatalogKind::PrimaryKey
         | CatalogKind::UniqueConstraint
@@ -7395,13 +7402,26 @@ fn render_catalog_drop_confirm(
     ])
     .split(inner);
     let mut lines = vec![Line::raw("This operation will execute:"), Line::raw("")];
+    if plan.behavior() == crate::db::catalog_drop::CatalogDropBehavior::Cascade {
+        lines = vec![
+            Line::raw("This schema contains other objects."),
+            Line::raw("Continuing will delete all objects and data in this schema."),
+            Line::raw("Dependent objects in other schemas may also be deleted."),
+            Line::raw("This action cannot be undone."),
+            Line::raw(""),
+            Line::raw("This operation will execute:"),
+            Line::raw(""),
+        ];
+    }
     lines.extend(sql_preview::lines(
         plan.sql(),
         app.sql_dialect(),
         usize::from(inner.width.saturating_sub(4)),
         theme,
     ));
-    lines.extend([Line::raw(""), Line::raw("This action cannot be undone.")]);
+    if plan.behavior() != crate::db::catalog_drop::CatalogDropBehavior::Cascade {
+        lines.extend([Line::raw(""), Line::raw("This action cannot be undone.")]);
+    }
     if let Some(error) = error {
         lines.push(Line::from(Span::styled(
             crate::security::sanitize_terminal_text(error),

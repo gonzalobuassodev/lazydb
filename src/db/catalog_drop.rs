@@ -23,6 +23,13 @@ pub enum CatalogDropExecutionTarget {
     MaintenanceDatabase(String),
 }
 
+#[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
+pub enum CatalogDropBehavior {
+    #[default]
+    Restrict,
+    Cascade,
+}
+
 #[derive(Clone, Debug, Eq, Error, PartialEq)]
 pub enum CatalogDropError {
     #[error("catalog drop request has an empty object ID")]
@@ -91,6 +98,8 @@ pub struct CatalogDropPlan {
     pub kind: CatalogKind,
     pub qualified_name: String,
     pub execution_target: CatalogDropExecutionTarget,
+    behavior: CatalogDropBehavior,
+    cascade_schema_name: Option<String>,
     sql: String,
 }
 
@@ -122,8 +131,56 @@ impl CatalogDropPlan {
             kind: entry.kind,
             qualified_name: entry.qualified_name.object.clone(),
             execution_target: CatalogDropExecutionTarget::CurrentConnection,
+            behavior: CatalogDropBehavior::Restrict,
+            cascade_schema_name: None,
             sql,
         })
+    }
+
+    pub(crate) fn postgres_schema_cascade(
+        request: CatalogDropRequest,
+        entry: &CatalogEntry,
+        schema_name: &str,
+    ) -> Result<Self, CatalogDropError> {
+        if entry.kind != CatalogKind::Schema || entry.id.kind != CatalogKind::Schema {
+            return Err(CatalogDropError::Unsupported {
+                kind: entry.kind,
+                reason: "CASCADE is only available for PostgreSQL schema drops".to_owned(),
+            });
+        }
+        request.validate()?;
+        if entry.id != request.object {
+            return Err(CatalogDropError::ObjectMismatch);
+        }
+        let entry_schema = entry
+            .qualified_name
+            .schema
+            .as_deref()
+            .filter(|schema| !schema.is_empty())
+            .ok_or(CatalogDropError::EmptyObjectName)?;
+        if format!("\"{}\"", entry_schema.replace('"', "\"\"")) != schema_name {
+            return Err(CatalogDropError::InvalidMetadata {
+                kind: CatalogKind::Schema,
+                reason: "schema name does not match the catalog entry".to_owned(),
+            });
+        }
+        let sql = format!("DROP SCHEMA {schema_name} CASCADE");
+        validate_sql_allow_schema_cascade(&sql)?;
+        let Some(cascade_schema_name) = entry.qualified_name.schema.clone() else {
+            return Err(CatalogDropError::EmptyObjectName);
+        };
+        let plan = Self {
+            request,
+            object: entry.id.clone(),
+            kind: entry.kind,
+            qualified_name: entry.qualified_name.object.clone(),
+            execution_target: CatalogDropExecutionTarget::CurrentConnection,
+            behavior: CatalogDropBehavior::Cascade,
+            cascade_schema_name: Some(cascade_schema_name),
+            sql,
+        };
+        plan.validate()?;
+        Ok(plan)
     }
 
     pub fn with_execution_target(mut self, target: CatalogDropExecutionTarget) -> Self {
@@ -133,6 +190,16 @@ impl CatalogDropPlan {
 
     pub fn sql(&self) -> &str {
         &self.sql
+    }
+
+    pub const fn behavior(&self) -> CatalogDropBehavior {
+        self.behavior
+    }
+
+    pub fn with_request_id(mut self, request_id: u64) -> Result<Self, CatalogDropError> {
+        self.request.request_id = request_id;
+        self.validate()?;
+        Ok(self)
     }
 
     pub fn validate(&self) -> Result<(), CatalogDropError> {
@@ -171,7 +238,41 @@ impl CatalogDropPlan {
         {
             return Err(CatalogDropError::EmptyObjectName);
         }
-        validate_sql(&self.sql)
+        if self.behavior == CatalogDropBehavior::Restrict {
+            return validate_sql(&self.sql);
+        }
+        let Some(entry) = self.request.entry.as_ref() else {
+            return Err(CatalogDropError::UnsafeSql);
+        };
+        let Some(schema_name) = self.cascade_schema_name.as_deref() else {
+            return Err(CatalogDropError::UnsafeSql);
+        };
+        if self.kind != CatalogKind::Schema
+            || entry.id != self.object
+            || entry.kind != CatalogKind::Schema
+            || self.qualified_name != schema_name
+            || self.sql != format!("DROP SCHEMA {} CASCADE", quote_identifier(schema_name))
+            || entry.qualified_name.schema.as_deref() != Some(schema_name)
+            || entry.qualified_name.object != schema_name
+            || entry.id.native_path.len() != 2
+            || entry.id.native_path[1] != schema_name
+            || entry
+                .qualified_name
+                .database
+                .as_deref()
+                .is_none_or(|database| entry.id.native_path[0] != database)
+            || entry.parent_id.as_ref().is_none_or(|parent| {
+                parent.connection_id != entry.id.connection_id
+                    || parent.kind != CatalogKind::Database
+                    || parent.native_path.as_slice() != [entry.id.native_path[0].as_str()]
+            })
+            || schema_name == "information_schema"
+            || schema_name.starts_with("pg_")
+            || self.execution_target != CatalogDropExecutionTarget::CurrentConnection
+        {
+            return Err(CatalogDropError::UnsafeSql);
+        }
+        validate_sql_allow_schema_cascade(&self.sql)
     }
 }
 
@@ -191,7 +292,19 @@ fn validate_object_id(
     Ok(())
 }
 
+fn quote_identifier(value: &str) -> String {
+    format!("\"{}\"", value.replace('"', "\"\""))
+}
+
 fn validate_sql(sql: &str) -> Result<(), CatalogDropError> {
+    validate_sql_inner(sql, false)
+}
+
+fn validate_sql_allow_schema_cascade(sql: &str) -> Result<(), CatalogDropError> {
+    validate_sql_inner(sql, true)
+}
+
+fn validate_sql_inner(sql: &str, allow_cascade: bool) -> Result<(), CatalogDropError> {
     let sql = sql.trim();
     if sql.is_empty() {
         return Err(CatalogDropError::EmptySql);
@@ -232,7 +345,7 @@ fn validate_sql(sql: &str) -> Result<(), CatalogDropError> {
     if !token.is_empty() {
         tokens.push(token);
     }
-    if tokens.iter().any(|token| token == "CASCADE")
+    if tokens.iter().any(|token| token == "CASCADE") && !allow_cascade
         || tokens.windows(2).any(|tokens| tokens == ["IF", "EXISTS"])
     {
         return Err(CatalogDropError::UnsafeSql);

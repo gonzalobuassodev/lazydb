@@ -3204,6 +3204,79 @@ fn catalog_drop_dialog_highlights_sql_and_exposes_safe_buttons() {
     )));
 }
 
+#[test]
+fn catalog_drop_cascade_dialog_shows_irreversible_cross_schema_risk() {
+    let mut app = fixture();
+    let profile = import_connection_url("postgres://localhost/app", Some("postgres-test"))
+        .unwrap()
+        .profile;
+    app.profiles.push(profile.clone());
+    app.explorer.normalized.add_profile(profile.id);
+    let generation = match app.update(Action::RequestConnect(profile.id)).as_slice() {
+        [lazydb::action::Command::Connect { generation, .. }] => *generation,
+        commands => panic!("unexpected connect commands: {commands:?}"),
+    };
+    app.update(Action::ConnectionSucceeded {
+        profile_id: profile.id,
+        generation,
+        server: ServerInfo {
+            kind: DatabaseKind::Postgres,
+            version: "16".into(),
+            database: "app".into(),
+            current_user: Some("test".into()),
+        },
+        mutation_capabilities: Default::default(),
+    });
+    let connection = app.connection.active_identity().unwrap();
+    let schema = CatalogEntry::schema(
+        CatalogId::new(profile.id, CatalogKind::Schema, ["app", "public"]),
+        CatalogId::new(profile.id, CatalogKind::Database, ["app"]),
+        QualifiedName {
+            database: Some("app".into()),
+            schema: Some("public".into()),
+            object: "public".into(),
+        },
+        "schema",
+        OptionalMetadata::Supported(None),
+        true,
+    )
+    .unwrap();
+    let mut request =
+        lazydb::db::catalog_drop::CatalogDropRequest::new(connection, schema.id.clone(), 99)
+            .with_entry(schema.clone());
+    request.catalog_epoch = 0;
+    let plan =
+        lazydb::db::postgres::PostgresAdapter::plan_catalog_drop_cascade(request, &schema).unwrap();
+    app.overlay = Some(Overlay::CatalogDropConfirm {
+        plan: Box::new(plan),
+        maintenance_database: None,
+        delete_selected: false,
+        busy: false,
+        error: None,
+    });
+
+    for (width, height) in [(120, 36), (80, 24), (60, 24)] {
+        let (text, _) = render_with_state(&app, width, height);
+        let compact = text.lines().map(str::trim).collect::<Vec<_>>().join(" ");
+        for required in [
+            "DROP SCHEMA CASCADE",
+            "This schema contains other objects.",
+            "objects and data in this",
+            "schema.",
+            "Dependent objects in other schemas may also be",
+            "deleted.",
+            "This action cannot be undone.",
+            "DROP SCHEMA \"public\" CASCADE",
+            "[ > Cancel ]",
+        ] {
+            assert!(
+                compact.contains(required),
+                "missing {required:?} at {width}x{height}: {text}"
+            );
+        }
+    }
+}
+
 fn render(app: &App, width: u16, height: u16) -> String {
     render_with_state(app, width, height).0
 }
