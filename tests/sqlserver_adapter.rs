@@ -389,6 +389,24 @@ async fn previews_sql_server_relations_with_pagination_filters_order_and_escaped
         lazydb::model::pagination::TotalRows::Exact(25)
     );
 
+    // Three-component ids stay previewable: they were accepted before the catalog
+    // started appending the object id.
+    let legacy_relation = CatalogId::new(
+        imported.profile.id,
+        relation.kind,
+        relation.native_path[..3].to_vec(),
+    );
+    let legacy = database
+        .preview_relation_with_scope(
+            &legacy_relation,
+            &scope,
+            &options,
+            lazydb::model::pagination::PageRequest::first(lazydb::model::pagination::PageSize::Ten),
+        )
+        .await
+        .unwrap();
+    assert_eq!(legacy.result.result_sets[0].rows.len(), 10);
+
     database
         .execute(&format!(
             "DROP TABLE {quoted_schema}.{quoted_table}; DROP SCHEMA {quoted_schema};"

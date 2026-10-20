@@ -2200,9 +2200,9 @@ impl MsSqlAdapter {
         mut page: crate::model::pagination::PageRequest,
     ) -> Result<RelationPreview, DatabaseError> {
         let target = format!("SQL Server relation {:?}", relation.native_path);
-        let path = relation_path(relation)
+        let path = relation_names(relation)
             .filter(|_| relation.profile_id() == self.connection_id && relation.kind.is_relation());
-        let Some((database, schema, name, _object_id)) = path else {
+        let Some((database, schema, name)) = path else {
             return Err(DatabaseError::configuration(format!(
                 "catalog target is not a SQL Server relation: {target}"
             )));
@@ -3881,11 +3881,24 @@ fn database_name(id: &CatalogId, target: &CatalogTarget) -> Result<String, Datab
     }
 }
 
-/// Splits the canonical SQL Server relation path.
+/// Splits the relation names every SQL Server relation consumer needs.
 ///
 /// `load_object_page` builds relation ids as `[database, schema, name, object_id]`,
-/// so every consumer validates that one shape here instead of assuming its own
-/// component count.
+/// but three-component ids stay valid: they were accepted before the object id was
+/// appended, and the object id is not needed to address a relation.
+fn relation_names(relation: &CatalogId) -> Option<(&str, &str, &str)> {
+    match relation.native_path.as_slice() {
+        [database, schema, name] | [database, schema, name, _]
+            if !database.is_empty() && !schema.is_empty() && !name.is_empty() =>
+        {
+            Some((database, schema, name))
+        }
+        _ => None,
+    }
+}
+
+/// Splits the canonical relation path, including the SQL Server object id that
+/// definition lookups need.
 fn relation_path(relation: &CatalogId) -> Option<(&str, &str, &str, i32)> {
     match relation.native_path.as_slice() {
         [database, schema, name, object_id]
@@ -4606,6 +4619,15 @@ mod tests {
             ["app", "dbo", "orders"],
         );
         assert_eq!(super::relation_path(&shorter_path), None);
+        // Three-component ids were valid before the catalog appended the object id.
+        assert_eq!(
+            super::relation_names(&shorter_path),
+            Some(("app", "dbo", "orders"))
+        );
+        assert_eq!(
+            super::relation_names(&catalog_relation),
+            Some(("LanSisSGLanComputacion", "dbo", "Empresas"))
+        );
 
         let non_numeric_object_id = super::CatalogId::new(
             profile_id,
@@ -4613,6 +4635,10 @@ mod tests {
             ["app", "dbo", "orders", "not-an-id"],
         );
         assert_eq!(super::relation_path(&non_numeric_object_id), None);
+        assert_eq!(
+            super::relation_names(&non_numeric_object_id),
+            Some(("app", "dbo", "orders"))
+        );
     }
 
     #[test]
