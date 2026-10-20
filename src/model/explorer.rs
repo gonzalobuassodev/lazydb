@@ -329,6 +329,17 @@ impl CatalogTree {
         &self.entries
     }
 
+    pub fn schemas_in_database(&self, database: &str) -> Vec<CatalogId> {
+        self.entries
+            .values()
+            .filter(|entry| {
+                entry.kind == CatalogKind::Schema
+                    && entry.qualified_name.database.as_deref() == Some(database)
+            })
+            .map(|entry| entry.id.clone())
+            .collect()
+    }
+
     pub fn is_empty(&self) -> bool {
         self.entries.is_empty()
     }
@@ -1058,6 +1069,28 @@ impl ExplorerProfileState {
                     next_cursor: projection_cursor,
                 },
             );
+        }
+    }
+
+    pub fn invalidate_database_objects(&mut self, database: &str) {
+        let schemas = self.catalog.schemas_in_database(database);
+        let targets = schemas
+            .iter()
+            .flat_map(|schema| {
+                let mut targets = vec![CatalogTarget::Groups {
+                    schema: schema.clone(),
+                }];
+                targets.extend(self.catalog.groups(schema).iter().map(|group| {
+                    CatalogTarget::Objects {
+                        schema: schema.clone(),
+                        group: *group,
+                    }
+                }));
+                targets
+            })
+            .collect::<Vec<_>>();
+        for target in targets {
+            self.invalidate_catalog_target(&target);
         }
     }
 

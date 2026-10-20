@@ -374,6 +374,60 @@ fn postgres_schema_planner_quotes_name_and_requires_restrict() {
 }
 
 #[test]
+fn postgres_schema_plan_can_be_explicitly_upgraded_to_cascade() {
+    let profile_id = Uuid::new_v4();
+    let connection = ConnectionIdentity {
+        profile_id,
+        generation: 8,
+    };
+    let schema = CatalogEntry {
+        id: CatalogId::new(profile_id, CatalogKind::Schema, ["db", "odd\"schema"]),
+        parent_id: Some(CatalogId::new(profile_id, CatalogKind::Database, ["db"])),
+        kind: CatalogKind::Schema,
+        native_kind: "schema".into(),
+        qualified_name: QualifiedName {
+            database: Some("db".into()),
+            schema: Some("odd\"schema".into()),
+            object: "odd\"schema".into(),
+        },
+        comment: OptionalMetadata::Unsupported,
+        metadata: Default::default(),
+        expandable: true,
+        relation_id: None,
+    };
+    let mut request =
+        CatalogDropRequest::new(connection, schema.id.clone(), 6).with_entry(schema.clone());
+    request.catalog_epoch = 12;
+    let restrict = PostgresAdapter::plan_catalog_drop(request.clone(), &schema).unwrap();
+    assert_eq!(restrict.sql(), "DROP SCHEMA \"odd\"\"schema\" RESTRICT");
+
+    let cascade = PostgresAdapter::plan_catalog_drop_cascade(request, &schema).unwrap();
+    assert_eq!(cascade.sql(), "DROP SCHEMA \"odd\"\"schema\" CASCADE");
+    assert_eq!(cascade.request.connection, connection);
+    assert_eq!(cascade.request.catalog_epoch, 12);
+    assert_eq!(cascade.object, schema.id);
+    assert_eq!(cascade.kind, CatalogKind::Schema);
+    let rebound = cascade.clone().with_request_id(99).unwrap();
+    assert_eq!(rebound.request.request_id, 99);
+    assert_eq!(rebound.request.connection, connection);
+    assert_eq!(rebound.request.catalog_epoch, 12);
+    assert_eq!(rebound.sql(), cascade.sql());
+
+    let mut forged = cascade.clone();
+    forged.qualified_name = "different_schema".into();
+    assert_eq!(forged.validate(), Err(CatalogDropError::UnsafeSql));
+    let mut forged_entry = cascade.clone();
+    forged_entry
+        .request
+        .entry
+        .as_mut()
+        .unwrap()
+        .qualified_name
+        .schema = Some("different_schema".into());
+    assert_eq!(forged_entry.validate(), Err(CatalogDropError::UnsafeSql));
+}
+
+#[test]
 fn postgres_schema_planner_rejects_incomplete_namespace_metadata() {
     let profile_id = Uuid::new_v4();
     let connection = ConnectionIdentity {

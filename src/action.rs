@@ -296,6 +296,10 @@ pub enum Action {
         plan: CatalogDropPlan,
         message: String,
     },
+    CatalogDropCascadeRequired {
+        original_plan: Box<CatalogDropPlan>,
+        cascade_plan: Box<CatalogDropPlan>,
+    },
     CatalogMutationPlanReady(CatalogMutationPlan),
     CatalogMutationPlanFailed {
         request: CatalogMutationRequest,

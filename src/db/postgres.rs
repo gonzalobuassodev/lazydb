@@ -1208,9 +1208,7 @@ LIMIT 2001
         entry: &CatalogEntry,
     ) -> Result<CatalogDropPlan, CatalogDropError> {
         let sql = match entry.kind {
-            CatalogKind::Schema => {
-                format!("DROP SCHEMA {} RESTRICT", postgres_schema_name(entry)?)
-            }
+            CatalogKind::Schema => format!("DROP SCHEMA {} RESTRICT", postgres_schema_name(entry)?),
             CatalogKind::Database => {
                 let maintenance_database = request
                     .maintenance_database
@@ -1290,6 +1288,20 @@ LIMIT 2001
             }
         };
         CatalogDropPlan::new(request, entry, sql)
+    }
+
+    pub fn plan_catalog_drop_cascade(
+        request: CatalogDropRequest,
+        entry: &CatalogEntry,
+    ) -> Result<CatalogDropPlan, CatalogDropError> {
+        if entry.kind != CatalogKind::Schema || request.object != entry.id {
+            return Err(CatalogDropError::Unsupported {
+                kind: entry.kind,
+                reason: "CASCADE is only available for PostgreSQL schema drops".to_owned(),
+            });
+        }
+        let schema_name = postgres_schema_name(entry)?;
+        CatalogDropPlan::postgres_schema_cascade(request, entry, &schema_name)
     }
 
     pub fn plan_principal_drop(

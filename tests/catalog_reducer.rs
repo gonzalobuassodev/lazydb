@@ -1262,6 +1262,277 @@ fn catalog_drop_confirmation_defaults_to_cancel_and_is_single_shot() {
 }
 
 #[test]
+fn nonempty_schema_cascade_confirmation_requires_a_second_explicit_acceptance() {
+    use lazydb::db::catalog_drop::{CatalogDropBehavior, CatalogDropPlan};
+
+    let (mut app, profile) = connected_app();
+    let database = install_database(&mut app, &profile);
+    let target_schema = install_schema(&mut app, &profile, &database);
+    install_table(&mut app, &profile, &target_schema, "users");
+    let other_schema = self::schema(profile.id, &database.id, "reporting");
+    app.explorer
+        .normalized
+        .profiles
+        .get_mut(&profile.id)
+        .unwrap()
+        .catalog
+        .insert(other_schema.clone())
+        .unwrap();
+    app.explorer
+        .normalized
+        .profiles
+        .get_mut(&profile.id)
+        .unwrap()
+        .catalog
+        .replace_group_states(
+            &other_schema.id,
+            vec![
+                (
+                    ObjectGroup::Tables,
+                    lazydb::model::explorer::CatalogGroupState {
+                        count: CatalogCount::Exact(0),
+                        completeness: CatalogCompleteness::Complete,
+                    },
+                ),
+                (
+                    ObjectGroup::Views,
+                    lazydb::model::explorer::CatalogGroupState {
+                        count: CatalogCount::Exact(1),
+                        completeness: CatalogCompleteness::Complete,
+                    },
+                ),
+            ],
+        )
+        .unwrap();
+    let dependent_view = CatalogEntry::relation(
+        id(
+            profile.id,
+            CatalogKind::View,
+            &["app", "reporting", "dep_view"],
+        ),
+        other_schema.id.clone(),
+        QualifiedName {
+            database: Some("app".into()),
+            schema: Some("reporting".into()),
+            object: "dep_view".into(),
+        },
+        "view",
+        OptionalMetadata::Supported(None),
+        true,
+    )
+    .unwrap();
+    app.explorer
+        .normalized
+        .profiles
+        .get_mut(&profile.id)
+        .unwrap()
+        .catalog
+        .insert(dependent_view.clone())
+        .unwrap();
+    app.tabs
+        .push(WorkspaceTab::Relation(RelationTab::with_descriptor(
+            RelationDescriptor {
+                key: RelationKey {
+                    profile_id: profile.id,
+                    object_id: dependent_view.id.clone(),
+                },
+                qualified_name: dependent_view.qualified_name.clone(),
+                kind: CatalogKind::View,
+                title: "dep_view".into(),
+            },
+            RelationView::Data,
+        )));
+    app.active_tab = app.tabs.len() - 1;
+    let connection = app.connection.active_identity().unwrap();
+    let mut request = CatalogDropRequest::new(connection, target_schema.id.clone(), 91)
+        .with_entry(target_schema.clone());
+    request.catalog_epoch = app.explorer.normalized.profiles[&profile.id].catalog_epoch;
+    let original = CatalogDropPlan::new(
+        request.clone(),
+        &target_schema,
+        "DROP SCHEMA \"public\" RESTRICT",
+    )
+    .unwrap();
+    let cascade =
+        lazydb::db::postgres::PostgresAdapter::plan_catalog_drop_cascade(request, &target_schema)
+            .unwrap();
+
+    app.update(Action::CatalogDropPlanReady(original.clone()));
+    app.update(Action::ToggleCatalogDropFocus);
+    assert!(matches!(
+        app.update(Action::CatalogDropConfirm).as_slice(),
+        [Command::ExecuteCatalogDrop(plan)] if plan == &original
+    ));
+    assert!(catalog(&app, profile.id).get(&target_schema.id).is_some());
+
+    app.update(Action::CatalogDropCascadeRequired {
+        original_plan: Box::new(original),
+        cascade_plan: Box::new(cascade),
+    });
+    let cascade_plan = match app.overlay.as_ref() {
+        Some(Overlay::CatalogDropConfirm {
+            plan,
+            delete_selected: false,
+            busy: false,
+            ..
+        }) => {
+            assert_eq!(plan.behavior(), CatalogDropBehavior::Cascade);
+            assert_eq!(plan.sql(), "DROP SCHEMA \"public\" CASCADE");
+            plan.as_ref().clone()
+        }
+        overlay => panic!("expected second cancel-default confirmation, got {overlay:?}"),
+    };
+    assert!(catalog(&app, profile.id).get(&target_schema.id).is_some());
+    assert!(app.update(Action::CatalogDropConfirm).is_empty());
+    assert!(app.overlay.is_none());
+
+    app.update(Action::CatalogDropPlanReady(cascade_plan.clone()));
+    app.update(Action::ToggleCatalogDropFocus);
+    assert!(matches!(
+        app.update(Action::CatalogDropConfirm).as_slice(),
+        [Command::ExecuteCatalogDrop(plan)] if plan == &cascade_plan
+    ));
+
+    let outcome = QueryOutcome {
+        result_sets: Vec::new(),
+        stats: QueryStats::new(std::time::Duration::ZERO, std::time::Duration::ZERO, 0),
+    };
+    let commands = app.update(Action::CatalogDropSucceeded {
+        plan: cascade_plan,
+        outcome,
+    });
+    assert!(catalog(&app, profile.id).get(&target_schema.id).is_none());
+    assert!(matches!(
+        commands.iter().find(|command| matches!(
+            command,
+            Command::LoadCatalogPage(request)
+                if request.key.target == CatalogTarget::schemas(database.id.clone()).unwrap()
+        )),
+        Some(Command::LoadCatalogPage(_))
+    ));
+    assert!(matches!(
+        commands.iter().find(|command| matches!(
+            command,
+            Command::LoadCatalogPage(request)
+                if request.key.target == CatalogTarget::objects(
+                    other_schema.id.clone(),
+                    ObjectGroup::Views,
+                ).unwrap()
+        )),
+        Some(Command::LoadCatalogPage(_))
+    ));
+    let profile_state = &app.explorer.normalized.profiles[&profile.id];
+    assert!(matches!(
+        profile_state.load_states.get(&ExplorerOwnerId::Group {
+            parent: other_schema.id.clone(),
+            group: ObjectGroup::Views,
+        }),
+        Some(ExplorerLoadState::Loading { .. })
+    ));
+    assert!(profile_state.catalog.get(&dependent_view.id).is_some());
+    let WorkspaceTab::Relation(dependent_tab) = &app.tabs[app.active_tab] else {
+        panic!("expected cross-schema dependent relation tab")
+    };
+    assert!(dependent_tab.stale_native_identity);
+}
+
+#[test]
+fn stale_or_forged_cascade_required_does_not_replace_the_drop_confirmation() {
+    use lazydb::db::catalog_drop::CatalogDropPlan;
+
+    let (mut app, profile) = connected_app();
+    let database = install_database(&mut app, &profile);
+    let schema = install_schema(&mut app, &profile, &database);
+    let connection = app.connection.active_identity().unwrap();
+    let mut request =
+        CatalogDropRequest::new(connection, schema.id.clone(), 93).with_entry(schema.clone());
+    request.catalog_epoch = app.explorer.normalized.profiles[&profile.id].catalog_epoch;
+    let original =
+        CatalogDropPlan::new(request.clone(), &schema, "DROP SCHEMA \"public\" RESTRICT").unwrap();
+    let cascade =
+        lazydb::db::postgres::PostgresAdapter::plan_catalog_drop_cascade(request, &schema).unwrap();
+    app.update(Action::CatalogDropPlanReady(original.clone()));
+    app.update(Action::ToggleCatalogDropFocus);
+    assert!(matches!(
+        app.update(Action::CatalogDropConfirm).as_slice(),
+        [Command::ExecuteCatalogDrop(_)]
+    ));
+
+    let mut forged = cascade.clone();
+    forged.qualified_name = "forged_schema".into();
+    app.update(Action::CatalogDropCascadeRequired {
+        original_plan: Box::new(original.clone()),
+        cascade_plan: Box::new(forged),
+    });
+    assert!(matches!(
+        app.overlay.as_ref(),
+        Some(Overlay::CatalogDropConfirm { plan, busy: true, .. }) if **plan == original
+    ));
+
+    let mut stale_original = original.clone();
+    stale_original.request.request_id += 1;
+    app.update(Action::CatalogDropCascadeRequired {
+        original_plan: Box::new(stale_original),
+        cascade_plan: Box::new(cascade),
+    });
+    assert!(matches!(
+        app.overlay.as_ref(),
+        Some(Overlay::CatalogDropConfirm { plan, busy: true, .. }) if **plan == original
+    ));
+}
+
+#[test]
+fn cascade_schema_success_invalidates_every_loaded_relation_in_removed_subtree() {
+    let (mut app, profile) = connected_app();
+    let database = install_database(&mut app, &profile);
+    let schema = install_schema(&mut app, &profile, &database);
+    let table = install_table(&mut app, &profile, &schema, "users");
+    let connection = app.connection.active_identity().unwrap();
+    let mut request =
+        CatalogDropRequest::new(connection, schema.id.clone(), 92).with_entry(schema.clone());
+    request.catalog_epoch = app.explorer.normalized.profiles[&profile.id].catalog_epoch;
+    let cascade =
+        lazydb::db::postgres::PostgresAdapter::plan_catalog_drop_cascade(request, &schema).unwrap();
+    let descriptor = RelationDescriptor {
+        key: RelationKey {
+            profile_id: profile.id,
+            object_id: table.id.clone(),
+        },
+        qualified_name: table.qualified_name.clone(),
+        kind: CatalogKind::Table,
+        title: "users".into(),
+    };
+    app.tabs
+        .push(WorkspaceTab::Relation(RelationTab::with_descriptor(
+            descriptor,
+            RelationView::Data,
+        )));
+    app.active_tab = app.tabs.len() - 1;
+    app.overlay = Some(Overlay::CatalogDropConfirm {
+        plan: Box::new(cascade.clone()),
+        maintenance_database: None,
+        delete_selected: true,
+        busy: true,
+        error: None,
+    });
+
+    app.update(Action::CatalogDropSucceeded {
+        plan: cascade,
+        outcome: QueryOutcome {
+            result_sets: Vec::new(),
+            stats: QueryStats::new(std::time::Duration::ZERO, std::time::Duration::ZERO, 0),
+        },
+    });
+
+    let WorkspaceTab::Relation(tab) = &app.tabs[app.active_tab] else {
+        panic!("expected relation tab")
+    };
+    assert!(tab.stale_native_identity);
+    assert!(catalog(&app, profile.id).get(&schema.id).is_none());
+    assert!(catalog(&app, profile.id).get(&table.id).is_none());
+}
+
+#[test]
 fn automatic_pending_can_be_superseded_by_refresh_without_losing_first_load_snapshot() {
     let (mut app, profile) = connected_app();
     let automatic = initial_request(&mut app, &profile);

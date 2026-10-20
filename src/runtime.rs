@@ -5024,13 +5024,114 @@ impl Runtime {
                 });
                 return;
             }
-            let result = if profile
-                .as_ref()
-                .is_some_and(|profile| profile.kind == crate::profile::DatabaseKind::Oracle)
+            let profile = profile.unwrap();
+            let mut owned_drop_database = None;
+            let result = if profile.kind == crate::profile::DatabaseKind::Postgres
+                && task_plan.kind == crate::db::catalog::CatalogKind::Schema
             {
+                let entry = task_plan.request.entry.as_ref();
+                let database_name = entry
+                    .and_then(|entry| entry.qualified_name.database.as_deref())
+                    .filter(|database| !database.is_empty());
+                if let Some(database_name) = database_name {
+                    let target = ExecutionTarget {
+                        profile_id: profile.id,
+                        database: database_name.to_owned(),
+                        schema: entry.and_then(|entry| entry.qualified_name.schema.clone()),
+                    };
+                    if !target.is_valid(&profile) {
+                        Err(DatabaseError::configuration(
+                            "schema drop target is invalid for this PostgreSQL profile",
+                        ))
+                    } else {
+                        let active = connection
+                            .lock()
+                            .await
+                            .get(&ConnectionKey::new(
+                                task_plan.request.connection,
+                                target.clone(),
+                            ))
+                            .map(|active| active.database.clone());
+                        let routed = if let Some(database) = active {
+                            Ok(database)
+                        } else {
+                            match resolve_profile_password(
+                                &registry,
+                                &secret_store,
+                                &local_credential_store,
+                                &profile,
+                            )
+                            .await
+                            {
+                                Ok(password) => DatabaseConnection::connect_target(
+                                    &profile,
+                                    password.as_ref(),
+                                    &target,
+                                )
+                                .await
+                                .inspect(|database| {
+                                    owned_drop_database = Some(database.clone());
+                                }),
+                                Err(error) => Err(DatabaseError::configuration(error)),
+                            }
+                        };
+                        match routed {
+                            Err(error) => Err(error),
+                            Ok(target_database) => {
+                                match target_database.execute(task_plan.sql()).await {
+                                    Ok(outcome) => Ok(outcome),
+                                    Err(error)
+                                        if catalog_drop_requires_cascade(
+                                            profile.kind,
+                                            &task_plan,
+                                            &error,
+                                        ) =>
+                                    {
+                                        let cascade_plan = entry
+                                            .ok_or_else(|| {
+                                                DatabaseError::configuration(
+                                                    "schema drop entry is missing",
+                                                )
+                                            })
+                                            .and_then(|entry| {
+                                                crate::db::postgres::PostgresAdapter::plan_catalog_drop_cascade(
+                                                    task_plan.request.clone(),
+                                                    entry,
+                                                )
+                                                .map_err(|error| {
+                                                    DatabaseError::configuration(error.to_string())
+                                                })
+                                            });
+                                        match cascade_plan {
+                                            Ok(cascade_plan) => {
+                                                let _ = sender.send(
+                                                    Action::CatalogDropCascadeRequired {
+                                                        original_plan: Box::new(task_plan),
+                                                        cascade_plan: Box::new(cascade_plan),
+                                                    },
+                                                );
+                                                if let Some(database) = owned_drop_database.take() {
+                                                    database.close().await;
+                                                }
+                                                return;
+                                            }
+                                            Err(plan_error) => Err(plan_error),
+                                        }
+                                    }
+                                    Err(error) => Err(error),
+                                }
+                            }
+                        }
+                    }
+                } else {
+                    Err(DatabaseError::configuration(
+                        "schema drop entry has no PostgreSQL database name",
+                    ))
+                }
+            } else if profile.kind == crate::profile::DatabaseKind::Oracle {
                 Runtime::execute_oracle_catalog_drop(
                     &task_plan,
-                    profile.as_ref().unwrap(),
+                    &profile,
                     &registry,
                     &secret_store,
                     &local_credential_store,
@@ -5039,6 +5140,9 @@ impl Runtime {
             } else {
                 database.execute(task_plan.sql()).await
             };
+            if let Some(database) = owned_drop_database {
+                database.close().await;
+            }
             match result {
                 Ok(outcome) => {
                     let _ = sender.send(Action::CatalogDropSucceeded {
@@ -7250,6 +7354,17 @@ impl Runtime {
     }
 }
 
+fn catalog_drop_requires_cascade(
+    database_kind: crate::profile::DatabaseKind,
+    plan: &crate::db::catalog_drop::CatalogDropPlan,
+    error: &DatabaseError,
+) -> bool {
+    database_kind == crate::profile::DatabaseKind::Postgres
+        && plan.kind == crate::db::catalog::CatalogKind::Schema
+        && plan.behavior() == crate::db::catalog_drop::CatalogDropBehavior::Restrict
+        && error.code.as_deref() == Some("2BP01")
+}
+
 async fn shutdown_transaction_entry(entry: ManualTransactionEntry) {
     let _ = entry
         .request_sender
@@ -9318,6 +9433,96 @@ fn catalog_mutation_outcome_unknown(
 mod tests {
     use super::*;
     use crate::{db::transaction::WorkerDisposition, profile::import_connection_url};
+
+    #[test]
+    fn catalog_drop_cascade_escalation_requires_postgres_schema_restrict_sqlstate() {
+        let profile_id = uuid::Uuid::new_v4();
+        let entry = crate::db::catalog::CatalogEntry::schema(
+            crate::db::catalog::CatalogId::new(
+                profile_id,
+                crate::db::catalog::CatalogKind::Schema,
+                ["app", "public"],
+            ),
+            crate::db::catalog::CatalogId::new(
+                profile_id,
+                crate::db::catalog::CatalogKind::Database,
+                ["app"],
+            ),
+            crate::db::catalog::QualifiedName {
+                database: Some("app".into()),
+                schema: Some("public".into()),
+                object: "public".into(),
+            },
+            "schema",
+            crate::db::catalog::OptionalMetadata::Supported(None),
+            true,
+        )
+        .unwrap();
+        let request = crate::db::catalog_drop::CatalogDropRequest::new(
+            ConnectionIdentity {
+                profile_id,
+                generation: 1,
+            },
+            entry.id.clone(),
+            1,
+        )
+        .with_entry(entry.clone());
+        let plan =
+            crate::db::postgres::PostgresAdapter::plan_catalog_drop(request, &entry).unwrap();
+        let dependency_error = DatabaseError {
+            category: crate::db::ErrorCategory::Constraint,
+            code: Some("2BP01".into()),
+            message: "dependent objects exist".into(),
+            diagnostic: None,
+        };
+        assert!(catalog_drop_requires_cascade(
+            crate::profile::DatabaseKind::Postgres,
+            &plan,
+            &dependency_error,
+        ));
+        for (kind, object_kind, code, message) in [
+            (
+                crate::profile::DatabaseKind::Postgres,
+                crate::db::catalog::CatalogKind::Table,
+                "2BP01",
+                "dependent objects exist",
+            ),
+            (
+                crate::profile::DatabaseKind::DuckDb,
+                crate::db::catalog::CatalogKind::Schema,
+                "2BP01",
+                "dependent objects exist",
+            ),
+            (
+                crate::profile::DatabaseKind::Postgres,
+                crate::db::catalog::CatalogKind::Schema,
+                "42501",
+                "dependent objects exist",
+            ),
+            (
+                crate::profile::DatabaseKind::Postgres,
+                crate::db::catalog::CatalogKind::Schema,
+                "3F000",
+                "dependent objects exist",
+            ),
+            (
+                crate::profile::DatabaseKind::Postgres,
+                crate::db::catalog::CatalogKind::Schema,
+                "",
+                "dependent objects exist",
+            ),
+        ] {
+            let mut other_plan = plan.clone();
+            other_plan.kind = object_kind;
+            let error = DatabaseError {
+                category: crate::db::ErrorCategory::Constraint,
+                code: (!code.is_empty()).then(|| code.to_owned()),
+                message: message.to_owned(),
+                diagnostic: None,
+            };
+            assert!(!catalog_drop_requires_cascade(kind, &other_plan, &error));
+        }
+    }
 
     #[tokio::test]
     async fn cancel_query_command_interrupts_duckdb_runtime_query() {
