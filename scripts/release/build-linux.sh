@@ -57,6 +57,7 @@ docker build \
     "$SCRIPT_DIR"
 set +e
 docker run --rm \
+    --user "$(id -u):$(id -g)" \
     --volume "$repo:/workspace" \
     --volume "$cargo_home/registry:/opt/cargo/registry" \
     --volume "$cargo_home/git:/opt/cargo/git" \
