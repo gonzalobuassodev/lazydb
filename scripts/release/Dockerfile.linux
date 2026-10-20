@@ -1,5 +1,5 @@
 # The release workflow pins this base image by digest at build time.
-ARG BASE_IMAGE=ubuntu:24.04
+ARG BASE_IMAGE=ubuntu:22.04
 FROM ${BASE_IMAGE}
 ARG RUSTUP_ARCH=x86_64
 ARG RUST_TARGET=x86_64-unknown-linux-gnu

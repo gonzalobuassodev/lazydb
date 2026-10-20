@@ -265,6 +265,11 @@ class RuntimeScannerContractTests(unittest.TestCase):
         self.assertNotEqual(x64["build_image_digest"], arm["build_image_digest"])
         self.assertTrue(x64["build_image_digest"].startswith("sha256:"))
         self.assertTrue(arm["build_image_digest"].startswith("sha256:"))
+        self.assertEqual(x64["build_image"], "ubuntu:22.04")
+        self.assertEqual(arm["build_image"], "ubuntu:22.04")
+        self.assertEqual(x64["max_glibc"], "2.35")
+        self.assertEqual(arm["max_glibc"], "2.35")
+        self.assertTrue({"ld-linux-aarch64.so.1", "libstdc++.so.6"}.issubset(arm["needed"]))
         self.assertEqual(x64["validation"], "release-workflow-native-build-and-smoke")
         self.assertEqual(arm["validation"], "release-workflow-native-build-and-smoke")
 
@@ -273,11 +278,11 @@ class RuntimeScannerContractTests(unittest.TestCase):
         environment = dict(os.environ)
         if os.uname().machine.lower() in {"aarch64", "arm64"}:
             target = "x86_64-unknown-linux-gnu"
-            image_digest = "f610ab94648195aa356059f5b41d6085c9d4d903c072430cdd1af7bdb646106b"
+            image_digest = "98510ac07bb4545e389be502a8918b385c018bfe4ceeb5ac7e0375c782268b04"
         else:
             target = "aarch64-unknown-linux-gnu"
-            image_digest = "08571ca13e00ca07a2a84eab83a959b4242e22cceb16486a11bef1428c9e93a7"
-        environment["LAZYDB_LINUX_BUILD_IMAGE"] = f"ubuntu:24.04@sha256:{image_digest}"
+            image_digest = "88881eb36da489f9ff8746ece8048ca16cc94f80e8cd3ae7e8335d8822631591"
+        environment["LAZYDB_LINUX_BUILD_IMAGE"] = f"ubuntu:22.04@sha256:{image_digest}"
         environment["PATH"] = "/usr/bin:/bin"
         result = subprocess.run(
             ["sh", str(script), target],

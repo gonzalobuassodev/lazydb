@@ -32,8 +32,8 @@ case "$incremental" in 0|1) ;; *) printf 'CARGO_INCREMENTAL must be 0 or 1\n' >&
 
 image_digest=${image##*@}
 case "$host_arch:$image_digest" in
-    x86_64:sha256:f610ab94648195aa356059f5b41d6085c9d4d903c072430cdd1af7bdb646106b) ;;
-    aarch64:sha256:08571ca13e00ca07a2a84eab83a959b4242e22cceb16486a11bef1428c9e93a7) ;;
+    x86_64:sha256:98510ac07bb4545e389be502a8918b385c018bfe4ceeb5ac7e0375c782268b04) ;;
+    aarch64:sha256:88881eb36da489f9ff8746ece8048ca16cc94f80e8cd3ae7e8335d8822631591) ;;
     *) printf 'build image digest does not match native architecture %s\n' "$host_arch" >&2; exit 1;;
 esac
 

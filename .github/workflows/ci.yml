@@ -233,7 +233,9 @@ jobs:
         run: timeout 15m cargo +1.94.0 test --locked --test mongodb_connection --test mongodb_catalog --test mongodb_cursor --test mongodb_console --test mongodb_transactions --test mongodb_cancellation --test mongodb_mutation --test mongodb_management --test mongodb_monitoring --test mongodb_principals -- --test-threads=1
       - name: MongoDB service diagnostics
         if: failure()
-        run: docker compose -f docker-compose.mongodb.yml ps
+        run: |
+          docker compose -f docker-compose.mongodb.yml ps --all
+          docker compose -f docker-compose.mongodb.yml logs --no-color
       - name: Stop MongoDB fixtures
         if: always()
         run: docker compose -f docker-compose.mongodb.yml down -v

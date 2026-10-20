@@ -113,7 +113,7 @@ jobs:
       - name: Build Linux in the pinned native image
         if: matrix.target == 'x86_64-unknown-linux-gnu' || matrix.target == 'aarch64-unknown-linux-gnu'
         env:
-          LAZYDB_LINUX_BUILD_IMAGE: ${{ matrix.target == 'x86_64-unknown-linux-gnu' && 'ubuntu:24.04@sha256:f610ab94648195aa356059f5b41d6085c9d4d903c072430cdd1af7bdb646106b' || 'ubuntu:24.04@sha256:08571ca13e00ca07a2a84eab83a959b4242e22cceb16486a11bef1428c9e93a7' }}
+          LAZYDB_LINUX_BUILD_IMAGE: ${{ matrix.target == 'x86_64-unknown-linux-gnu' && 'ubuntu:22.04@sha256:98510ac07bb4545e389be502a8918b385c018bfe4ceeb5ac7e0375c782268b04' || 'ubuntu:22.04@sha256:88881eb36da489f9ff8746ece8048ca16cc94f80e8cd3ae7e8335d8822631591' }}
           CARGO_BUILD_JOBS: '2'
           CARGO_INCREMENTAL: '0'
         run: sh scripts/release/build-linux.sh "${{ matrix.target }}"
@@ -122,7 +122,7 @@ jobs:
         env:
           TARGET: ${{ matrix.target }}
           VERSION: ${{ needs.plan.outputs.version }}
-          IMAGE: ${{ matrix.target == 'x86_64-unknown-linux-gnu' && 'ubuntu:24.04@sha256:f610ab94648195aa356059f5b41d6085c9d4d903c072430cdd1af7bdb646106b' || 'ubuntu:24.04@sha256:08571ca13e00ca07a2a84eab83a959b4242e22cceb16486a11bef1428c9e93a7' }}
+          IMAGE: ${{ matrix.target == 'x86_64-unknown-linux-gnu' && 'ubuntu:22.04@sha256:98510ac07bb4545e389be502a8918b385c018bfe4ceeb5ac7e0375c782268b04' || 'ubuntu:22.04@sha256:88881eb36da489f9ff8746ece8048ca16cc94f80e8cd3ae7e8335d8822631591' }}
           BUILD_IMAGE_TAG: lazydb-linux-build:${{ matrix.target == 'x86_64-unknown-linux-gnu' && 'x86_64' || 'aarch64' }}
         run: |
           set -eu

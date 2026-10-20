@@ -1,7 +1,7 @@
 services:
   mongodb-rs:
     image: mongo:8.0
-    command: ["mongod", "--replSet", "lazydb-rs", "--bind_ip_all"]
+    command: ["mongod", "--replSet", "lazydb-rs", "--bind_ip_all", "--wiredTigerCacheSizeGB", "0.25"]
     healthcheck:
       test: ["CMD", "mongosh", "--quiet", "--eval", "db.adminCommand({ping:1}).ok"]
       interval: 5s
@@ -11,7 +11,7 @@ services:
       - "27017:27017"
   mongodb-standalone:
     image: mongo:8.0
-    command: ["mongod", "--bind_ip_all"]
+    command: ["mongod", "--bind_ip_all", "--wiredTigerCacheSizeGB", "0.25"]
     ports:
       - "27018:27017"
     healthcheck:
@@ -21,7 +21,7 @@ services:
       retries: 30
   mongodb-principals:
     image: mongo:8.0
-    command: ["mongod", "--bind_ip_all", "--port", "27019"]
+    command: ["mongod", "--bind_ip_all", "--port", "27019", "--wiredTigerCacheSizeGB", "0.25"]
     ports:
       - "27019:27019"
     healthcheck:
