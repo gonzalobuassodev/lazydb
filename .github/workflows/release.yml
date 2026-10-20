@@ -101,22 +101,20 @@ jobs:
           persist-credentials: false
           ref: ${{ github.event_name == 'workflow_dispatch' && 'main' || needs.plan.outputs.tag }}
       - name: Install Rust on the host
-        if: matrix.target != 'x86_64-unknown-linux-gnu' && matrix.target != 'aarch64-unknown-linux-gnu'
         run: rustup toolchain install 1.94.0 --target "${{ matrix.target }}" --profile minimal --no-self-update
       - name: Select Rust on the host
-        if: matrix.target != 'x86_64-unknown-linux-gnu' && matrix.target != 'aarch64-unknown-linux-gnu'
         run: rustup default 1.94.0
       - name: Cache Rust build
-        if: matrix.target != 'x86_64-unknown-linux-gnu' && matrix.target != 'aarch64-unknown-linux-gnu'
         uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2
         with:
           shared-key: release-${{ matrix.target }}
           cache-targets: true
+          cache-on-failure: true
       - name: Build Linux in the pinned native image
         if: matrix.target == 'x86_64-unknown-linux-gnu' || matrix.target == 'aarch64-unknown-linux-gnu'
         env:
           LAZYDB_LINUX_BUILD_IMAGE: ${{ matrix.target == 'x86_64-unknown-linux-gnu' && 'ubuntu:24.04@sha256:f610ab94648195aa356059f5b41d6085c9d4d903c072430cdd1af7bdb646106b' || 'ubuntu:24.04@sha256:08571ca13e00ca07a2a84eab83a959b4242e22cceb16486a11bef1428c9e93a7' }}
-          CARGO_BUILD_JOBS: '1'
+          CARGO_BUILD_JOBS: '2'
           CARGO_INCREMENTAL: '0'
         run: sh scripts/release/build-linux.sh "${{ matrix.target }}"
       - name: Record Linux build toolchain and image

@@ -44,7 +44,8 @@ rustup_arch=x86_64
 [ "$host_arch" != aarch64 ] || rustup_arch=aarch64
 
 repo=$(cd "$REPOSITORY" && pwd -P)
-mkdir -p "$repo/target" "$repo/.cargo"
+cargo_home=${CARGO_HOME:-"$HOME/.cargo"}
+mkdir -p "$repo/target" "$repo/.cargo" "$cargo_home/registry" "$cargo_home/git"
 image_tag="lazydb-linux-build:${host_arch}"
 docker build \
     --platform "linux/$platform" \
@@ -57,6 +58,8 @@ docker build \
 set +e
 docker run --rm \
     --volume "$repo:/workspace" \
+    --volume "$cargo_home/registry:/opt/cargo/registry" \
+    --volume "$cargo_home/git:/opt/cargo/git" \
     --workdir /workspace \
     --platform "linux/$platform" \
     --env CARGO_BUILD_JOBS="$jobs" \

@@ -20,8 +20,8 @@ printf 'binary=%s raw_bytes=%s\n' "$binary" "$(size_bytes "$binary")"
 
 compressed=$(mktemp "${TMPDIR:-/tmp}/lazydb-binary.XXXXXX.xz")
 trap 'rm -f "$compressed"' EXIT HUP INT TERM
-xz -9 -c "$binary" > "$compressed"
-printf 'binary=%s xz9_bytes=%s\n' "$binary" "$(size_bytes "$compressed")"
+xz -6 -c "$binary" > "$compressed"
+printf 'binary=%s xz6_bytes=%s\n' "$binary" "$(size_bytes "$compressed")"
 
 case "$(file -b "$binary" 2>/dev/null || true)" in
     *Mach-O*)
