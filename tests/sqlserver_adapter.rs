@@ -278,6 +278,7 @@ async fn executes_all_result_sets_and_decodes_sql_server_types_when_configured()
 #[tokio::test]
 async fn previews_sql_server_relations_with_pagination_filters_order_and_escaped_names() {
     let Ok(url) = std::env::var("LAZYDB_TEST_SQLSERVER_URL") else {
+        eprintln!("skipping SQL Server relation preview: LAZYDB_TEST_SQLSERVER_URL is not set");
         return;
     };
     let imported = import_connection_url(&url, Some("sqlserver-preview-test")).unwrap();
@@ -285,7 +286,12 @@ async fn previews_sql_server_relations_with_pagination_filters_order_and_escaped
         DatabaseConnection::connect(&imported.profile, imported.transient_password.as_ref())
             .await
             .unwrap();
-    let table = format!("lazydb_task8_{}]", Uuid::new_v4().simple());
+    let database_name = database.probe().await.unwrap().database;
+    let suffix = Uuid::new_v4().simple().to_string();
+    let schema = format!("lazydb_preview_{suffix}");
+    let quoted_schema = mssql::quote_identifier(&schema);
+    let scope = sqlserver_selected_scope(&database_name, &[&schema]);
+    let table = format!("lazydb_task8_{suffix}]");
     let quoted_table = mssql::quote_identifier(&table);
     let values = (1..=25)
         .map(|value| format!("({value}, N'row {value}')"))
@@ -293,19 +299,38 @@ async fn previews_sql_server_relations_with_pagination_filters_order_and_escaped
         .join(", ");
     database
         .execute(&format!(
-            "CREATE TABLE [dbo].{quoted_table} ([id] int NOT NULL, [label] nvarchar(32) NOT NULL); INSERT INTO [dbo].{quoted_table} ([id], [label]) VALUES {values};"
+            "CREATE SCHEMA {quoted_schema};\nGO\nCREATE TABLE {quoted_schema}.{quoted_table} ([id] int NOT NULL, [label] nvarchar(32) NOT NULL); INSERT INTO {quoted_schema}.{quoted_table} ([id], [label]) VALUES {values};"
         ))
         .await
         .unwrap();
 
-    let relation = lazydb::db::catalog::CatalogId::new(
-        imported.profile.id,
-        lazydb::db::catalog::CatalogKind::Table,
-        [
-            imported.profile.database.as_deref().unwrap(),
-            "dbo",
-            table.as_str(),
-        ],
+    // Relation identity comes from the catalog, which appends the SQL Server object id.
+    let relation = database
+        .load_catalog_page(&sqlserver_catalog_request(
+            imported.profile.id,
+            CatalogTarget::objects(
+                CatalogId::new(
+                    imported.profile.id,
+                    CatalogKind::Schema,
+                    [database_name.clone(), schema.clone()],
+                ),
+                lazydb::db::catalog::ObjectGroup::Tables,
+            )
+            .unwrap(),
+            scope.clone(),
+            1,
+        ))
+        .await
+        .unwrap()
+        .entries
+        .into_iter()
+        .find(|entry| entry.qualified_name.object == table)
+        .expect("the created table must be listed by the catalog")
+        .id;
+    assert_eq!(
+        relation.native_path.len(),
+        4,
+        "catalog relation ids carry the object id"
     );
     let options = lazydb::model::relation::RelationPreviewOptions {
         where_clause: Some("[id] >= 1".to_owned()),
@@ -313,8 +338,9 @@ async fn previews_sql_server_relations_with_pagination_filters_order_and_escaped
     };
 
     let first = database
-        .preview_relation(
+        .preview_relation_with_scope(
             &relation,
+            &scope,
             &options,
             lazydb::model::pagination::PageRequest::first(lazydb::model::pagination::PageSize::Ten),
         )
@@ -328,8 +354,9 @@ async fn previews_sql_server_relations_with_pagination_filters_order_and_escaped
     assert!(first.pagination.has_next);
 
     let middle = database
-        .preview_relation(
+        .preview_relation_with_scope(
             &relation,
+            &scope,
             &options,
             lazydb::model::pagination::PageRequest::at(
                 lazydb::model::pagination::PageSize::Ten,
@@ -344,8 +371,9 @@ async fn previews_sql_server_relations_with_pagination_filters_order_and_escaped
     );
 
     let last = database
-        .preview_relation(
+        .preview_relation_with_scope(
             &relation,
+            &scope,
             &options,
             lazydb::model::pagination::PageRequest::last(
                 lazydb::model::pagination::PageSize::Ten,
@@ -361,8 +389,28 @@ async fn previews_sql_server_relations_with_pagination_filters_order_and_escaped
         lazydb::model::pagination::TotalRows::Exact(25)
     );
 
+    // Three-component ids stay previewable: they were accepted before the catalog
+    // started appending the object id.
+    let legacy_relation = CatalogId::new(
+        imported.profile.id,
+        relation.kind,
+        relation.native_path[..3].to_vec(),
+    );
+    let legacy = database
+        .preview_relation_with_scope(
+            &legacy_relation,
+            &scope,
+            &options,
+            lazydb::model::pagination::PageRequest::first(lazydb::model::pagination::PageSize::Ten),
+        )
+        .await
+        .unwrap();
+    assert_eq!(legacy.result.result_sets[0].rows.len(), 10);
+
     database
-        .execute(&format!("DROP TABLE [dbo].{quoted_table}"))
+        .execute(&format!(
+            "DROP TABLE {quoted_schema}.{quoted_table}; DROP SCHEMA {quoted_schema};"
+        ))
         .await
         .unwrap();
     database.close().await;

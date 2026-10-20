@@ -2200,16 +2200,12 @@ impl MsSqlAdapter {
         mut page: crate::model::pagination::PageRequest,
     ) -> Result<RelationPreview, DatabaseError> {
         let target = format!("SQL Server relation {:?}", relation.native_path);
-        if relation.profile_id() != self.connection_id
-            || !relation.kind.is_relation()
-            || relation.native_path.len() != 3
-        {
+        let path = relation_names(relation)
+            .filter(|_| relation.profile_id() == self.connection_id && relation.kind.is_relation());
+        let Some((database, schema, name)) = path else {
             return Err(DatabaseError::configuration(format!(
                 "catalog target is not a SQL Server relation: {target}"
             )));
-        }
-        let [database, schema, name] = relation.native_path.as_slice() else {
-            unreachable!("relation path length was checked")
         };
         if !self.catalog_scope.allows_database(database)
             || !self.catalog_scope.allows_schema(database, schema)
@@ -2278,18 +2274,11 @@ impl MsSqlAdapter {
         let target = CatalogTarget::RelationChildren {
             relation: relation.clone(),
         };
-        if relation.profile_id() != self.connection_id
-            || !relation.kind.is_relation()
-            || relation.native_path.len() != 4
-        {
+        let path = relation_path(relation)
+            .filter(|_| relation.profile_id() == self.connection_id && relation.kind.is_relation());
+        let Some((database, schema, name, object_id)) = path else {
             return Err(catalog_target_not_found(&target));
-        }
-        let [database, schema, name, object_id] = relation.native_path.as_slice() else {
-            unreachable!("relation path length was checked")
         };
-        let object_id = object_id
-            .parse::<i32>()
-            .map_err(|_| catalog_target_not_found(&target))?;
         if !self.catalog_scope.allows_schema(database, schema) {
             return Err(catalog_target_not_found(&target));
         }
@@ -3892,6 +3881,35 @@ fn database_name(id: &CatalogId, target: &CatalogTarget) -> Result<String, Datab
     }
 }
 
+/// Splits the relation names every SQL Server relation consumer needs.
+///
+/// `load_object_page` builds relation ids as `[database, schema, name, object_id]`,
+/// but three-component ids stay valid: they were accepted before the object id was
+/// appended, and the object id is not needed to address a relation.
+fn relation_names(relation: &CatalogId) -> Option<(&str, &str, &str)> {
+    match relation.native_path.as_slice() {
+        [database, schema, name] | [database, schema, name, _]
+            if !database.is_empty() && !schema.is_empty() && !name.is_empty() =>
+        {
+            Some((database, schema, name))
+        }
+        _ => None,
+    }
+}
+
+/// Splits the canonical relation path, including the SQL Server object id that
+/// definition lookups need.
+fn relation_path(relation: &CatalogId) -> Option<(&str, &str, &str, i32)> {
+    match relation.native_path.as_slice() {
+        [database, schema, name, object_id]
+            if !database.is_empty() && !schema.is_empty() && !name.is_empty() =>
+        {
+            Some((database, schema, name, object_id.parse::<i32>().ok()?))
+        }
+        _ => None,
+    }
+}
+
 fn schema_names(id: &CatalogId, target: &CatalogTarget) -> Result<(String, String), DatabaseError> {
     if id.kind != CatalogKind::Schema {
         return Err(catalog_target_not_found(target));
@@ -4580,6 +4598,48 @@ mod tests {
 
     use super::*;
     use crate::profile::{CatalogScope, ConnectionUrlFormat, CredentialPolicy, Environment};
+
+    #[test]
+    fn relation_path_accepts_the_catalog_relation_shape() {
+        let profile_id = super::Uuid::new_v4();
+        // `load_object_page` appends the object id, so catalog relations have four parts.
+        let catalog_relation = super::CatalogId::new(
+            profile_id,
+            super::CatalogKind::Table,
+            ["LanSisSGLanComputacion", "dbo", "Empresas", "1989582126"],
+        );
+        assert_eq!(
+            super::relation_path(&catalog_relation),
+            Some(("LanSisSGLanComputacion", "dbo", "Empresas", 1_989_582_126))
+        );
+
+        let shorter_path = super::CatalogId::new(
+            profile_id,
+            super::CatalogKind::Table,
+            ["app", "dbo", "orders"],
+        );
+        assert_eq!(super::relation_path(&shorter_path), None);
+        // Three-component ids were valid before the catalog appended the object id.
+        assert_eq!(
+            super::relation_names(&shorter_path),
+            Some(("app", "dbo", "orders"))
+        );
+        assert_eq!(
+            super::relation_names(&catalog_relation),
+            Some(("LanSisSGLanComputacion", "dbo", "Empresas"))
+        );
+
+        let non_numeric_object_id = super::CatalogId::new(
+            profile_id,
+            super::CatalogKind::Table,
+            ["app", "dbo", "orders", "not-an-id"],
+        );
+        assert_eq!(super::relation_path(&non_numeric_object_id), None);
+        assert_eq!(
+            super::relation_names(&non_numeric_object_id),
+            Some(("app", "dbo", "orders"))
+        );
+    }
 
     #[test]
     fn sql_server_permission_formatting_handles_database_schema_and_object_targets() {
