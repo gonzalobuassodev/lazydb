@@ -18,7 +18,11 @@ concurrency:
   cancel-in-progress: false
 
 env:
-  RUST_VERSION: 1.94.0
+  RUSTUP_TOOLCHAIN: 1.94.0
+  CARGO_INCREMENTAL: '0'
+  CARGO_BUILD_JOBS: '2'
+  CARGO_PROFILE_DEV_DEBUG: '0'
+  CARGO_PROFILE_TEST_DEBUG: '0'
 
 jobs:
   plan:
@@ -47,10 +51,12 @@ jobs:
           printf '%s\n' "$tag" | grep -E '^v[0-9]+\.[0-9]+\.[0-9]+(-beta\.[1-9][0-9]*)?$'
           scripts/release/validate-version.sh "$tag"
           if printf '%s' "$tag" | grep -q -- '-beta\.'; then channel=beta; prerelease=true; else channel=stable; prerelease=false; fi
-          echo "tag=$tag" >> "$GITHUB_OUTPUT"
-          echo "version=$version" >> "$GITHUB_OUTPUT"
-          echo "channel=$channel" >> "$GITHUB_OUTPUT"
-          echo "prerelease=$prerelease" >> "$GITHUB_OUTPUT"
+          {
+            echo "tag=$tag"
+            echo "version=$version"
+            echo "channel=$channel"
+            echo "prerelease=$prerelease"
+          } >> "$GITHUB_OUTPUT"
 
   quality:
     needs: plan
@@ -62,20 +68,21 @@ jobs:
           persist-credentials: false
           ref: ${{ github.event_name == 'workflow_dispatch' && 'main' || needs.plan.outputs.tag }}
       - run: rustup toolchain install 1.94.0 --profile minimal --component rustfmt --component clippy --no-self-update
-      - run: rustup default 1.94.0
+      - run: cargo +1.94.0 fmt --all -- --check
       - name: Cache Rust build
         uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2
         with:
-          shared-key: release-quality
+          shared-key: ci-ubuntu-24.04
+          cache-bin: false
           cache-targets: true
+          save-if: false
       - name: Distribution contracts
         run: |
           sh scripts/release/test-distribution.sh
           python3 -B scripts/release/test-linux-runtime.py
           test "$(uname -s)" != Linux || python3 -B -c 'import runpy, unittest; module=runpy.run_path("scripts/release/test-linux-runtime.py"); suite=unittest.defaultTestLoader.loadTestsFromTestCase(module["LinuxElfIntegrationTests"]); result=unittest.TextTestRunner(verbosity=2).run(suite); raise SystemExit(not result.wasSuccessful() or result.skipped != [])'
-      - run: cargo +1.94.0 fmt --all -- --check
-      - run: cargo +1.94.0 clippy --all-targets --all-features -- -D warnings
-      - run: cargo +1.94.0 test --all-targets --all-features
+      - run: cargo +1.94.0 clippy --locked --all-targets --all-features --timings -- -D warnings
+      - run: cargo +1.94.0 test --locked --all-targets --all-features --timings
 
   build:
     needs: plan
@@ -89,11 +96,15 @@ jobs:
             target: aarch64-apple-darwin
           - os: ubuntu-24.04
             target: x86_64-unknown-linux-gnu
+            image: ubuntu:22.04@sha256:98510ac07bb4545e389be502a8918b385c018bfe4ceeb5ac7e0375c782268b04
           - os: ubuntu-24.04-arm
             target: aarch64-unknown-linux-gnu
+            image: ubuntu:22.04@sha256:88881eb36da489f9ff8746ece8048ca16cc94f80e8cd3ae7e8335d8822631591
           - os: windows-2025
             target: x86_64-pc-windows-msvc
     runs-on: ${{ matrix.os }}
+    env:
+      LAZYDB_LINUX_BUILD_IMAGE: ${{ matrix.image || '' }}
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
@@ -101,33 +112,41 @@ jobs:
           persist-credentials: false
           ref: ${{ github.event_name == 'workflow_dispatch' && 'main' || needs.plan.outputs.tag }}
       - name: Install Rust on the host
+        if: runner.os != 'Linux'
         run: rustup toolchain install 1.94.0 --target "${{ matrix.target }}" --profile minimal --no-self-update
-      - name: Select Rust on the host
-        run: rustup default 1.94.0
+      - name: Prepare pinned Linux build image
+        if: runner.os == 'Linux'
+        run: sh scripts/release/build-linux.sh "${{ matrix.target }}" --prepare
       - name: Cache Rust build
+        if: runner.os != 'Linux'
         uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2
         with:
-          shared-key: release-${{ matrix.target }}
+          shared-key: release-${{ matrix.os }}-${{ matrix.target }}
+          cache-bin: false
+          cache-targets: true
+          cache-on-failure: true
+      - name: Cache pinned Linux build dependencies
+        if: runner.os == 'Linux'
+        uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2
+        with:
+          shared-key: release-linux-${{ matrix.target }}-${{ matrix.image }}-${{ hashFiles('scripts/release/Dockerfile.linux', 'scripts/release/build-linux.sh') }}
+          cmd-format: sh scripts/release/build-linux.sh ${{ matrix.target }} --exec {0}
+          cache-bin: false
           cache-targets: true
           cache-on-failure: true
       - name: Build Linux in the pinned native image
-        if: matrix.target == 'x86_64-unknown-linux-gnu' || matrix.target == 'aarch64-unknown-linux-gnu'
-        env:
-          LAZYDB_LINUX_BUILD_IMAGE: ${{ matrix.target == 'x86_64-unknown-linux-gnu' && 'ubuntu:22.04@sha256:98510ac07bb4545e389be502a8918b385c018bfe4ceeb5ac7e0375c782268b04' || 'ubuntu:22.04@sha256:88881eb36da489f9ff8746ece8048ca16cc94f80e8cd3ae7e8335d8822631591' }}
-          CARGO_BUILD_JOBS: '2'
-          CARGO_INCREMENTAL: '0'
+        if: runner.os == 'Linux'
         run: sh scripts/release/build-linux.sh "${{ matrix.target }}"
       - name: Record Linux build toolchain and image
         if: matrix.target == 'x86_64-unknown-linux-gnu' || matrix.target == 'aarch64-unknown-linux-gnu'
         env:
           TARGET: ${{ matrix.target }}
           VERSION: ${{ needs.plan.outputs.version }}
-          IMAGE: ${{ matrix.target == 'x86_64-unknown-linux-gnu' && 'ubuntu:22.04@sha256:98510ac07bb4545e389be502a8918b385c018bfe4ceeb5ac7e0375c782268b04' || 'ubuntu:22.04@sha256:88881eb36da489f9ff8746ece8048ca16cc94f80e8cd3ae7e8335d8822631591' }}
-          BUILD_IMAGE_TAG: lazydb-linux-build:${{ matrix.target == 'x86_64-unknown-linux-gnu' && 'x86_64' || 'aarch64' }}
+          IMAGE: ${{ matrix.image }}
         run: |
           set -eu
           mkdir -p dist
-          docker run --rm --platform "linux/${{ matrix.target == 'x86_64-unknown-linux-gnu' && 'amd64' || 'arm64' }}" "$BUILD_IMAGE_TAG" bash -lc 'readelf --version' > dist/readelf-version.txt
+          sh scripts/release/build-linux.sh "$TARGET" --exec readelf --version > dist/readelf-version.txt
           python3 - "$TARGET" "$IMAGE" "$RUNNER_ARCH" "$(sed -n '1p' dist/readelf-version.txt)" \
             > "dist/lazydb_${VERSION}_${TARGET}.build.json" <<'PY'
           import json, sys
@@ -143,7 +162,7 @@ jobs:
           PY
       - name: Build macOS and Windows
         if: matrix.target != 'x86_64-unknown-linux-gnu' && matrix.target != 'aarch64-unknown-linux-gnu'
-        run: cargo build --release --locked --target "${{ matrix.target }}"
+        run: cargo +1.94.0 build --release --locked --target "${{ matrix.target }}" --timings
       - name: Check macOS binary dependencies
         if: matrix.target == 'x86_64-apple-darwin' || matrix.target == 'aarch64-apple-darwin'
         run: scripts/release/check-macos-dependencies.sh "target/${{ matrix.target }}/release/lazydb"
@@ -197,6 +216,14 @@ jobs:
             dist/*.runtime.json
             dist/*.build.json
           if-no-files-found: error
+      - name: Upload release build timings
+        if: always() && !cancelled()
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v4.4.3
+        with:
+          name: build-timings-${{ matrix.target }}
+          path: target/cargo-timings/
+          if-no-files-found: ignore
+          retention-days: 7
 
   package:
     needs: [plan, build, quality]
@@ -289,7 +316,12 @@ jobs:
           find dist -mindepth 2 -type f \( -name '*.deb' -o -name '*.rpm' -o -name '*.pkg.tar.zst' \) -exec cp {} dist/ \; 2>/dev/null || true
           if [ "$CHANNEL" = beta ]; then rm -f dist/lazydb-installer.sh dist/lazydb-installer.ps1; fi
           scripts/release/generate-sbom.sh "$VERSION" "dist/lazydb-${VERSION}-sbom.spdx.json"
-          (cd dist && find . -maxdepth 1 -type f ! -name SHA256SUMS -exec basename {} \; | sort | xargs sha256sum > SHA256SUMS)
+          (
+            cd dist
+            checksums=$(mktemp)
+            find . -maxdepth 1 -type f ! -name SHA256SUMS -exec basename {} \; | sort | xargs sha256sum > "$checksums"
+            mv "$checksums" SHA256SUMS
+          )
           body=$(scripts/release/changelog-section.sh "$VERSION")
           [ -n "$body" ] || { echo 'empty Changelog section' >&2; exit 1; }
           printf '%s\n' "$body" > dist/release-notes.md

@@ -3,6 +3,9 @@
 LazyDB releases are prepared with the project-level OpenCode `release` skill
 and built by `.github/workflows/release.yml`.
 
+See [CI builds and dependency caches](ci.md) for the pinned toolchain, build
+profiles, cache ownership, and build timing diagnostics used by both workflows.
+
 ## Prerequisites
 
 - Work from an up-to-date `main` checkout with no unrelated changes.
