@@ -39,12 +39,17 @@ does not discard a costly native build. Caches are immutable: an exact hit is
 not updated. A failed run that saved only partial artifacts can therefore still
 require additional compilation on the next run.
 
-The action adds the host OS/architecture, compiler versions, Cargo/Rust compiler
+The action adds the host OS/architecture, compiler version, Cargo/Rust compiler
 environment, manifests, lockfile, and toolchain configuration to these cache
 families. Shared readers and writers must keep those inputs consistent. In
 particular, adding a `RUST*` or `CARGO*` variable only to Release quality would
-split its cache from ordinary CI. Runner image updates can also cause a miss
-because the action includes every installed Rust toolchain in its key.
+split its cache from ordinary CI. Host caches use
+`scripts/ci/rust-cache-command.sh` to enumerate only `RUSTUP_TOOLCHAIN`. The
+action normally hashes every installed toolchain; unused runner stable versions
+were observed to differ even between jobs in the same run. The wrapper keeps
+that unrelated variation out of the key while forwarding compiler and Cargo
+metadata commands unchanged. Linux release images already contain only their
+pinned toolchain and keep using the container command wrapper.
 
 GitHub also scopes caches by ref. PRs can restore eligible base/default-branch
 caches; a tag can restore eligible default-branch caches. A new tag cannot
@@ -124,8 +129,14 @@ cache. The bundled native compilation appears as part of its build-script time.
 Ordinary CI cancels a superseded run of the same branch or PR. Release keeps its
 existing non-cancelling concurrency policy for the selected tag.
 
-Do not infer a speedup from static validation. Actual improvements require the
-cold/warm cloud measurements above. Introduce `sccache` only if those results
+The [2026-10-21 build measurements](performance/ci-builds.md) record a final cold
+run of 26m 19s and a fully warm run of 16m 18s, compared with the earlier
+79m 23s baseline. All seven jobs passed; all four dependency-cache readers
+reported exact hits in the warm run, with no DuckDB or SQLite recompilation.
+The report also covers native x86_64 and ARM64 container cache verification.
+
+Do not infer a speedup from static validation. Actual improvements require
+cold/warm cloud measurements. Introduce `sccache` only if those results
 still show substantial repeated compilation and its storage/transfer cost is
 justified. Supporting DuckDB's C++ compilation also requires a compiler launcher;
 setting only `RUSTC_WRAPPER` does not cache that work. Prebuilt build images or
@@ -137,7 +148,9 @@ native compilation remains a bottleneck.
 ```sh
 actionlint .github/workflows/ci.yml .github/workflows/release.yml
 shellcheck scripts/release/build-linux.sh scripts/release/test-distribution.sh
+shellcheck scripts/ci/rust-cache-command.sh
 python3 -B scripts/release/test-build-linux.py -v
+python3 -B scripts/ci/test-rust-cache-command.py -v
 RUSTUP_TOOLCHAIN=1.94.0 sh scripts/release/test-distribution.sh
 git diff --check
 ```

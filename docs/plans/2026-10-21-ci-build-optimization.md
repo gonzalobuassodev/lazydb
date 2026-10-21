@@ -53,8 +53,44 @@ Local validation completed on 2026-10-21:
   The shared Ubuntu cache families and Cargo/Rust environments match, and timing
   artifacts cannot match the release download patterns.
 
-The local Docker daemon is unavailable, so real Linux container builds and
-runtime checks remain for native Linux CI. No full application Clippy/test build
-or cloud cache/performance run was performed. The previously observed application
-Clippy failure (`src/app.rs` redundant `staged` and `staged_groups` locals) is
-outside these build-configuration changes and still needs a separate fix.
+The local Docker daemon was unavailable during initial validation. Full
+application Clippy/tests and real Linux container checks were deferred to GitHub.
+
+After the user authorized committing and GitHub verification, the optimization
+was committed as `144c751` and the two redundant application bindings were
+removed in `10015e5`. Both commits were pushed to `main`.
+
+- Full CI run `39606567676` passed all seven jobs in 27 minutes, compared with
+  79m 23s for the earlier successful baseline. It saved all three ordinary CI
+  dependency caches. Each Rust job passed 3328 tests with 12 ignored tests;
+  database and MongoDB jobs passed their 132 and 20 tests, respectively.
+- Cargo timing artifacts confirmed DuckDB's native build script ran once per
+  Rust job, in Clippy; the tests reused that native output.
+- Temporary validation branch `verify/ci-build-cache-20261021` checked the pinned
+  release container/wrapper and cache action with a bundled SQLite probe on
+  native x86_64 and ARM64 runners. Both cold run `39607848245` and warm run
+  `39608185661` passed. Exact warm cache hits avoided native recompilation.
+- Second full CI run `39610636226` passed all seven jobs in 19m 34s. macOS,
+  database, and MongoDB jobs restored exact caches and avoided DuckDB
+  recompilation. Ubuntu Rust missed because its unused preinstalled stable
+  compiler differed from the cache writer's runner. Added a host cache-command
+  wrapper that enumerates only `RUSTUP_TOOLCHAIN`, with four regression tests,
+  and applied it to all host cache writers/readers.
+- Run `39614440270` validated that follow-up fix with a successful workflow
+  conclusion in 26m 19s, and seeded the new cache keys. Host compiler enumeration
+  contained only Rust 1.94.0; Ubuntu Rust and the database job used the same key.
+  The database job's API status remained stale after its successful test and
+  cleanup steps; the performance report records that API discrepancy.
+- Final warm run `39618588158` tested the same `2e2e8a0` commit and passed all
+  seven jobs in 16m 18s, a 79.5% reduction from the 79m 23s baseline. All four
+  dependency-cache readers reported exact hits. Ubuntu Rust took 6m 58s, macOS
+  Rust 16m 12s, database adapters 4m 46s, and MongoDB 2m 01s. The job logs and
+  all four Cargo timing reports showed no DuckDB or SQLite recompilation.
+  Test totals remained 3328 passed and 12 ignored per Rust job, 132 passed for
+  database adapters, and 20 passed for MongoDB. All ordinary CI compatibility
+  gates passed; macOS workspace test compilation and linking remain the main
+  time cost.
+
+See `docs/performance/ci-builds.md` for measured durations, source runs, and
+limits of the comparison. These checks did not publish a release or perform a
+full application release build.
