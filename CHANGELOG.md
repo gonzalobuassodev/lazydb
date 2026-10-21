@@ -1,5 +1,11 @@
 # Changelog
 
+## Unreleased
+
+### Fixed
+
+- Restore SQL Server table and view DATA previews by accepting relation identities returned by the catalog ([#17](https://github.com/yelog/lazydb/pull/17), fixes [#16](https://github.com/yelog/lazydb/issues/16)).
+
 ## [0.1.0] - 2026-09-04
 
 ### Added

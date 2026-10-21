@@ -293,127 +293,178 @@ async fn previews_sql_server_relations_with_pagination_filters_order_and_escaped
     let scope = sqlserver_selected_scope(&database_name, &[&schema]);
     let table = format!("lazydb_task8_{suffix}]");
     let quoted_table = mssql::quote_identifier(&table);
+    let view = format!("lazydb_preview_view_{suffix}]");
+    let quoted_view = mssql::quote_identifier(&view);
     let values = (1..=25)
         .map(|value| format!("({value}, N'row {value}')"))
         .collect::<Vec<_>>()
         .join(", ");
-    database
-        .execute(&format!(
-            "CREATE SCHEMA {quoted_schema};\nGO\nCREATE TABLE {quoted_schema}.{quoted_table} ([id] int NOT NULL, [label] nvarchar(32) NOT NULL); INSERT INTO {quoted_schema}.{quoted_table} ([id], [label]) VALUES {values};"
-        ))
-        .await
-        .unwrap();
+    let result = AssertUnwindSafe(async {
+        database
+            .execute(&format!(
+                "CREATE SCHEMA {quoted_schema};\nGO\nCREATE TABLE {quoted_schema}.{quoted_table} ([id] int NOT NULL, [label] nvarchar(32) NOT NULL); INSERT INTO {quoted_schema}.{quoted_table} ([id], [label]) VALUES {values};\nGO\nCREATE VIEW {quoted_schema}.{quoted_view} AS SELECT [id], [label] FROM {quoted_schema}.{quoted_table};"
+            ))
+            .await
+            .unwrap();
 
-    // Relation identity comes from the catalog, which appends the SQL Server object id.
-    let relation = database
-        .load_catalog_page(&sqlserver_catalog_request(
-            imported.profile.id,
-            CatalogTarget::objects(
-                CatalogId::new(
-                    imported.profile.id,
-                    CatalogKind::Schema,
-                    [database_name.clone(), schema.clone()],
-                ),
+        for (group, kind, name) in [
+            (
                 lazydb::db::catalog::ObjectGroup::Tables,
-            )
-            .unwrap(),
-            scope.clone(),
-            1,
-        ))
-        .await
-        .unwrap()
-        .entries
-        .into_iter()
-        .find(|entry| entry.qualified_name.object == table)
-        .expect("the created table must be listed by the catalog")
-        .id;
-    assert_eq!(
-        relation.native_path.len(),
-        4,
-        "catalog relation ids carry the object id"
-    );
-    let options = lazydb::model::relation::RelationPreviewOptions {
-        where_clause: Some("[id] >= 1".to_owned()),
-        order_by_clause: Some("[id] DESC".to_owned()),
-    };
-
-    let first = database
-        .preview_relation_with_scope(
-            &relation,
-            &scope,
-            &options,
-            lazydb::model::pagination::PageRequest::first(lazydb::model::pagination::PageSize::Ten),
-        )
-        .await
-        .unwrap();
-    assert_eq!(first.result.result_sets[0].rows.len(), 10);
-    assert_eq!(
-        first.result.result_sets[0].rows[0][0],
-        CellValue::Integer(25)
-    );
-    assert!(first.pagination.has_next);
-
-    let middle = database
-        .preview_relation_with_scope(
-            &relation,
-            &scope,
-            &options,
-            lazydb::model::pagination::PageRequest::at(
-                lazydb::model::pagination::PageSize::Ten,
-                10,
+                CatalogKind::Table,
+                table.as_str(),
             ),
-        )
-        .await
-        .unwrap();
-    assert_eq!(
-        middle.result.result_sets[0].rows[0][0],
-        CellValue::Integer(15)
-    );
-
-    let last = database
-        .preview_relation_with_scope(
-            &relation,
-            &scope,
-            &options,
-            lazydb::model::pagination::PageRequest::last(
-                lazydb::model::pagination::PageSize::Ten,
-                25,
+            (
+                lazydb::db::catalog::ObjectGroup::Views,
+                CatalogKind::View,
+                view.as_str(),
             ),
-        )
-        .await
-        .unwrap();
-    assert_eq!(last.result.result_sets[0].rows.len(), 5);
-    assert_eq!(last.result.result_sets[0].rows[0][0], CellValue::Integer(5));
-    assert_eq!(
-        last.pagination.total,
-        lazydb::model::pagination::TotalRows::Exact(25)
-    );
+        ] {
+            // Use the four-component identity returned by the catalog, as the UI does.
+            let relation = database
+                .load_catalog_page(&sqlserver_catalog_request(
+                    imported.profile.id,
+                    CatalogTarget::objects(
+                        CatalogId::new(
+                            imported.profile.id,
+                            CatalogKind::Schema,
+                            [database_name.clone(), schema.clone()],
+                        ),
+                        group,
+                    )
+                    .unwrap(),
+                    scope.clone(),
+                    1,
+                ))
+                .await
+                .unwrap()
+                .entries
+                .into_iter()
+                .find(|entry| entry.qualified_name.object == name)
+                .expect("the created relation must be listed by the catalog")
+                .id;
+            assert_eq!(relation.kind, kind);
+            assert_eq!(
+                relation.native_path.len(),
+                4,
+                "catalog relation ids carry the object id"
+            );
+            let options = lazydb::model::relation::RelationPreviewOptions {
+                where_clause: Some("[id] >= 1".to_owned()),
+                order_by_clause: Some("[id] DESC".to_owned()),
+            };
 
-    // Three-component ids stay previewable: they were accepted before the catalog
-    // started appending the object id.
-    let legacy_relation = CatalogId::new(
-        imported.profile.id,
-        relation.kind,
-        relation.native_path[..3].to_vec(),
-    );
-    let legacy = database
-        .preview_relation_with_scope(
-            &legacy_relation,
-            &scope,
-            &options,
-            lazydb::model::pagination::PageRequest::first(lazydb::model::pagination::PageSize::Ten),
-        )
-        .await
-        .unwrap();
-    assert_eq!(legacy.result.result_sets[0].rows.len(), 10);
+            let first = database
+                .preview_relation_with_scope(
+                    &relation,
+                    &scope,
+                    &options,
+                    lazydb::model::pagination::PageRequest::first(
+                        lazydb::model::pagination::PageSize::Ten,
+                    ),
+                )
+                .await
+                .unwrap();
+            assert_eq!(first.result.result_sets[0].rows.len(), 10);
+            assert_eq!(first.result.result_sets[0].rows[0][0], CellValue::Integer(25));
+            assert!(first.pagination.has_next);
 
-    database
+            let middle = database
+                .preview_relation_with_scope(
+                    &relation,
+                    &scope,
+                    &options,
+                    lazydb::model::pagination::PageRequest::at(
+                        lazydb::model::pagination::PageSize::Ten,
+                        10,
+                    ),
+                )
+                .await
+                .unwrap();
+            assert_eq!(middle.result.result_sets[0].rows[0][0], CellValue::Integer(15));
+
+            let last = database
+                .preview_relation_with_scope(
+                    &relation,
+                    &scope,
+                    &options,
+                    lazydb::model::pagination::PageRequest::last(
+                        lazydb::model::pagination::PageSize::Ten,
+                        25,
+                    ),
+                )
+                .await
+                .unwrap();
+            assert_eq!(last.result.result_sets[0].rows.len(), 5);
+            assert_eq!(last.result.result_sets[0].rows[0][0], CellValue::Integer(5));
+            assert_eq!(
+                last.pagination.total,
+                lazydb::model::pagination::TotalRows::Exact(25)
+            );
+
+            let filtered_options = lazydb::model::relation::RelationPreviewOptions {
+                where_clause: Some("[id] >= 11".to_owned()),
+                ..options.clone()
+            };
+            let filtered = database
+                .preview_relation_with_scope(
+                    &relation,
+                    &scope,
+                    &filtered_options,
+                    lazydb::model::pagination::PageRequest::last(
+                        lazydb::model::pagination::PageSize::Ten,
+                        25,
+                    ),
+                )
+                .await
+                .unwrap();
+            assert_eq!(filtered.result.result_sets[0].rows.len(), 5);
+            assert_eq!(filtered.result.result_sets[0].rows[0][0], CellValue::Integer(15));
+            assert_eq!(filtered.pagination.offset, 10);
+            assert!(!filtered.pagination.has_next);
+            assert_eq!(
+                filtered.pagination.total,
+                lazydb::model::pagination::TotalRows::Exact(15)
+            );
+
+            // Preserve the three-component input previously accepted by previews.
+            let legacy_relation = CatalogId::new(
+                imported.profile.id,
+                relation.kind,
+                relation.native_path[..3].to_vec(),
+            );
+            let legacy = database
+                .preview_relation_with_scope(
+                    &legacy_relation,
+                    &scope,
+                    &options,
+                    lazydb::model::pagination::PageRequest::first(
+                        lazydb::model::pagination::PageSize::Ten,
+                    ),
+                )
+                .await
+                .unwrap();
+            assert_eq!(legacy.result.result_sets[0].rows.len(), 10);
+            assert_eq!(legacy.result.result_sets[0].rows[0][0], CellValue::Integer(25));
+        }
+    })
+    .catch_unwind()
+    .await;
+
+    let cleanup = database
         .execute(&format!(
-            "DROP TABLE {quoted_schema}.{quoted_table}; DROP SCHEMA {quoted_schema};"
+            "DROP VIEW IF EXISTS {quoted_schema}.{quoted_view}; DROP TABLE IF EXISTS {quoted_schema}.{quoted_table}; IF SCHEMA_ID({}) IS NOT NULL EXEC({});",
+            sqlserver_literal(&schema),
+            sqlserver_literal(&format!("DROP SCHEMA {quoted_schema};")),
         ))
-        .await
-        .unwrap();
+        .await;
     database.close().await;
+    if let Err(panic) = result {
+        if let Err(error) = cleanup {
+            eprintln!("SQL Server relation preview cleanup failed: {error}");
+        }
+        std::panic::resume_unwind(panic);
+    }
+    cleanup.unwrap();
 }
 
 fn sqlserver_catalog_request(
