@@ -3884,8 +3884,8 @@ fn database_name(id: &CatalogId, target: &CatalogTarget) -> Result<String, Datab
 /// Splits the relation names every SQL Server relation consumer needs.
 ///
 /// `load_object_page` builds relation ids as `[database, schema, name, object_id]`,
-/// but three-component ids stay valid: they were accepted before the object id was
-/// appended, and the object id is not needed to address a relation.
+/// but the preview also accepts its previously supported three-component input.
+/// The object id is not needed to address a relation by name.
 fn relation_names(relation: &CatalogId) -> Option<(&str, &str, &str)> {
     match relation.native_path.as_slice() {
         [database, schema, name] | [database, schema, name, _]
@@ -4619,7 +4619,7 @@ mod tests {
             ["app", "dbo", "orders"],
         );
         assert_eq!(super::relation_path(&shorter_path), None);
-        // Three-component ids were valid before the catalog appended the object id.
+        // Preserve the three-component input previously accepted by previews.
         assert_eq!(
             super::relation_names(&shorter_path),
             Some(("app", "dbo", "orders"))
