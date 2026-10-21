@@ -207,8 +207,9 @@ jobs:
 
   mongodb:
     name: MongoDB replica set and standalone integration
-    runs-on: ubuntu-24.04
-    timeout-minutes: 30
+    # MongoDB 8.0 rejects newer Azure kernels: actions/runner-images#15005.
+    runs-on: ubuntu-22.04
+    timeout-minutes: 45
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with: { persist-credentials: false }
@@ -224,6 +225,8 @@ jobs:
             if [ "$SECONDS" -ge "$container_wait_deadline" ]; then echo "MongoDB replica set initialization timed out" >&2; exit 1; fi
             sleep 2
           done
+      - name: Build MongoDB integration tests
+        run: cargo +1.94.0 test --locked --test mongodb_connection --test mongodb_catalog --test mongodb_cursor --test mongodb_console --test mongodb_transactions --test mongodb_cancellation --test mongodb_mutation --test mongodb_management --test mongodb_monitoring --test mongodb_principals --no-run
       - name: MongoDB integration tests
         env:
           LAZYDB_REQUIRE_DATABASE_TESTS: "1"
