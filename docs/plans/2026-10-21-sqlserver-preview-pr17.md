@@ -44,10 +44,12 @@ Add an Unreleased / Fixed entry linking PR #17 and issue #16 and describing rest
 1. Verify contributor-branch push access before publishing. Although `maintainerCanModify` is true, both SSH and HTTPS dry-run pushes were denied by GitHub, so use an upstream companion PR without rewriting the contributor branch.
 2. Push this branch and open a companion PR describing the regression coverage and cleanup. It initially includes PR #17's commits so CI validates the complete proposed change.
 3. Approve PR #17's existing Actions run for its exact head and inspect its live SQL Server adapter and transaction tests. Require the companion PR's complete CI to pass, including the MongoDB prerequisite below; investigate failures without bypassing checks.
-4. Merge the companion PR with a merge commit at its validated head, preserving the contributor's original commits. The original PR's head is then reachable from the default branch and GitHub can mark PR #17 as indirectly merged.
-5. Verify both PR states, the original commits' ancestry, and automatic closure of issue #16 through the companion PR's `Fixes #16` reference.
+4. After the complete proposed tree passes CI, merge the original PR #17 at its exact validated head with a merge commit, preserving the contributor's original commits. Its MongoDB infrastructure failure is covered by the companion branch's validated CI repair.
+5. Confirm the companion PR then contains only the maintainer's test, cleanup, documentation, and CI changes. Merge that follow-up at its validated head, and verify both PR states, the original commits' ancestry, and closure of issue #16.
 6. Keep the original workspace's unrelated local commits intact when synchronizing the completed change.
 
 ### Confirmed CI prerequisite
 
 PR #17's approved CI run fails before MongoDB tests start: MongoDB 8.0 exits with fatal ID 12257600 on the upgraded Azure kernel. The GitHub runner team confirms the incompatibility and recommends Ubuntu 22.04 in `actions/runner-images#15005`. Change only the MongoDB job's `runs-on` in `.github/workflows/ci.yml` to `ubuntu-22.04`, preserving MongoDB 8.0 and all test commands. Validate the workflow and require the companion PR's complete CI to pass; retain the original run's infrastructure failure in the validation record.
+
+The first companion run confirms healthy MongoDB fixtures, but the test step times out with exit 124 while compiling bundled DuckDB and LazyDB, before running any test. Add a separate `--no-run` build step for the identical ten test targets, following the PostgreSQL job's existing pattern. Retain the 15-minute execution timeout and increase only the MongoDB job budget to 45 minutes to cover the cold build and execution separately.
