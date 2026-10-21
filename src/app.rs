@@ -24349,8 +24349,6 @@ impl App {
                         .map(|entry| entry.id.clone())
                         .collect();
                 }
-                let staged = staged;
-                let staged_groups = staged_groups;
                 let reconcile_result = match &request.key.target {
                     CatalogTarget::Groups { schema } => {
                         next_explorer.reconcile_catalog_groups(schema, staged_groups.clone())
