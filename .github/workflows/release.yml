@@ -73,6 +73,7 @@ jobs:
         uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2
         with:
           shared-key: ci-ubuntu-24.04
+          cmd-format: sh scripts/ci/rust-cache-command.sh {0}
           cache-bin: false
           cache-targets: true
           save-if: false
@@ -122,6 +123,7 @@ jobs:
         uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2
         with:
           shared-key: release-${{ matrix.os }}-${{ matrix.target }}
+          cmd-format: sh scripts/ci/rust-cache-command.sh {0}
           cache-bin: false
           cache-targets: true
           cache-on-failure: true
