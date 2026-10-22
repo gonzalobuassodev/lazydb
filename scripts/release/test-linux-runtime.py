@@ -192,6 +192,7 @@ class RuntimeScannerContractTests(unittest.TestCase):
     def test_policy_rejects_glibc_and_needed_library_drift(self):
         target = "x86_64-unknown-linux-gnu"
         parsed = self.parse(target)
+        parsed["needed"].extend(["ld-linux-x86-64.so.2", "libstdc++.so.6"])
         elf = {
             "elf": {
                 key: parsed[key]
@@ -207,19 +208,7 @@ class RuntimeScannerContractTests(unittest.TestCase):
             binary = directory / "lazydb"
             binary.write_bytes(b"binary")
             report = self.scanner.build_report("1.2.3", target, archive, binary, elf)
-            policy = {
-                "schema": 1,
-                "targets": {
-                    target: {
-                        "max_glibc": "2.34",
-                        "needed": ["libc.so.6", "libm.so.6"],
-                        "interpreter": "/lib64/ld-linux-x86-64.so.2",
-                        "build_image": "ubuntu:24.04",
-                        "build_image_digest": "sha256:" + "0" * 64,
-                        "validation": "native-linux-ci",
-                    }
-                },
-            }
+            policy = json.loads((ROOT / "scripts/release/linux-compatibility-policy.json").read_text())
             self.scanner.check_policy(report, policy)
             too_old = json.loads(json.dumps(policy))
             too_old["targets"][target]["max_glibc"] = "2.33"
