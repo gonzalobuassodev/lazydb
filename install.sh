@@ -111,13 +111,13 @@ try:
             if libc.get("family") != "glibc" or not re.fullmatch(r"[0-9]+\.[0-9]+", libc.get("min_version", "")):
                 raise ValueError("invalid Linux libc requirement")
             import subprocess
-            version = subprocess.check_output(["getconf", "GNU_LIBC_VERSION"], text=True).split()[-1]
+            glibc_version = subprocess.check_output(["getconf", "GNU_LIBC_VERSION"], text=True).split()[-1]
             try:
-                have = tuple(int(part) for part in version.split("."))
+                have = tuple(int(part) for part in glibc_version.split("."))
                 need = tuple(int(part) for part in libc["min_version"].split("."))
             except ValueError as error:
                 raise ValueError("invalid glibc version returned by getconf") from error
-            if have < need: raise ValueError("Linux runtime requires glibc %s, this system has %s" % (libc["min_version"], version))
+            if have < need: raise ValueError("Linux runtime requires glibc %s, this system has %s" % (libc["min_version"], glibc_version))
         elif "requirements" in asset:
             raise ValueError("unexpected asset requirements")
     elif "requirements" in asset:

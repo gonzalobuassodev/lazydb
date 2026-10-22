@@ -127,6 +127,34 @@ cat > "$TMP/bin/getconf" <<'SH'
 if [ "${FIXTURE_GLIBC_VERSION:-2.17}" = invalid ]; then printf '%s\n' 'glibc unknown'; else printf 'glibc %s\n' "${FIXTURE_GLIBC_VERSION:-2.17}"; fi
 SH
 chmod 755 "$TMP/bin/getconf"
+for installer in "$TMP/pages/install.sh" "$ROOT/install.sh"; do
+    for glibc_version in 2.34 2.40; do
+        test_home="$TMP/v2-$(basename "$(dirname "$installer")")-$glibc_version"
+        if ! HOME="$test_home" LAZYDB_CONFIG_HOME="$test_home/config" \
+            LAZYDB_INSTALL_TEST_LOG="$test_home/downloads" FIXTURE_V2_STATUS=200 \
+            FIXTURE_GLIBC_VERSION="$glibc_version" \
+            sh "$installer" --version 1.2.3 --install-dir "$test_home/bin" --no-modify-path >"$TMP/v2-output" 2>&1; then
+            printf 'v2 installer failed with compatible glibc %s: %s\n' "$glibc_version" "$installer" >&2
+            cat "$TMP/v2-output" >&2
+            exit 1
+        fi
+        python3 - "$test_home" <<'PY'
+import json,subprocess,sys
+from pathlib import Path
+home=Path(sys.argv[1])
+state=json.loads((home/'config/install.json').read_text())
+assert state['version'] == '1.2.3' and state['channel'] == 'stable'
+assert state['target'] == 'x86_64-unknown-linux-gnu'
+assert state['path'] == str(home/'bin/lazydb')
+assert (home/'config/current').resolve() == (home/'config/releases/1.2.3').resolve()
+assert json.loads(subprocess.check_output([str(home/'bin/lazydb'),'version','--json'],text=True))['version'] == '1.2.3'
+assert (home/'downloads').read_text().splitlines() == [
+    'https://fixture/channels/v2/stable.json',
+    'https://github.com/yelog/lazydb/releases/download/v1.2.3/lazydb_1.2.3_x86_64-unknown-linux-gnu.tar.xz',
+]
+PY
+    done
+done
 if HOME="$TMP/incompatible-home" LAZYDB_CONFIG_HOME="$TMP/incompatible-home/config" LAZYDB_INSTALL_TEST_LOG="$TMP/incompatible-downloads" FIXTURE_V2_STATUS=200 sh "$TMP/pages/install.sh" --install-dir "$TMP/incompatible-install" >"$TMP/incompatible-output" 2>&1; then
     printf '%s\n' 'installer accepted an incompatible glibc runtime' >&2; exit 1
 fi
@@ -134,12 +162,7 @@ grep -q 'requires glibc' "$TMP/incompatible-output"
 [ "$(wc -l < "$TMP/incompatible-downloads" | tr -d ' ')" = 1 ]
 [ ! -e "$TMP/incompatible-home/config/install.json" ]
 [ ! -e "$TMP/incompatible-home/config/current" ]
-cat > "$TMP/bin/getconf" <<'SH'
-#!/bin/sh
-printf '%s\n' 'glibc 2.9'
-SH
-chmod 755 "$TMP/bin/getconf"
-if HOME="$TMP/numeric-home" LAZYDB_CONFIG_HOME="$TMP/numeric-home/config" LAZYDB_INSTALL_TEST_LOG="$TMP/numeric-downloads" FIXTURE_V2_STATUS=200 sh "$TMP/pages/install.sh" --install-dir "$TMP/numeric-install" >"$TMP/numeric-output" 2>&1; then
+if HOME="$TMP/numeric-home" LAZYDB_CONFIG_HOME="$TMP/numeric-home/config" LAZYDB_INSTALL_TEST_LOG="$TMP/numeric-downloads" FIXTURE_V2_STATUS=200 FIXTURE_GLIBC_VERSION=2.9 sh "$TMP/pages/install.sh" --install-dir "$TMP/numeric-install" >"$TMP/numeric-output" 2>&1; then
     printf '%s\n' 'installer accepted glibc 2.9 for a 2.34 requirement' >&2; exit 1
 fi
 [ "$(wc -l < "$TMP/numeric-downloads" | tr -d ' ')" = 1 ]
@@ -147,6 +170,7 @@ fi
 if HOME="$TMP/malformed-libc-home" LAZYDB_CONFIG_HOME="$TMP/malformed-libc-home/config" LAZYDB_INSTALL_TEST_LOG="$TMP/malformed-libc-downloads" FIXTURE_V2_STATUS=200 FIXTURE_GLIBC_VERSION=invalid sh "$TMP/pages/install.sh" --install-dir "$TMP/malformed-libc-install" >"$TMP/malformed-libc-output" 2>&1; then
     printf '%s\n' 'installer accepted an unparseable glibc version' >&2; exit 1
 fi
+grep -q 'invalid glibc version returned by getconf' "$TMP/malformed-libc-output"
 [ "$(wc -l < "$TMP/malformed-libc-downloads" | tr -d ' ')" = 1 ]
 [ ! -e "$TMP/malformed-libc-home/config/install.json" ]
 HOME="$TMP/home" sh "$TMP/pages/install.sh" --install-dir "$TMP/install" >/dev/null
