@@ -1,7 +1,7 @@
 #!/bin/sh
 set -eu
 [ "$#" -eq 5 ] || { echo 'usage: smoke-linux-runtime.sh ARCHIVE REPORT VERSION TARGET EVIDENCE_OUTPUT' >&2; exit 2; }
-SCRIPT_DIR=$(CDPATH= cd -- "$(dirname -- "$0")" && pwd)
+SCRIPT_DIR=$(CDPATH='' cd -- "$(dirname -- "$0")" && pwd)
 archive=$1 report=$2 version=$3 target=$4 evidence=$5
 python3 "$SCRIPT_DIR/linux-runtime.py" verify-report --report "$report" --archive "$archive" --target "$target" --version "$version"
 case "$target" in
@@ -16,7 +16,7 @@ root="lazydb_${version}_${target}"
 tar -xJf "$archive" -C "$tmp" "$root/lazydb"
 binary="$tmp/$root/lazydb"
 chmod 0755 "$binary"
-mkdir -p "$tmp/home" "$tmp/config" "$tmp/data" "$tmp/project"
+mkdir -p "$tmp/home" "$tmp/config" "$tmp/data" "$tmp/project/.git"
 HOME="$tmp/home" XDG_CONFIG_HOME="$tmp/config" XDG_DATA_HOME="$tmp/data" "$binary" version --json > "$tmp/version.json"
 python3 - "$tmp/version.json" "$version" <<'PY'
 import json,sys
@@ -31,17 +31,16 @@ import json,sys
 report=json.load(open(sys.argv[1], encoding="utf-8"))
 if not isinstance(report,dict) or 'ok' not in report: raise SystemExit("doctor returned an unexpected report")
 PY
-HOME="$tmp/home" XDG_CONFIG_HOME="$tmp/config" XDG_DATA_HOME="$tmp/data" "$binary" agent execute --sql 'SELECT 1 AS value' --url "sqlite://$tmp/smoke.db" --json > "$tmp/query.json"
+HOME="$tmp/home" LAZYDB_CONFIG_HOME="$tmp/config" XDG_CONFIG_HOME="$tmp/config" XDG_DATA_HOME="$tmp/data" \
+  "$binary" connections add --name runtime-smoke --url 'sqlite::memory:' --scope global --project "$tmp/project" --json > "$tmp/connection.json"
+HOME="$tmp/home" LAZYDB_CONFIG_HOME="$tmp/config" XDG_CONFIG_HOME="$tmp/config" XDG_DATA_HOME="$tmp/data" \
+  "$binary" agent query --connection runtime-smoke --project "$tmp/project" --sql 'SELECT 1 AS value' > "$tmp/query.json"
 python3 - "$tmp/query.json" <<'PY'
 import json,sys
 value=json.load(open(sys.argv[1], encoding="utf-8"))
-def find_one(node):
-    if isinstance(node, dict):
-        if node.get("value") == 1: return True
-        return any(find_one(child) for child in node.values())
-    if isinstance(node, list): return any(find_one(child) for child in node)
-    return False
-if not find_one(value): raise SystemExit("SQLite smoke query did not return value=1")
+results=value.get("outcome",{}).get("result_sets",[])
+if len(results) != 1 or [column.get("name") for column in results[0].get("columns",[])] != ["value"] or results[0].get("rows") != [[{"Integer":1}]]:
+    raise SystemExit("SQLite smoke query did not return value=1")
 PY
 update_status=0
 HOME="$tmp/home" XDG_CONFIG_HOME="$tmp/config" XDG_DATA_HOME="$tmp/data" \
