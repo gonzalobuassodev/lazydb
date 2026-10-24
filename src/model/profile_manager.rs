@@ -439,7 +439,9 @@ impl ProfileDraft {
             DatabaseKind::Oracle => ("localhost", "1521", "", SslMode::Prefer),
             DatabaseKind::SqlServer => ("localhost", "1433", "dbo", SslMode::Prefer),
             DatabaseKind::Sqlite | DatabaseKind::DuckDb => ("", "", "main", SslMode::Disable),
-            DatabaseKind::Redis => ("localhost", "6379", "", SslMode::Disable),
+            DatabaseKind::Redis | DatabaseKind::Valkey => {
+                ("localhost", "6379", "", SslMode::Disable)
+            }
             DatabaseKind::MongoDb => ("localhost", "27017", "", SslMode::Prefer),
             DatabaseKind::ClickHouse => ("localhost", "8123", "", SslMode::Disable),
         };
@@ -481,7 +483,7 @@ impl ProfileDraft {
             credential_revision: 0,
             system_credential_availability: SecretStoreAvailability::Unavailable,
         };
-        if kind == DatabaseKind::Redis {
+        if kind.is_redis_compatible() {
             draft.database.set("0");
         } else if kind == DatabaseKind::ClickHouse {
             draft.database.set("default");
@@ -1043,7 +1045,7 @@ impl ProfileDraft {
             (DatabaseKind::DuckDb, _) => &DUCKDB_FIELDS,
             (DatabaseKind::MariaDb, _) => &MYSQL_FIELDS,
             (DatabaseKind::Oracle, _) => &ORACLE_FIELDS,
-            (DatabaseKind::Redis, _) => &REDIS_FIELDS,
+            (DatabaseKind::Redis | DatabaseKind::Valkey, _) => &REDIS_FIELDS,
             (DatabaseKind::MongoDb, _) => &MONGODB_FIELDS,
             (DatabaseKind::ClickHouse, _) => &MYSQL_FIELDS,
         }
@@ -1192,17 +1194,17 @@ impl ProfileDraft {
                     path,
                 )
             }
-            DatabaseKind::Redis => {
+            DatabaseKind::Redis | DatabaseKind::Valkey => {
                 let database = required(
                     &self.database,
                     ProfileField::Database,
-                    "Redis database is required",
+                    "Key-value database number is required",
                 )?
                 .parse::<u32>()
                 .map_err(|_| {
                     ProfileValidationError::new(
                         ProfileField::Database,
-                        "Redis database must be a non-negative integer",
+                        "Database number must be a non-negative integer",
                     )
                 })?;
                 let port = self.port.value().trim().parse::<u16>().map_err(|_| {
@@ -1425,7 +1427,7 @@ impl ProfileDraft {
                 self.duckdb_path.value(),
                 Some(optional(&self.schema).unwrap_or_else(|| "main".into())),
             ),
-            DatabaseKind::Redis => (self.database.value(), None),
+            DatabaseKind::Redis | DatabaseKind::Valkey => (self.database.value(), None),
             DatabaseKind::MongoDb => (self.database.value(), None),
             DatabaseKind::ClickHouse => (
                 self.database.value(),
@@ -1532,7 +1534,11 @@ impl ProfileDraft {
             self.catalog_scope_mode = CatalogScopeMode::Derived;
         }
         self.kind = kind;
-        self.url_format = ConnectionUrlFormat::default_for(kind);
+        self.url_format = if kind.is_redis_compatible() {
+            redis_compatible_url_format(kind, self.ssl_mode)
+        } else {
+            ConnectionUrlFormat::default_for(kind)
+        };
         match kind {
             DatabaseKind::Postgres => {
                 if self.host.value().trim().is_empty() {
@@ -1577,14 +1583,17 @@ impl ProfileDraft {
                 self.port.set("");
                 self.user.set("");
             }
-            DatabaseKind::Redis => {
+            DatabaseKind::Redis | DatabaseKind::Valkey => {
                 if self.host.value().trim().is_empty() {
                     self.host.set("localhost");
                 }
                 if self.database.value().trim().parse::<u32>().is_err() {
                     self.database.set("0");
                 }
-                if self.ssl_mode == SslMode::Prefer {
+                if matches!(
+                    self.ssl_mode,
+                    SslMode::Prefer | SslMode::VerifyCa | SslMode::VerifyFull
+                ) {
                     self.ssl_mode = SslMode::Disable;
                 }
             }
@@ -1624,7 +1633,7 @@ impl ProfileDraft {
                 if self.user.value().trim().is_empty() {
                     self.user.set("default");
                 }
-                if previous == DatabaseKind::Redis {
+                if previous.is_redis_compatible() {
                     self.ssl_mode = SslMode::Disable;
                 }
             }
@@ -1775,7 +1784,7 @@ impl ProfileDraft {
                     None,
                 )
             }
-            DatabaseKind::Redis => {
+            DatabaseKind::Redis | DatabaseKind::Valkey => {
                 let host = required(&self.host, ProfileField::Host, "host is required")?;
                 let port = self.port.value().trim().parse::<u16>().map_err(|_| {
                     ProfileValidationError::new(
@@ -1792,7 +1801,7 @@ impl ProfileDraft {
                 let database = self.database.value().trim().parse::<u32>().map_err(|_| {
                     ProfileValidationError::new(
                         ProfileField::Database,
-                        "Redis database must be a non-negative integer",
+                        "Database number must be a non-negative integer",
                     )
                 })?;
                 (
@@ -2572,17 +2581,21 @@ impl ProfileManagerState {
                 draft.refresh_url();
             }
             ProfileField::SslMode => {
-                draft.ssl_mode = cycle_value(
-                    draft.ssl_mode,
+                let choices: &[SslMode] = if draft.kind.is_redis_compatible() {
+                    &[SslMode::Disable, SslMode::Require]
+                } else {
                     &[
                         SslMode::Disable,
                         SslMode::Prefer,
                         SslMode::Require,
                         SslMode::VerifyCa,
                         SslMode::VerifyFull,
-                    ],
-                    delta,
-                );
+                    ]
+                };
+                draft.ssl_mode = cycle_value(draft.ssl_mode, choices, delta);
+                if draft.kind.is_redis_compatible() {
+                    draft.url_format = redis_compatible_url_format(draft.kind, draft.ssl_mode);
+                }
                 draft.invalidate_catalog_discovery();
                 draft.refresh_url();
             }
@@ -2687,9 +2700,19 @@ fn default_port(kind: DatabaseKind) -> Option<u16> {
         DatabaseKind::Oracle => Some(1521),
         DatabaseKind::SqlServer => Some(1433),
         DatabaseKind::Sqlite | DatabaseKind::DuckDb => None,
-        DatabaseKind::Redis => Some(6379),
+        DatabaseKind::Redis | DatabaseKind::Valkey => Some(6379),
         DatabaseKind::MongoDb => Some(27017),
         DatabaseKind::ClickHouse => Some(8123),
+    }
+}
+
+fn redis_compatible_url_format(kind: DatabaseKind, ssl_mode: SslMode) -> ConnectionUrlFormat {
+    match (kind, ssl_mode) {
+        (DatabaseKind::Redis, SslMode::Disable | SslMode::Prefer) => ConnectionUrlFormat::Redis,
+        (DatabaseKind::Redis, _) => ConnectionUrlFormat::RedisTls,
+        (DatabaseKind::Valkey, SslMode::Disable | SslMode::Prefer) => ConnectionUrlFormat::Valkey,
+        (DatabaseKind::Valkey, _) => ConnectionUrlFormat::ValkeyTls,
+        _ => unreachable!("expected a Redis-compatible database kind"),
     }
 }
 

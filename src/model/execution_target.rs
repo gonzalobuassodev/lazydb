@@ -217,7 +217,7 @@ impl ExecutionTarget {
             DatabaseKind::Postgres | DatabaseKind::SqlServer | DatabaseKind::Oracle => {
                 profile.default_schema.clone()
             }
-            DatabaseKind::Redis | DatabaseKind::MongoDb => None,
+            DatabaseKind::Redis | DatabaseKind::Valkey | DatabaseKind::MongoDb => None,
         };
         Self {
             profile_id: profile.id,
@@ -256,7 +256,9 @@ impl ExecutionTarget {
                 .schema
                 .as_deref()
                 .is_none_or(|schema| profile.catalog_scope.allows_schema(&self.database, schema)),
-            DatabaseKind::Redis | DatabaseKind::MongoDb => self.schema.is_none(),
+            DatabaseKind::Redis | DatabaseKind::Valkey | DatabaseKind::MongoDb => {
+                self.schema.is_none()
+            }
             DatabaseKind::ClickHouse => {
                 self.schema.as_deref() == Some(self.database.as_str())
                     && profile
@@ -282,7 +284,7 @@ impl ExecutionTarget {
             }
             DatabaseKind::Sqlite => {}
             DatabaseKind::DuckDb => configured.default_schema = self.schema.clone(),
-            DatabaseKind::Redis | DatabaseKind::MongoDb => {
+            DatabaseKind::Redis | DatabaseKind::Valkey | DatabaseKind::MongoDb => {
                 configured.database = Some(self.database.clone());
                 configured.default_schema = None;
             }

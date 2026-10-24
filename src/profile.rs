@@ -20,11 +20,16 @@ pub enum DatabaseKind {
     Sqlite,
     DuckDb,
     Redis,
+    Valkey,
     MongoDb,
     ClickHouse,
 }
 
 impl DatabaseKind {
+    pub const fn is_redis_compatible(self) -> bool {
+        matches!(self, Self::Redis | Self::Valkey)
+    }
+
     pub fn is_relational(self) -> bool {
         matches!(
             self,
@@ -60,6 +65,8 @@ pub enum ConnectionUrlFormat {
     DuckDb,
     Redis,
     RedisTls,
+    Valkey,
+    ValkeyTls,
     MongoDb,
     MongoDbSrv,
     ClickHouse,
@@ -77,6 +84,7 @@ impl ConnectionUrlFormat {
             DatabaseKind::Sqlite => Self::Sqlite,
             DatabaseKind::DuckDb => Self::DuckDb,
             DatabaseKind::Redis => Self::Redis,
+            DatabaseKind::Valkey => Self::Valkey,
             DatabaseKind::MongoDb => Self::MongoDb,
             DatabaseKind::ClickHouse => Self::ClickHouse,
         }
@@ -100,6 +108,7 @@ impl ConnectionUrlFormat {
                     DatabaseKind::Sqlite
                 )
                 | (Self::Redis | Self::RedisTls, DatabaseKind::Redis)
+                | (Self::Valkey | Self::ValkeyTls, DatabaseKind::Valkey)
                 | (Self::MongoDb | Self::MongoDbSrv, DatabaseKind::MongoDb)
                 | (
                     Self::ClickHouse | Self::ClickHouseTls,
@@ -119,6 +128,7 @@ impl ConnectionUrlFormat {
             DatabaseKind::Sqlite => &[Self::Sqlite, Self::FileUri, Self::JdbcSqlite],
             DatabaseKind::DuckDb => &[Self::DuckDb],
             DatabaseKind::Redis => &[Self::Redis, Self::RedisTls],
+            DatabaseKind::Valkey => &[Self::Valkey, Self::ValkeyTls],
             DatabaseKind::MongoDb => &[Self::MongoDb, Self::MongoDbSrv],
             DatabaseKind::ClickHouse => &[Self::ClickHouse, Self::ClickHouseTls],
         }
@@ -163,7 +173,7 @@ pub enum CatalogScopeValidationError {
 
 impl CatalogScope {
     pub fn for_profile(kind: DatabaseKind, database: &str, default_schema: Option<&str>) -> Self {
-        if kind == DatabaseKind::Redis {
+        if kind.is_redis_compatible() {
             return Self {
                 databases: CatalogSelection::All,
             };
@@ -786,6 +796,8 @@ pub fn parse_connection_url(input: &str) -> Result<ParsedConnectionUrl, ProfileE
         ("mssql", false) => (DatabaseKind::SqlServer, ConnectionUrlFormat::MsSql),
         ("redis", false) => (DatabaseKind::Redis, ConnectionUrlFormat::Redis),
         ("rediss", false) => (DatabaseKind::Redis, ConnectionUrlFormat::RedisTls),
+        ("valkey", false) => (DatabaseKind::Valkey, ConnectionUrlFormat::Valkey),
+        ("valkeys", false) => (DatabaseKind::Valkey, ConnectionUrlFormat::ValkeyTls),
         ("clickhouse", false) => (DatabaseKind::ClickHouse, ConnectionUrlFormat::ClickHouse),
         ("clickhouses", false) => (DatabaseKind::ClickHouse, ConnectionUrlFormat::ClickHouseTls),
         (scheme, _) => return Err(ProfileError::UnsupportedScheme(scheme.to_owned())),
@@ -1100,7 +1112,7 @@ fn parse_server_url(
 ) -> Result<ParsedConnectionUrl, ProfileError> {
     let host = url.host_str().ok_or(ProfileError::MissingHost)?.to_owned();
     let database = decode(url.path().trim_start_matches('/'));
-    let database = if kind == DatabaseKind::Redis {
+    let database = if kind.is_redis_compatible() {
         let database = if database.is_empty() { "0" } else { &database };
         let number = database
             .parse::<u32>()
@@ -1137,8 +1149,11 @@ fn parse_server_url(
         } else {
             SslMode::Disable
         }
-    } else if kind == DatabaseKind::Redis {
-        if format == ConnectionUrlFormat::RedisTls {
+    } else if kind.is_redis_compatible() {
+        if matches!(
+            format,
+            ConnectionUrlFormat::RedisTls | ConnectionUrlFormat::ValkeyTls
+        ) {
             SslMode::Require
         } else {
             SslMode::Disable
@@ -1221,7 +1236,7 @@ fn parse_server_url(
         DatabaseKind::Sqlite | DatabaseKind::DuckDb => {
             unreachable!("file database URL cannot be a server URL")
         }
-        DatabaseKind::Redis => 6379,
+        DatabaseKind::Redis | DatabaseKind::Valkey => 6379,
         DatabaseKind::MongoDb => unreachable!("MongoDB has its own multi-seed URL parser"),
         DatabaseKind::ClickHouse => match format {
             ConnectionUrlFormat::ClickHouseTls if url.port().is_none() => 8443,
@@ -1549,6 +1564,8 @@ pub fn format_connection_url(
         ConnectionUrlFormat::MsSql => "mssql",
         ConnectionUrlFormat::Redis => "redis",
         ConnectionUrlFormat::RedisTls => "rediss",
+        ConnectionUrlFormat::Valkey => "valkey",
+        ConnectionUrlFormat::ValkeyTls => "valkeys",
         ConnectionUrlFormat::ClickHouse => "clickhouse",
         ConnectionUrlFormat::ClickHouseTls => "clickhouses",
         _ => return Err(ProfileError::IncompatibleFormat),
@@ -1607,8 +1624,8 @@ pub fn format_connection_url(
         query.push(format!("sslmode={}", ssl_mode_value(profile.ssl_mode)));
     } else if matches!(profile.kind, DatabaseKind::MySql | DatabaseKind::MariaDb) {
         query.push(format!("sslMode={}", ssl_mode_value(profile.ssl_mode)));
-    } else if profile.kind == DatabaseKind::Redis {
-        // The redis/rediss scheme is the TLS source of truth.
+    } else if profile.kind.is_redis_compatible() {
+        // The redis/rediss and valkey/valkeys schemes are the TLS source of truth.
     } else if profile.kind == DatabaseKind::ClickHouse {
         if (format == ConnectionUrlFormat::ClickHouseTls) == (profile.ssl_mode == SslMode::Disable)
         {

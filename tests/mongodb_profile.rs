@@ -42,6 +42,29 @@ fn mongodb_is_registered_as_a_document_driver_without_sql_capabilities() {
 }
 
 #[test]
+fn valkey_is_registered_as_a_key_value_driver_without_sql_catalog() {
+    assert!(DRIVERS.iter().any(|driver| {
+        driver.kind == DatabaseKind::Valkey
+            && driver.name == "valkey"
+            && driver.display_name == "Valkey"
+    }));
+    assert!(
+        drivers_in(DatabaseCategory::NonRelational)
+            .any(|driver| driver.kind == DatabaseKind::Valkey)
+    );
+    assert_eq!(
+        interaction_model(DatabaseKind::Valkey),
+        InteractionModel::KeyValue
+    );
+    assert_eq!(
+        SqlDialect::try_for_database_kind(DatabaseKind::Valkey),
+        None
+    );
+    let serialized = serde_json::to_string(&DatabaseKind::Valkey).unwrap();
+    assert_eq!(serialized, "\"valkey\"");
+}
+
+#[test]
 fn mongodb_uri_import_preserves_seeds_options_and_transient_credentials() {
     let imported = import_connection_url(
         "mongodb://alice:p%40ss@db-a:27017,db-b:27018/app?authSource=admin&replicaSet=rs0&readPreferenceTags=dc%3Awest&readPreferenceTags=use%3Areporting",

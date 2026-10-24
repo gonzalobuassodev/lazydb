@@ -1,4 +1,10 @@
-# Redis Browser
+# Redis-Compatible Key/Value Browser
+
+This browser is available for Redis and Valkey profiles. The user-facing driver
+and connection identity remain distinct (`redis://`/`rediss://` versus
+`valkey://`/`valkeys://`), while key discovery, previews, and mutations use the
+shared Redis-compatible RESP adapter. Valkey-specific Cluster/Sentinel routing
+and module types are not implemented.
 
 ## Loading modes
 

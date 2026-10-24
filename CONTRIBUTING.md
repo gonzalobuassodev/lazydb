@@ -24,6 +24,24 @@ LAZYDB_TEST_MYSQL_URL='mysql://user:password@localhost:3306/database' \
   cargo test --test mysql_adapter
 ```
 
+The isolated Valkey 8.1.10 fixture (`valkey/valkey@sha256:081c2f5cb575efc901aa80ff9cdbd1ec6a301682fd35e1ebb4b0990a4a4a8507`) binds only to loopback port 6380 and uses a dedicated volume. Start and validate it with:
+
+```bash
+docker compose -f docker-compose.valkey.yml config --quiet
+docker compose -f docker-compose.valkey.yml up -d --wait
+LAZYDB_TEST_VALKEY_URL='valkey://127.0.0.1:6380/0' \
+  cargo test --locked --test valkey_adapter -- --ignored --nocapture --test-threads=1
+LAZYDB_TEST_REDIS_URL='redis://127.0.0.1:6380/0' \
+  cargo test --locked --test redis_mutation -- --ignored --nocapture --test-threads=1
+docker compose -f docker-compose.valkey.yml down --volumes
+```
+
+Only run these commands against the dedicated fixture: tests create uniquely
+prefixed keys and must never run `FLUSHDB` or `FLUSHALL` against a user server.
+The Valkey adapter suite uses the application `valkey://` URL; the existing
+Redis mutation regression uses the same server through the Redis-compatible
+`redis://` transport URL.
+
 The PostgreSQL adapter mutation coverage is intentionally serialized and uses
 unique, temporary schema/object names. Run it directly with:
 

@@ -242,6 +242,49 @@ fn redis_urls_reject_invalid_database_numbers_and_unknown_options() {
 }
 
 #[test]
+fn valkey_kind_and_url_formats_serialize_and_remain_distinct_from_redis() {
+    #[derive(serde::Serialize)]
+    struct KindFixture {
+        kind: DatabaseKind,
+    }
+
+    assert_eq!(
+        toml::to_string(&KindFixture {
+            kind: DatabaseKind::Valkey,
+        })
+        .unwrap()
+        .trim(),
+        "kind = \"valkey\""
+    );
+    assert_eq!(
+        ConnectionUrlFormat::default_for(DatabaseKind::Valkey),
+        ConnectionUrlFormat::Valkey
+    );
+    assert_eq!(
+        ConnectionUrlFormat::compatible_formats(DatabaseKind::Valkey),
+        &[ConnectionUrlFormat::Valkey, ConnectionUrlFormat::ValkeyTls]
+    );
+    assert!(ConnectionUrlFormat::ValkeyTls.is_compatible(DatabaseKind::Valkey));
+    assert!(!ConnectionUrlFormat::Redis.is_compatible(DatabaseKind::Valkey));
+}
+
+#[test]
+fn valkey_urls_default_and_reject_invalid_database_numbers() {
+    let parsed = parse_connection_url("valkey://localhost").unwrap();
+    assert_eq!(parsed.kind, DatabaseKind::Valkey);
+    assert_eq!(parsed.port, Some(6379));
+    assert_eq!(parsed.database.as_deref(), Some("0"));
+    assert_eq!(parsed.ssl_mode, SslMode::Disable);
+
+    for url in ["valkey://localhost/-1", "valkey://localhost/not-a-db"] {
+        assert!(matches!(
+            parse_connection_url(url),
+            Err(ProfileError::InvalidQueryParameter(_))
+        ));
+    }
+}
+
+#[test]
 fn parses_sql_server_uri_settings_and_tls_modes() {
     let parsed = parse_connection_url(
         "sqlserver://sa:s%40cret@localhost:1444/app?schema=dbo&encrypt=true&trustServerCertificate=false&readOnly=true",

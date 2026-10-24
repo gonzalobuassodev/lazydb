@@ -1440,7 +1440,7 @@ pub(crate) fn classify_column_type(
         | DatabaseKind::Oracle
         | DatabaseKind::Sqlite
         | DatabaseKind::DuckDb => None,
-        DatabaseKind::Redis | DatabaseKind::MongoDb => None,
+        DatabaseKind::Redis | DatabaseKind::Valkey | DatabaseKind::MongoDb => None,
         DatabaseKind::ClickHouse => None,
     }?;
 

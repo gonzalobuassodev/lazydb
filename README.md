@@ -4,8 +4,8 @@
 LazyDB lets you browse schemas, write and run SQL, inspect relations, manage
 connection profiles, and expose project-scoped database access to coding agents
 without leaving your terminal. It is written in Rust and supports PostgreSQL,
-MySQL, MariaDB, Oracle, SQL Server, SQLite, DuckDB, Redis, MongoDB, and ClickHouse. MongoDB uses a
-document explorer, bounded JSON console, and native BSON/EJSON handling; see the
+MySQL, MariaDB, Oracle, SQL Server, SQLite, DuckDB, Redis, Valkey, MongoDB, and
+ClickHouse. MongoDB uses a document explorer, bounded JSON console, and native BSON/EJSON handling; see the
 [MongoDB guide](docs/mongodb.md) for current scope and verification limits.
 
 DuckDB is available as an embedded file or in-memory database. See the
@@ -332,6 +332,7 @@ plugin configuration.
 | SQL Server | SQL Server 2012 or newer | Databases, schemas, tables, views, functions, procedures, sequences, triggers, indexes, keys, foreign keys, and column metadata |
 | SQLite | Native SQLite schema support | Tables, views, indexes, foreign keys, and triggers |
 | Redis | Redis server; non-negative logical database number (server-configured) | Key-space discovery, key type/TTL metadata, strings and collections, bounded value previews, native key/value mutations, and read-only INFO metrics; no SQL catalog |
+| Valkey | Valkey 8.1.10 verified (`valkey/valkey@sha256:081c2f5cb575efc901aa80ff9cdbd1ec6a301682fd35e1ebb4b0990a4a4a8507`); non-negative logical database number (server-configured) | Uses the Redis-compatible key-space browser, typed previews, key/value mutations and INFO metrics; no SQL catalog. Valkey-specific Cluster/Sentinel routing and module types are not implemented |
 
 MariaDB shares the MySQL-compatible transport but has its own product/version
 gates. Current support includes SQL execution, transactions, monitoring,
@@ -344,9 +345,15 @@ paging, relation DDL, and version details.
 
 Oracle uses the native Oracle client rather than SQLx. The default build includes
 the Oracle adapter, but a working Oracle Instant Client is still required at
-runtime. Redis is a supported non-relational driver with a separate browser and
-native command model; SQL Editor, SQL transactions, and relational catalog DDL
-do not apply to Redis.
+runtime. Redis and Valkey are distinct non-relational profiles that share a
+Redis-compatible transport and the key/value browser. Use `redis://` or
+`rediss://` for Redis and `valkey://` or `valkeys://` for Valkey; imported
+credentials are stored through the existing secret policy and are not included
+in exported profile URLs. If copying a Redis-shaped endpoint for a Valkey server,
+select the Valkey driver (or use the Valkey scheme) so the saved product identity
+remains Valkey. SQL Editor, SQL transactions, and relational catalog DDL do not
+apply to either driver. Valkey Cluster/Sentinel routing and Valkey-specific
+module types are not implemented.
 
 ## Coding-Agent Access
 
@@ -544,7 +551,7 @@ notes for current priorities and version-specific changes.
 | Keyboard reference | [`docs/keybindings.md`](docs/keybindings.md) |
 | Coding-agent and MCP access | [`docs/coding-agent-access.md`](docs/coding-agent-access.md) |
 | Omni Bar | [`docs/omni-bar.md`](docs/omni-bar.md) |
-| Redis browser and value preview | [`docs/redis-browser.md`](docs/redis-browser.md), [`docs/redis-value-preview.md`](docs/redis-value-preview.md) |
+| Redis-compatible browser and value preview (Redis / Valkey) | [`docs/redis-browser.md`](docs/redis-browser.md), [`docs/redis-value-preview.md`](docs/redis-value-preview.md) |
 | SQL language server | [`docs/sql-language-server.md`](docs/sql-language-server.md) |
 | Architecture | [`docs/architecture.md`](docs/architecture.md) |
 | Product design | [`docs/plans/2026-08-24-lazydb-design.md`](docs/plans/2026-08-24-lazydb-design.md) |

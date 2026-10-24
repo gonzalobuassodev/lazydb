@@ -62,6 +62,24 @@ fn load_report_classifies_redis_with_future_fields_as_unsupported_configuration(
 }
 
 #[test]
+fn valkey_profile_persists_and_reloads_without_losing_its_kind() {
+    let temp = TempDir::new().unwrap();
+    let path = temp.path().join("connections.toml");
+    let profile = import_connection_url("valkey://localhost:6379/2", Some("valkey"))
+        .unwrap()
+        .profile;
+    ProfileStore::new(path.clone())
+        .save(vec![profile.clone()])
+        .unwrap();
+    let loaded = ProfileStore::new(path).load().unwrap();
+    assert_eq!(loaded.profiles, vec![profile]);
+    assert_eq!(
+        loaded.profiles[0].kind,
+        lazydb::profile::DatabaseKind::Valkey
+    );
+}
+
+#[test]
 fn saving_supported_profiles_does_not_drop_unknown_profile_tables() {
     let temp = TempDir::new().unwrap();
     let path = temp.path().join("connections.toml");

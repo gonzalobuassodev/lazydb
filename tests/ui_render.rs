@@ -7916,6 +7916,7 @@ fn driver_options_use_database_icons_in_each_icon_mode() {
                 DatabaseKind::Sqlite => "SQLite",
                 DatabaseKind::DuckDb => "DuckDB",
                 DatabaseKind::Redis => "Redis",
+                DatabaseKind::Valkey => "Valkey",
                 DatabaseKind::MongoDb => "MongoDB",
                 DatabaseKind::ClickHouse => "ClickHouse",
             };

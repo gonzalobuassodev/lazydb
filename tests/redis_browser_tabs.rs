@@ -293,6 +293,129 @@ fn connect_redis(app: &mut App, profile_id: Uuid, database: &str) {
 }
 
 #[test]
+fn valkey_connection_uses_shared_database_discovery_without_sql_catalog() {
+    let profile = import_connection_url("valkey://localhost:6379/0", Some("valkey"))
+        .unwrap()
+        .profile;
+    let profile_id = profile.id;
+    let mut app = App::new(vec![profile]);
+    let generation = match app.update(Action::RequestConnect(profile_id)).as_slice() {
+        [Command::Connect { generation, .. }] => *generation,
+        commands => panic!("unexpected commands: {commands:?}"),
+    };
+
+    let commands = app.update(Action::ConnectionSucceeded {
+        profile_id,
+        generation,
+        server: lazydb::db::ServerInfo {
+            kind: DatabaseKind::Valkey,
+            version: "8.1.0".into(),
+            database: "0".into(),
+            current_user: None,
+        },
+        mutation_capabilities: Default::default(),
+    });
+
+    assert!(commands.iter().any(|command| matches!(
+        command,
+        Command::DiscoverRedisDatabases { profile_id: id, generation: request_generation }
+            if *id == profile_id && *request_generation == generation
+    )));
+    assert!(
+        !commands
+            .iter()
+            .any(|command| matches!(command, Command::LoadCatalogPage(_)))
+    );
+
+    let discovery = lazydb::db::redis::discovery::RedisDatabaseDiscovery {
+        databases: vec![lazydb::db::redis::discovery::RedisDatabaseInfo {
+            database: 2,
+            keys: Some(1),
+            expires: None,
+        }],
+        completeness: lazydb::db::redis::discovery::RedisDiscoveryCompleteness::Complete,
+        warnings: Vec::new(),
+    };
+    app.update(Action::RedisDatabasesLoaded {
+        profile_id,
+        generation,
+        discovery,
+    });
+    app.explorer
+        .normalized
+        .expanded
+        .insert(lazydb::model::explorer::ExplorerNodeId::Profile(profile_id));
+    let rows = app.explorer.visible();
+    assert!(rows.iter().any(|row| matches!(
+        &row.id,
+        lazydb::model::explorer::ExplorerNodeId::RedisDatabase {
+            profile_id: id,
+            database: 2
+        } if *id == profile_id
+    )));
+}
+
+#[test]
+fn opening_discovered_valkey_database_binds_browser_to_valkey_profile() {
+    let profile = import_connection_url("valkey://localhost:6379/0", Some("valkey"))
+        .unwrap()
+        .profile;
+    let profile_id = profile.id;
+    let mut app = App::new(vec![profile]);
+    let generation = match app.update(Action::RequestConnect(profile_id)).as_slice() {
+        [Command::Connect { generation, .. }] => *generation,
+        commands => panic!("unexpected commands: {commands:?}"),
+    };
+    app.update(Action::ConnectionSucceeded {
+        profile_id,
+        generation,
+        server: lazydb::db::ServerInfo {
+            kind: DatabaseKind::Valkey,
+            version: "8.1.0".into(),
+            database: "0".into(),
+            current_user: None,
+        },
+        mutation_capabilities: Default::default(),
+    });
+
+    let commands = app.update(Action::OpenRedisDatabase {
+        profile_id,
+        database: 2,
+    });
+    let generation = commands
+        .iter()
+        .find_map(|command| match command {
+            Command::Connect {
+                generation, target, ..
+            } if target.profile_id == profile_id && target.database == "2" => Some(*generation),
+            _ => None,
+        })
+        .expect("opening a different logical database should connect to DB 2");
+    let commands = app.update(Action::ConnectionSucceeded {
+        profile_id,
+        generation,
+        server: lazydb::db::ServerInfo {
+            kind: DatabaseKind::Valkey,
+            version: "8.1.0".into(),
+            database: "2".into(),
+            current_user: None,
+        },
+        mutation_capabilities: Default::default(),
+    });
+    assert!(commands.iter().any(|command| matches!(
+        command,
+        Command::ScanRedisKeys(request)
+            if request.identity.target.profile_id == profile_id
+                && request.identity.target.database == 2
+    )));
+    let WorkspaceTab::RedisBrowser(tab) = app.tabs.last().expect("browser opened") else {
+        panic!("expected Redis-compatible browser tab");
+    };
+    assert_eq!(tab.target.profile_id, profile_id);
+    assert_eq!(tab.target.database, 2);
+}
+
+#[test]
 fn opening_a_database_creates_one_empty_redis_browser_tab() {
     let profile_id = Uuid::from_u128(1);
     let mut app = App::new(Vec::new());

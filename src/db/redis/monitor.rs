@@ -6,8 +6,12 @@ use crate::{db::monitor::MonitorSnapshot, model::dashboard::MetricKey};
 pub struct RedisMonitorDetails {
     pub fields: BTreeMap<String, BTreeMap<String, String>>,
     pub keyspace: BTreeMap<u32, RedisKeyspaceDetails>,
+    pub server_identity: super::server_info::RedisServerIdentity,
     pub redis_version: Option<String>,
     pub redis_mode: Option<String>,
+    pub server_name: Option<String>,
+    pub valkey_version: Option<String>,
+    pub server_mode: Option<String>,
     pub os: Option<String>,
     pub arch_bits: Option<String>,
     pub process_id: Option<u32>,
@@ -70,6 +74,9 @@ pub fn parse_info(raw: &str, at_millis: u64) -> (MonitorSnapshot, RedisMonitorDe
         match key.as_str() {
             "redis_version" => details.redis_version = Some(value),
             "redis_mode" => details.redis_mode = Some(value),
+            "server_name" => details.server_name = Some(value),
+            "valkey_version" => details.valkey_version = Some(value),
+            "server_mode" => details.server_mode = Some(value),
             "os" => details.os = Some(value),
             "arch_bits" => details.arch_bits = Some(value),
             "process_id" => details.process_id = value.parse().ok(),
@@ -97,6 +104,7 @@ pub fn parse_info(raw: &str, at_millis: u64) -> (MonitorSnapshot, RedisMonitorDe
             _ => {}
         }
     }
+    details.server_identity = super::server_info::parse(raw);
     let mut values = BTreeMap::new();
     for (field, metric) in [
         ("instantaneous_ops_per_sec", MetricKey::RedisCommands),
@@ -188,5 +196,18 @@ mod tests {
         assert_eq!(details.fields["custom"]["unknown"], "value");
         assert_eq!(details.redis_version.as_deref(), Some(""));
         assert!(!details.fields["custom"].contains_key("malformed"));
+    }
+
+    #[test]
+    fn retains_valkey_identity_fields_and_compatible_redis_fields() {
+        let (_, details) = parse_info(
+            "# Server\nredis_version:7.2.4\nserver_name:valkey\nvalkey_version:8.1.3\nredis_mode:standalone\nserver_mode:cluster\n",
+            1000,
+        );
+        assert_eq!(details.redis_version.as_deref(), Some("7.2.4"));
+        assert_eq!(details.server_name.as_deref(), Some("valkey"));
+        assert_eq!(details.valkey_version.as_deref(), Some("8.1.3"));
+        assert_eq!(details.redis_mode.as_deref(), Some("standalone"));
+        assert_eq!(details.server_mode.as_deref(), Some("cluster"));
     }
 }

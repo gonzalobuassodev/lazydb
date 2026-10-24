@@ -3216,9 +3216,9 @@ fn preview(
             crate::profile::DatabaseKind::Sqlite => SqlDialect::Sqlite,
             crate::profile::DatabaseKind::DuckDb => SqlDialect::DuckDb,
             crate::profile::DatabaseKind::SqlServer => SqlDialect::SqlServer,
-            crate::profile::DatabaseKind::Redis | crate::profile::DatabaseKind::MongoDb => {
-                SqlDialect::Generic
-            }
+            crate::profile::DatabaseKind::Redis
+            | crate::profile::DatabaseKind::Valkey
+            | crate::profile::DatabaseKind::MongoDb => SqlDialect::Generic,
             crate::profile::DatabaseKind::ClickHouse => SqlDialect::ClickHouse,
         })
         .unwrap_or(SqlDialect::Generic);
