@@ -2,9 +2,11 @@ use sha2::Digest;
 use std::{
     fs,
     path::{Path, PathBuf},
-    process::Command,
     time::{SystemTime, UNIX_EPOCH},
 };
+
+#[cfg(unix)]
+use std::process::Command;
 
 use super::{
     InstallationManager, InstallationStateSource, PruneMode, PruneReport,

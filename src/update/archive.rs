@@ -1,7 +1,7 @@
-use std::{collections::BTreeSet, fs, path::Path};
+use std::{collections::BTreeSet, fs, io::Cursor, path::Path};
 
 #[cfg(any(target_os = "linux", target_os = "macos", test))]
-use std::io::{Cursor, Read};
+use std::io::Read;
 #[cfg(any(target_os = "linux", target_os = "macos", test))]
 use xz2::read::XzDecoder;
 

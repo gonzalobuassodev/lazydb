@@ -1652,7 +1652,7 @@ fn run_staged_version(binary: &Path) -> anyhow::Result<String> {
 fn publish_native_state(
     state: &InstallationState,
     data_dir: &Path,
-    destination: &Path,
+    _destination: &Path,
     manifest: &ChannelManifest,
     target: &str,
 ) -> anyhow::Result<()> {
@@ -1665,7 +1665,7 @@ fn publish_native_state(
     #[cfg(unix)]
     {
         let relative =
-            Path::new("releases").join(destination.file_name().ok_or_else(|| {
+            Path::new("releases").join(_destination.file_name().ok_or_else(|| {
                 anyhow::anyhow!("native release destination has no version name")
             })?);
         std::os::unix::fs::symlink(relative, &current_new)?;
