@@ -1439,6 +1439,7 @@ fn url_help(kind: DatabaseKind) -> &'static str {
         DatabaseKind::Sqlite => "Accepts sqlite://, file:, and jdbc:sqlite:",
         DatabaseKind::DuckDb => "Accepts duckdb:<path> and duckdb::memory:",
         DatabaseKind::Redis => "Accepts redis:// and rediss://",
+        DatabaseKind::Valkey => "Accepts valkey:// and valkeys://",
         DatabaseKind::MongoDb => "Accepts mongodb:// and mongodb+srv://",
         DatabaseKind::ClickHouse => "Accepts clickhouse:// (HTTP) and clickhouses:// (HTTPS)",
     }

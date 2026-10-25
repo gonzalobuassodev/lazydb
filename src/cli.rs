@@ -736,6 +736,7 @@ mod tests {
                 "sqlite",
                 "duckdb",
                 "redis",
+                "valkey",
                 "mongodb",
                 "clickhouse"
             ])

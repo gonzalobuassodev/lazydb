@@ -743,6 +743,7 @@ impl App {
             DatabaseKind::Sqlite
             | DatabaseKind::DuckDb
             | DatabaseKind::Redis
+            | DatabaseKind::Valkey
             | DatabaseKind::MongoDb => crate::db::principal::PrincipalCapability::Unsupported,
             DatabaseKind::ClickHouse => {
                 crate::db::clickhouse::ClickHouseAdapter::principal_capability()
@@ -1265,7 +1266,7 @@ impl App {
             } => self
                 .profiles
                 .iter()
-                .find(|profile| profile.id == *profile_id && profile.kind == DatabaseKind::Redis)
+                .find(|profile| profile.id == *profile_id && profile.kind.is_redis_compatible())
                 .map(|_| PendingDashboardTarget {
                     profile_id: *profile_id,
                     database: Some(*database),
@@ -2121,7 +2122,9 @@ impl App {
                 DatabaseKind::Sqlite => SqlDialect::Sqlite,
                 DatabaseKind::DuckDb => SqlDialect::DuckDb,
                 DatabaseKind::SqlServer => SqlDialect::SqlServer,
-                DatabaseKind::Redis | DatabaseKind::MongoDb => SqlDialect::Generic,
+                DatabaseKind::Redis | DatabaseKind::Valkey | DatabaseKind::MongoDb => {
+                    SqlDialect::Generic
+                }
                 DatabaseKind::ClickHouse => SqlDialect::ClickHouse,
             })
             .unwrap_or_else(|| self.sql_dialect());
@@ -2928,7 +2931,7 @@ impl App {
                     database,
                     pattern,
                 } if *profile_id == profile.profile_id
-                    && selected.is_some_and(|item| item.kind == DatabaseKind::Redis) =>
+                    && selected.is_some_and(|item| item.kind.is_redis_compatible()) =>
                 {
                     let mut tab = crate::model::redis_browser::RedisBrowserTab::new(
                         *tab_id,
@@ -13816,7 +13819,7 @@ impl App {
                 if catalog_session.is_none() {
                     self.explorer.catalog_sessions.insert(profile_id, identity);
                 }
-                let commands_for_catalog = if profile_kind == DatabaseKind::Redis {
+                let commands_for_catalog = if profile_kind.is_redis_compatible() {
                     Vec::new()
                 } else if editor_target_switch.is_none() {
                     catalog_session
@@ -13846,7 +13849,7 @@ impl App {
                     commands
                 };
                 let mut commands_for_redis = Vec::new();
-                if profile_kind == DatabaseKind::Redis && editor_target_switch.is_none() {
+                if profile_kind.is_redis_compatible() && editor_target_switch.is_none() {
                     commands_for_redis.push(Command::DiscoverRedisDatabases {
                         profile_id,
                         generation,
@@ -13886,7 +13889,7 @@ impl App {
                 //  * if the `Users & Roles` group is expanded, reload its list
                 //  * rebind and reload any open principal DDL tab so late
                 //    responses from the previous connection cannot win
-                if profile_kind != DatabaseKind::Redis {
+                if !profile_kind.is_redis_compatible() {
                     let group =
                         crate::model::explorer::ExplorerNodeId::PrincipalGroup { profile_id };
                     if self.explorer.normalized.expanded.contains(&group) {
@@ -19053,7 +19056,7 @@ impl App {
                 DatabaseKind::SqlServer => {
                     crate::db::mssql::MsSqlAdapter::catalog_mutation_capabilities()
                 }
-                DatabaseKind::Redis => Default::default(),
+                DatabaseKind::Redis | DatabaseKind::Valkey => Default::default(),
                 DatabaseKind::MongoDb => Default::default(),
                 DatabaseKind::ClickHouse => {
                     crate::db::clickhouse::ClickHouseAdapter::catalog_mutation_capabilities()
@@ -20514,7 +20517,7 @@ impl App {
                 .profiles
                 .iter()
                 .find(|profile| profile.id == target.profile_id)
-                .is_some_and(|profile| profile.kind == DatabaseKind::Redis);
+                .is_some_and(|profile| profile.kind.is_redis_compatible());
             return if is_redis {
                 Vec::new()
             } else {
@@ -21353,7 +21356,7 @@ impl App {
                     | DatabaseKind::SqlServer
                     | DatabaseKind::Sqlite
                     | DatabaseKind::DuckDb => entry.qualified_name.schema.clone(),
-                    DatabaseKind::Redis | DatabaseKind::MongoDb => None,
+                    DatabaseKind::Redis | DatabaseKind::Valkey | DatabaseKind::MongoDb => None,
                     DatabaseKind::ClickHouse => Some(database.clone()),
                 };
                 let candidate = ExecutionTarget {
@@ -21551,7 +21554,7 @@ impl App {
                     DatabaseKind::MySql | DatabaseKind::MariaDb => Some(database.clone()),
                     DatabaseKind::Sqlite | DatabaseKind::DuckDb => Some("main".to_owned()),
                     DatabaseKind::Postgres | DatabaseKind::SqlServer | DatabaseKind::Oracle => None,
-                    DatabaseKind::Redis | DatabaseKind::MongoDb => None,
+                    DatabaseKind::Redis | DatabaseKind::Valkey | DatabaseKind::MongoDb => None,
                     DatabaseKind::ClickHouse => Some(database.clone()),
                 },
                 database,
@@ -22507,7 +22510,9 @@ impl App {
             DatabaseKind::Sqlite => SqlDialect::Sqlite,
             DatabaseKind::DuckDb => SqlDialect::DuckDb,
             DatabaseKind::SqlServer => SqlDialect::SqlServer,
-            DatabaseKind::Redis | DatabaseKind::MongoDb => SqlDialect::Generic,
+            DatabaseKind::Redis | DatabaseKind::Valkey | DatabaseKind::MongoDb => {
+                SqlDialect::Generic
+            }
             DatabaseKind::ClickHouse => SqlDialect::ClickHouse,
         }
     }
@@ -22520,7 +22525,9 @@ impl App {
             Some(DatabaseKind::Sqlite) => SqlDialect::Sqlite,
             Some(DatabaseKind::DuckDb) => SqlDialect::DuckDb,
             Some(DatabaseKind::SqlServer) => SqlDialect::SqlServer,
-            Some(DatabaseKind::Redis | DatabaseKind::MongoDb) => SqlDialect::Generic,
+            Some(DatabaseKind::Redis | DatabaseKind::Valkey | DatabaseKind::MongoDb) => {
+                SqlDialect::Generic
+            }
             Some(DatabaseKind::ClickHouse) => SqlDialect::ClickHouse,
             None => SqlDialect::Generic,
         }
@@ -22542,7 +22549,9 @@ impl App {
             Some(DatabaseKind::Sqlite) => SqlDialect::Sqlite,
             Some(DatabaseKind::DuckDb) => SqlDialect::DuckDb,
             Some(DatabaseKind::SqlServer) => SqlDialect::SqlServer,
-            Some(DatabaseKind::Redis | DatabaseKind::MongoDb) | None => SqlDialect::Generic,
+            Some(DatabaseKind::Redis | DatabaseKind::Valkey | DatabaseKind::MongoDb) | None => {
+                SqlDialect::Generic
+            }
             Some(DatabaseKind::ClickHouse) => SqlDialect::ClickHouse,
         }
     }
@@ -23622,7 +23631,7 @@ impl App {
         let Some(profile) = self.explorer.normalized.profiles.get(&profile_id) else {
             return Vec::new();
         };
-        if profile.kind == DatabaseKind::Redis {
+        if profile.kind.is_redis_compatible() {
             return Vec::new();
         }
         if profile.kind == DatabaseKind::Sqlite {
@@ -26943,7 +26952,7 @@ impl App {
                 .profiles
                 .iter()
                 .find(|profile| profile.id == profile_id)
-                .is_some_and(|profile| profile.kind == DatabaseKind::Redis)
+                .is_some_and(|profile| profile.kind.is_redis_compatible())
         {
             let generation = self
                 .explorer
@@ -30102,7 +30111,7 @@ fn add_explorer_profile(
                 .port
                 .map_or_else(|| host.to_owned(), |port| format!("{host}:{port}"))
         }
-        DatabaseKind::Redis => {
+        DatabaseKind::Redis | DatabaseKind::Valkey => {
             let host = profile.host.as_deref().unwrap_or_default();
             profile
                 .port

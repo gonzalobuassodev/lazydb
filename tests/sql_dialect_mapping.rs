@@ -26,4 +26,8 @@ fn database_kind_mapping_has_one_canonical_sql_dialect() {
         SqlDialect::for_database_kind(DatabaseKind::DuckDb),
         SqlDialect::DuckDb
     );
+    assert_eq!(
+        SqlDialect::try_for_database_kind(DatabaseKind::Valkey),
+        None
+    );
 }

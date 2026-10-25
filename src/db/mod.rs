@@ -606,7 +606,7 @@ impl DatabaseConnection {
             DatabaseKind::SqlServer => MsSqlAdapter::connect(profile, password)
                 .await
                 .map(Self::SqlServer),
-            DatabaseKind::Redis => RedisAdapter::connect(profile, password)
+            DatabaseKind::Redis | DatabaseKind::Valkey => RedisAdapter::connect(profile, password)
                 .await
                 .map(Self::Redis),
             DatabaseKind::MongoDb => mongodb::MongoAdapter::connect(profile, password)
@@ -638,7 +638,7 @@ impl DatabaseConnection {
             Self::Sqlite(_) => DatabaseKind::Sqlite,
             Self::DuckDb(_) => DatabaseKind::DuckDb,
             Self::SqlServer(_) => DatabaseKind::SqlServer,
-            Self::Redis(_) => DatabaseKind::Redis,
+            Self::Redis(adapter) => adapter.kind(),
             Self::MongoDb(_) => DatabaseKind::MongoDb,
             Self::ClickHouse(_) => DatabaseKind::ClickHouse,
         }
@@ -836,7 +836,7 @@ impl DatabaseConnection {
             Self::SqlServer(adapter) => adapter.execute_catalog_mutation(plan).await,
             Self::Oracle(adapter) => adapter.execute_catalog_mutation(plan).await,
             Self::Redis(_) => Err(DatabaseError::configuration(
-                "catalog mutation is not supported for Redis",
+                "catalog mutation is not supported for Redis-compatible databases",
             )),
             Self::MongoDb(_) => Err(DatabaseError::unsupported(
                 "MongoDB does not support SQL catalog mutation",
@@ -873,7 +873,7 @@ impl DatabaseConnection {
             }
             _ => Err(
                 crate::db::redis::mutation::RedisMutationError::InvalidRequest {
-                    reason: "Redis mutation requires a Redis connection".into(),
+                    reason: "Redis mutation requires a Redis-compatible connection".into(),
                 },
             ),
         }
@@ -895,7 +895,7 @@ impl DatabaseConnection {
             }
             _ => Err(
                 crate::db::redis::mutation::RedisMutationError::InvalidRequest {
-                    reason: "Redis mutation requires a Redis connection".into(),
+                    reason: "Redis mutation requires a Redis-compatible connection".into(),
                 },
             ),
         }
@@ -911,7 +911,7 @@ impl DatabaseConnection {
                 "MongoDB document mutation is not implemented yet",
             )),
             _ => Err(DatabaseError::configuration(
-                "Redis mutation requires a Redis connection",
+                "Redis mutation requires a Redis-compatible connection",
             )),
         }
     }
@@ -943,7 +943,7 @@ impl DatabaseConnection {
                     .await
             }
             _ => Err(DatabaseError::configuration(
-                "Redis database discovery requires a Redis connection",
+                "Redis-compatible database discovery requires a Redis-compatible connection",
             )),
         }
     }
@@ -958,7 +958,7 @@ impl DatabaseConnection {
             Self::DuckDb(adapter) => adapter.discover_catalog_scope().await,
             Self::SqlServer(adapter) => adapter.discover_catalog_scope().await,
             Self::Redis(_) => Err(DatabaseError::configuration(
-                "Redis uses keyspace discovery instead of SQL catalog discovery",
+                "Redis-compatible databases use keyspace discovery instead of SQL catalog discovery",
             )),
             Self::MongoDb(_) => Err(DatabaseError::unsupported(
                 "MongoDB uses document namespace discovery",

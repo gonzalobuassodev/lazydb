@@ -1925,7 +1925,7 @@ impl ExplorerTreeState {
     fn principal_group_is_visible(&self, profile_id: Uuid) -> bool {
         self.expanded.contains(&ExplorerNodeId::Profile(profile_id))
             && self.profiles.get(&profile_id).is_some_and(|profile| {
-                profile.kind != DatabaseKind::Redis
+                !profile.kind.is_redis_compatible()
                     && matches!(
                         profile.status,
                         ExplorerConnectionStatus::Online | ExplorerConnectionStatus::Syncing
@@ -2016,7 +2016,7 @@ impl ExplorerTreeState {
             return;
         }
         let child_depth = depth + 1;
-        if profile.kind == DatabaseKind::Redis {
+        if profile.kind.is_redis_compatible() {
             for database in &profile.redis_databases {
                 projection.push(
                     ExplorerNodeId::RedisDatabase {
@@ -2824,7 +2824,7 @@ impl ExplorerTreeState {
                 profile_id,
                 database,
             } => self.profiles.get(profile_id).is_some_and(|profile| {
-                profile.kind == DatabaseKind::Redis
+                profile.kind.is_redis_compatible()
                     && profile
                         .redis_databases
                         .iter()
