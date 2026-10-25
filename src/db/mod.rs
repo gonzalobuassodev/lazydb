@@ -11,6 +11,7 @@ pub mod column_type;
 pub(crate) mod ddl;
 pub mod descriptor;
 pub mod duckdb;
+pub mod duckdb_runtime;
 pub mod mongodb;
 pub mod monitor;
 pub mod mssql;

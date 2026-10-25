@@ -2,8 +2,8 @@
 
 use std::collections::BTreeMap;
 use std::fs;
-use std::io::{Cursor, Read, Write};
-use std::path::{Component, Path, PathBuf};
+use std::io::Write;
+use std::path::{Path, PathBuf};
 use std::process::Command;
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
@@ -16,9 +16,10 @@ use semver::Version;
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 use thiserror::Error;
-use xz2::read::XzDecoder;
 
+mod archive;
 mod cli_progress;
+mod prune;
 
 const INSTALLATION_SCHEMA: u32 = 1;
 const CHANNEL_MANIFEST_SCHEMA: u32 = 2;
@@ -451,6 +452,9 @@ pub const UPDATE_STATUSES: [&str; 5] = [
 ];
 
 pub async fn run(args: crate::cli::UpdateArgs, _config: Option<PathBuf>) -> anyhow::Result<String> {
+    if args.prune {
+        return prune::run(args);
+    }
     let mut progress = if args.json {
         None
     } else {
@@ -511,12 +515,23 @@ async fn run_with_progress(
         let state = source
             .state()?
             .ok_or_else(|| anyhow::anyhow!("native installation state is unavailable"))?;
+        let current_data_dir = native_data_dir(&state)?;
+        let current_release = current_data_dir
+            .join("current")
+            .canonicalize()
+            .ok()
+            .and_then(|current| current.parent().map(Path::to_owned));
+        if let Some(release) = current_release
+            && release.join(".release.json").exists()
+        {
+            read_release_ownership(&release)?;
+        }
         let target = current_target(Some(&state))
             .ok_or_else(|| anyhow::anyhow!("current target is unsupported"))?;
         let manifest = fetch_manifest(report.channel, &SystemUpdateHttpClient::default())
             .await
             .map_err(anyhow::Error::msg)?;
-        let lock = UpdateLock::acquire(&native_data_dir(&state)?)?;
+        let lock = UpdateLock::acquire(&current_data_dir)?;
         let version = apply_native_update_with_progress(
             &state,
             &target,
@@ -1202,6 +1217,8 @@ fn manager_title(manager: InstallationManager) -> &'static str {
 
 pub(crate) struct UpdateLock {
     path: PathBuf,
+    owner: String,
+    pid: String,
 }
 
 impl UpdateLock {
@@ -1216,11 +1233,15 @@ impl UpdateLock {
         fs::create_dir_all(parent)?;
         match fs::create_dir(&path) {
             Ok(()) => {
-                if let Err(error) = fs::write(path.join("pid"), std::process::id().to_string()) {
-                    let _ = fs::remove_dir_all(&path);
+                let pid = std::process::id().to_string();
+                let owner = uuid::Uuid::new_v4().to_string();
+                if let Err(error) = fs::write(path.join("pid"), &pid)
+                    .and_then(|()| fs::write(path.join("owner"), &owner))
+                {
+                    remove_owned_lock(&path, &pid, &owner);
                     return Err(error.into());
                 }
-                Ok(Self { path })
+                Ok(Self { path, owner, pid })
             }
             Err(error) if error.kind() == std::io::ErrorKind::AlreadyExists => {
                 Err(anyhow::anyhow!("another lazydb update is in progress"))
@@ -1232,8 +1253,19 @@ impl UpdateLock {
 
 impl Drop for UpdateLock {
     fn drop(&mut self) {
-        let _ = fs::remove_dir_all(&self.path);
+        remove_owned_lock(&self.path, &self.pid, &self.owner);
     }
+}
+
+fn remove_owned_lock(path: &Path, pid: &str, owner: &str) {
+    let recorded_owner = fs::read_to_string(path.join("owner")).unwrap_or_default();
+    let recorded_pid = fs::read_to_string(path.join("pid")).unwrap_or_default();
+    if recorded_owner.trim() != owner || recorded_pid.trim() != pid {
+        return;
+    }
+    let _ = fs::remove_file(path.join("owner"));
+    let _ = fs::remove_file(path.join("pid"));
+    let _ = fs::remove_dir(path);
 }
 
 fn native_data_dir(state: &InstallationState) -> anyhow::Result<PathBuf> {
@@ -1338,6 +1370,13 @@ async fn apply_native_update_with_progress<H: UpdateHttpClient + Sync>(
         )
     }
 
+    write_release_ownership(
+        &release,
+        &manifest.version,
+        target,
+        previous_release_version(&data_dir).as_deref(),
+    )?;
+
     let releases = data_dir.join("releases");
     fs::create_dir_all(&releases)?;
     let destination = releases.join(&manifest.version);
@@ -1350,9 +1389,10 @@ async fn apply_native_update_with_progress<H: UpdateHttpClient + Sync>(
         if existing_is_valid {
             fs::remove_dir_all(&staging)?;
         } else {
-            fs::remove_dir_all(&destination)?;
-            fs::rename(&release, &destination)?;
-            fs::remove_dir_all(&staging)?;
+            anyhow::bail!(
+                "existing release {} is invalid; refusing to overwrite its files",
+                manifest.version
+            )
         }
     } else {
         if let Err(error) = fs::rename(&release, &destination) {
@@ -1367,8 +1407,11 @@ async fn apply_native_update_with_progress<H: UpdateHttpClient + Sync>(
         total_bytes: Some(archive.len() as u64),
     });
     if let Err(error) = publish_native_state(state, &data_dir, &destination, manifest, target) {
-        if destination_created {
-            let _ = fs::remove_dir_all(&destination);
+        if destination_created && let Ok(ownership) = read_release_ownership(&destination) {
+            let quarantine = releases.join(format!(".update-failed-{}", unique_suffix()));
+            if fs::rename(&destination, &quarantine).is_ok() {
+                let _ = prune::remove_owned_files(&quarantine, &ownership);
+            }
         }
         return Err(error);
     }
@@ -1378,6 +1421,175 @@ async fn apply_native_update_with_progress<H: UpdateHttpClient + Sync>(
         total_bytes: Some(archive.len() as u64),
     });
     Ok(manifest.version.clone())
+}
+
+#[derive(Clone, Debug, Deserialize, Serialize, PartialEq, Eq)]
+#[serde(deny_unknown_fields)]
+struct ReleaseOwnership {
+    schema: u32,
+    product: String,
+    version: String,
+    target: String,
+    binary_sha256: String,
+    previous_version: Option<String>,
+    files: Vec<ReleaseFileOwnership>,
+}
+
+#[derive(Clone, Debug, Deserialize, Serialize, PartialEq, Eq)]
+#[serde(deny_unknown_fields)]
+struct ReleaseFileOwnership {
+    path: String,
+    sha256: String,
+    size: u64,
+}
+
+#[derive(Clone, Debug, Deserialize, Serialize, PartialEq, Eq)]
+#[serde(deny_unknown_fields)]
+pub struct PruneReport {
+    pub schema: u32,
+    pub mode: PruneMode,
+    pub current: Option<String>,
+    pub previous: Option<String>,
+    pub kept: Vec<String>,
+    pub candidates: Vec<String>,
+    pub skipped: Vec<String>,
+    pub reclaimed_bytes: u64,
+    pub errors: Vec<String>,
+}
+
+#[derive(Clone, Copy, Debug, Deserialize, Serialize, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+pub enum PruneMode {
+    Preview,
+    Applied,
+}
+
+fn previous_release_version(data_dir: &Path) -> Option<String> {
+    let current = fs::read_link(data_dir.join("current")).ok()?;
+    let path = if current.is_absolute() {
+        current
+    } else {
+        data_dir.join(current)
+    };
+    (path.parent()?.file_name()? == "releases")
+        .then(|| path.file_name()?.to_str().map(str::to_owned))?
+}
+
+fn write_release_ownership(
+    release: &Path,
+    version: &str,
+    target: &str,
+    previous_version: Option<&str>,
+) -> anyhow::Result<()> {
+    let binary_name = if target == "x86_64-pc-windows-msvc" {
+        "lazydb.exe"
+    } else {
+        "lazydb"
+    };
+    let mut files = Vec::new();
+    for entry in fs::read_dir(release)? {
+        let entry = entry?;
+        let file_type = entry.file_type()?;
+        if !file_type.is_file() {
+            anyhow::bail!("release staging contains a non-regular entry")
+        }
+        let name = entry
+            .file_name()
+            .into_string()
+            .map_err(|_| anyhow::anyhow!("release staging filename is not UTF-8"))?;
+        let bytes = fs::read(entry.path())?;
+        files.push(ReleaseFileOwnership {
+            path: name,
+            sha256: format!("{:x}", Sha256::digest(&bytes)),
+            size: bytes.len() as u64,
+        });
+    }
+    files.sort_by(|left, right| left.path.cmp(&right.path));
+    let binary = files
+        .iter()
+        .find(|file| file.path == binary_name)
+        .ok_or_else(|| anyhow::anyhow!("release ownership manifest has no executable"))?;
+    let marker = ReleaseOwnership {
+        schema: 1,
+        product: "lazydb".into(),
+        version: version.into(),
+        target: target.into(),
+        binary_sha256: binary.sha256.clone(),
+        previous_version: previous_version.map(str::to_owned),
+        files,
+    };
+    let marker_path = release.join(".release.json");
+    let temporary = release.join(format!(".release.json.{}.tmp", unique_suffix()));
+    fs::write(&temporary, serde_json::to_vec_pretty(&marker)?)?;
+    fs::rename(temporary, marker_path)?;
+    Ok(())
+}
+
+#[cfg(any(test, target_os = "macos", target_os = "linux", target_os = "windows"))]
+fn read_release_ownership(release: &Path) -> anyhow::Result<ReleaseOwnership> {
+    let marker_path = release.join(".release.json");
+    if !fs::symlink_metadata(&marker_path)?.file_type().is_file() {
+        anyhow::bail!("release ownership marker is not a regular file")
+    }
+    let marker: ReleaseOwnership = serde_json::from_slice(&fs::read(marker_path)?)?;
+    if marker.schema != 1 || marker.product != "lazydb" {
+        anyhow::bail!("unsupported release ownership marker")
+    }
+    if Version::parse(&marker.version).is_err()
+        || !SUPPORTED_TARGETS.contains(&marker.target.as_str())
+    {
+        anyhow::bail!("release ownership marker has an unsupported version or target")
+    }
+    let listed: BTreeMap<_, _> = marker
+        .files
+        .iter()
+        .map(|file| (file.path.as_str(), file))
+        .collect();
+    if listed.len() != marker.files.len() {
+        anyhow::bail!("release ownership marker contains duplicate paths")
+    }
+    let binary_name = if marker.target == "x86_64-pc-windows-msvc" {
+        "lazydb.exe"
+    } else {
+        "lazydb"
+    };
+    let binary = listed
+        .get(binary_name)
+        .ok_or_else(|| anyhow::anyhow!("release ownership marker has no executable"))?;
+    if binary.sha256 != marker.binary_sha256 {
+        anyhow::bail!("release ownership marker binary hash is inconsistent")
+    }
+    for (name, file) in &listed {
+        if name.is_empty()
+            || name.contains('/')
+            || name.contains('\\')
+            || name.contains('\0')
+            || name.contains(':')
+            || *name == "."
+            || *name == ".."
+        {
+            anyhow::bail!("release ownership marker contains an unsafe path")
+        }
+        let path = release.join(name);
+        let metadata = fs::symlink_metadata(&path)?;
+        if !metadata.file_type().is_file() || metadata.len() != file.size {
+            anyhow::bail!("release file no longer matches its ownership marker")
+        }
+        let bytes = fs::read(path)?;
+        if format!("{:x}", Sha256::digest(&bytes)) != file.sha256 {
+            anyhow::bail!("release file hash no longer matches its ownership marker")
+        }
+    }
+    for entry in fs::read_dir(release)? {
+        let entry = entry?;
+        if entry.file_name() == ".release.json" {
+            continue;
+        }
+        if !listed.contains_key(entry.file_name().to_string_lossy().as_ref()) {
+            anyhow::bail!("release directory contains an unowned entry")
+        }
+    }
+    Ok(marker)
 }
 
 fn check_linux_runtime_requirements(requirement: &LibcRequirement) -> anyhow::Result<()> {
@@ -1422,114 +1634,7 @@ fn extract_archive(
     manifest: &ChannelManifest,
     target: &str,
 ) -> anyhow::Result<()> {
-    let expected_root = format!("lazydb_{}_{}", manifest.version, target);
-    let mut names = std::collections::BTreeSet::new();
-    let binary_file = if target == "x86_64-pc-windows-msvc" {
-        "lazydb.exe"
-    } else {
-        "lazydb"
-    };
-    let binary_name = format!("{expected_root}/{binary_file}");
-    let mut root_seen = false;
-    let mut binary_seen = false;
-    let mut validate_entry = |raw_name: &str, is_dir: bool, is_file: bool| -> anyhow::Result<()> {
-        // A single trailing slash is a directory marker, not an empty path component.
-        let name = if is_dir {
-            raw_name.strip_suffix('/').unwrap_or(raw_name)
-        } else {
-            raw_name
-        };
-        if !archive_entry_path_is_normal(name)
-            || !(name == expected_root || name.starts_with(&format!("{expected_root}/")))
-            || !names.insert(name.to_owned())
-            || !(is_dir || is_file)
-            || (name == expected_root && !is_dir)
-            || (name == binary_name && !is_file)
-        {
-            anyhow::bail!("unsafe archive entry: {raw_name}")
-        }
-        root_seen |= name == expected_root && is_dir;
-        binary_seen |= name == binary_name && is_file;
-        Ok(())
-    };
-    if target == "x86_64-pc-windows-msvc" {
-        let mut zip = zip::ZipArchive::new(Cursor::new(archive))?;
-        for index in 0..zip.len() {
-            let entry = zip.by_index(index)?;
-            let mode = entry.unix_mode().unwrap_or(0) & 0o170000;
-            if entry.is_symlink() || !matches!(mode, 0 | 0o040000 | 0o100000) {
-                anyhow::bail!("unsafe archive entry: {}", entry.name())
-            }
-            validate_entry(entry.name(), entry.is_dir(), entry.is_file())?;
-        }
-        if !root_seen || !binary_seen {
-            anyhow::bail!("archive does not contain the expected executable")
-        }
-        let mut zip = zip::ZipArchive::new(Cursor::new(archive))?;
-        for index in 0..zip.len() {
-            let mut entry = zip.by_index(index)?;
-            let output = destination.join(entry.name());
-            if entry.is_dir() {
-                fs::create_dir_all(output)?;
-            } else {
-                if let Some(parent) = output.parent() {
-                    fs::create_dir_all(parent)?;
-                }
-                let mut file = fs::File::create(output)?;
-                std::io::copy(&mut entry, &mut file)?;
-            }
-        }
-    } else {
-        let mut decoder = XzDecoder::new(Cursor::new(archive));
-        let mut tar_bytes = Vec::new();
-        decoder.read_to_end(&mut tar_bytes)?;
-        let mut tar_archive = tar::Archive::new(Cursor::new(&tar_bytes));
-        for entry in tar_archive.entries()? {
-            let entry = entry?;
-            let path = entry.path_bytes();
-            let name = std::str::from_utf8(&path)?;
-            let entry_type = entry.header().entry_type();
-            validate_entry(name, entry_type.is_dir(), entry_type.is_file())?;
-        }
-        if !root_seen || !binary_seen {
-            anyhow::bail!("archive does not contain the expected executable")
-        }
-        let mut tar_archive = tar::Archive::new(Cursor::new(&tar_bytes));
-        tar_archive.unpack(destination)?;
-    }
-    fs::rename(
-        destination.join(&expected_root),
-        destination.join("lazydb-root"),
-    )?;
-    let root = destination.join("lazydb-root");
-    for entry in fs::read_dir(&root)? {
-        let entry = entry?;
-        let path = entry.path();
-        let target_path = destination.join(entry.file_name());
-        fs::rename(path, target_path)?;
-    }
-    fs::remove_dir(&root)?;
-    #[cfg(unix)]
-    {
-        use std::os::unix::fs::PermissionsExt;
-        let mut permissions = fs::metadata(destination.join(binary_file))?.permissions();
-        permissions.set_mode(0o755);
-        fs::set_permissions(destination.join(binary_file), permissions)?;
-    }
-    Ok(())
-}
-
-fn archive_entry_path_is_normal(name: &str) -> bool {
-    !name.is_empty()
-        && !name.contains('\0')
-        && !name.contains('\\')
-        && !name.contains(':')
-        && Path::new(name)
-            .components()
-            .all(|component| matches!(component, Component::Normal(part) if !part.is_empty()))
-        && !name
-            .split('/')
-            .any(|part| part.is_empty() || part == "." || part == "..")
+    archive::extract_archive(archive, destination, manifest, target)
 }
 
 fn run_staged_version(binary: &Path) -> anyhow::Result<String> {
@@ -1815,12 +1920,14 @@ fn cargo_path(path: &Path) -> bool {
 
 #[cfg(test)]
 mod tests {
+    use super::archive::archive_entry_path_is_normal;
     use super::*;
     use async_trait::async_trait;
     use std::collections::HashMap;
     use std::fs::File;
-    use std::io::Write;
+    use std::io::{Cursor, Read, Write};
     use tempfile::tempdir;
+    use xz2::read::XzDecoder;
     use xz2::write::XzEncoder;
 
     #[derive(Default)]
@@ -1863,6 +1970,77 @@ mod tests {
         let state = parse_installation_state(&valid_state("/tmp/bin/lazydb")).unwrap();
         assert_eq!(state.manager, InstallationManager::Native);
         assert_eq!(state.version, "1.2.3");
+    }
+
+    #[test]
+    fn update_lock_rejects_unknown_owner_and_only_releases_its_own_token() {
+        let directory = tempdir().unwrap();
+        let lock_path = directory.path().join(".install.lock");
+        fs::create_dir(&lock_path).unwrap();
+        fs::write(lock_path.join("pid"), "").unwrap();
+        assert!(UpdateLock::acquire_path(lock_path.clone()).is_err());
+        assert!(lock_path.is_dir());
+
+        fs::remove_dir_all(&lock_path).unwrap();
+        let guard = UpdateLock::acquire_path(lock_path.clone()).unwrap();
+        fs::write(lock_path.join("owner"), "replaced-by-another-owner").unwrap();
+        drop(guard);
+        assert!(lock_path.is_dir());
+
+        fs::remove_dir_all(&lock_path).unwrap();
+        let guard = UpdateLock::acquire_path(lock_path.clone()).unwrap();
+        drop(guard);
+        assert!(!lock_path.exists());
+    }
+
+    #[test]
+    fn release_ownership_manifest_detects_tampering_and_unowned_files() {
+        let directory = tempdir().unwrap();
+        let release = directory.path().join("staging");
+        fs::create_dir(&release).unwrap();
+        fs::write(release.join("lazydb"), b"verified binary").unwrap();
+        fs::write(release.join("README.md"), b"readme").unwrap();
+        write_release_ownership(&release, "1.2.3", "x86_64-apple-darwin", None).unwrap();
+        let ownership = read_release_ownership(&release).unwrap();
+        assert_eq!(ownership.version, "1.2.3");
+        assert_eq!(ownership.files.len(), 2);
+        assert!(ownership.previous_version.is_none());
+
+        fs::write(release.join("unknown.txt"), b"not owned").unwrap();
+        assert!(read_release_ownership(&release).is_err());
+        fs::remove_file(release.join("unknown.txt")).unwrap();
+        fs::write(release.join("README.md"), b"tampered").unwrap();
+        assert!(read_release_ownership(&release).is_err());
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn release_ownership_marker_symlink_is_rejected() {
+        let directory = tempdir().unwrap();
+        let release = directory.path().join("release");
+        fs::create_dir(&release).unwrap();
+        let outside = directory.path().join("outside.json");
+        fs::write(&outside, br#"{"schema":1,"product":"lazydb"}"#).unwrap();
+        std::os::unix::fs::symlink(&outside, release.join(".release.json")).unwrap();
+        assert!(read_release_ownership(&release).is_err());
+    }
+
+    #[test]
+    fn previous_version_comes_from_current_activation_not_semver_order() {
+        let directory = tempdir().unwrap();
+        let releases = directory.path().join("releases");
+        fs::create_dir_all(releases.join("9.9.9")).unwrap();
+        fs::create_dir_all(releases.join("1.0.0")).unwrap();
+        #[cfg(unix)]
+        std::os::unix::fs::symlink(releases.join("1.0.0"), directory.path().join("current"))
+            .unwrap();
+        #[cfg(windows)]
+        fs::write(directory.path().join("current"), "1.0.0").unwrap();
+        #[cfg(unix)]
+        assert_eq!(
+            previous_release_version(directory.path()).as_deref(),
+            Some("1.0.0")
+        );
     }
 
     #[test]
@@ -2415,12 +2593,38 @@ mod tests {
         assert!(status.success());
         let destination = dir.path().join("unpack");
         let manifest = update_manifest("1.3.0", "a".repeat(64));
-        extract_archive(&fs::read(archive).unwrap(), &destination, &manifest, target).unwrap();
+        extract_archive(
+            &fs::read(&archive).unwrap(),
+            &destination,
+            &manifest,
+            target,
+        )
+        .unwrap();
         assert_eq!(fs::read(destination.join("lazydb")).unwrap(), b"binary");
         assert_eq!(
             fs::read(destination.join("README.md")).unwrap(),
             b"documentation"
         );
+        let mut decoded_tar = Vec::new();
+        XzDecoder::new(Cursor::new(fs::read(archive).unwrap()))
+            .read_to_end(&mut decoded_tar)
+            .unwrap();
+        let mut tar = tar::Archive::new(Cursor::new(decoded_tar));
+        let mut binary = None;
+        for entry in tar.entries().unwrap() {
+            let mut entry = entry.unwrap();
+            if entry
+                .path()
+                .unwrap()
+                .file_name()
+                .is_some_and(|name| name == "lazydb")
+            {
+                let mut contents = Vec::new();
+                entry.read_to_end(&mut contents).unwrap();
+                binary = Some(contents);
+            }
+        }
+        assert_eq!(binary.as_deref(), Some(b"binary".as_slice()));
     }
 
     #[test]
@@ -2540,6 +2744,34 @@ mod tests {
             } else {
                 assert_eq!(fs::read_dir(dir.path()).unwrap().count(), 0);
             }
+        }
+    }
+
+    #[test]
+    fn zip_stored_and_deflate_entries_remain_supported() {
+        let target = "x86_64-pc-windows-msvc";
+        let root = format!("lazydb_1.3.0_{target}");
+        let manifest = update_manifest("1.3.0", "a".repeat(64));
+        for method in [
+            zip::CompressionMethod::Stored,
+            zip::CompressionMethod::Deflated,
+        ] {
+            let mut writer = zip::ZipWriter::new(Cursor::new(Vec::new()));
+            let options = zip::write::SimpleFileOptions::default().compression_method(method);
+            writer.add_directory(format!("{root}/"), options).unwrap();
+            writer
+                .start_file(format!("{root}/lazydb.exe"), options)
+                .unwrap();
+            writer
+                .write_all(b"compatible windows updater archive")
+                .unwrap();
+            let bytes = writer.finish().unwrap().into_inner();
+            let destination = tempdir().unwrap();
+            extract_archive(&bytes, destination.path(), &manifest, target).unwrap();
+            assert_eq!(
+                fs::read(destination.path().join("lazydb.exe")).unwrap(),
+                b"compatible windows updater archive"
+            );
         }
     }
 

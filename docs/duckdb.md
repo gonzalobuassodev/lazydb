@@ -1,10 +1,22 @@
 # DuckDB
 
-LazyDB connects directly to DuckDB through the bundled native engine. It supports local files and in-memory databases; it does not require a server process.
+LazyDB connects directly to DuckDB through its C API runtime. The runtime is optional and is not bundled in the default LazyDB binary or release archive. DuckDB connections use a trusted shared library compatible with DuckDB **1.5.6**. LazyDB does not download or install the engine automatically. It supports local files and in-memory databases; it does not require a server process.
+
+### Install the optional runtime
+
+Install a DuckDB 1.5.6 shared C API library for your platform, then point LazyDB to the directory containing it:
+
+```sh
+export LAZYDB_DUCKDB_LIB_DIR="/absolute/path/to/duckdb-runtime"
+```
+
+The expected filename is `libduckdb.dylib` on macOS, `libduckdb.so` on Linux, and `duckdb.dll` on Windows. LazyDB first uses the explicit directory above; if it is set but invalid, it reports that error rather than silently selecting another library. Without it, LazyDB checks its application data directory at `drivers/duckdb/1.5.6` and a small set of platform system library directories. It does not search the current working directory or download a runtime. A runtime successfully loaded into a process cannot be hot-switched; restart LazyDB after changing the configured library.
+
+`lazydb version`, `lazydb capabilities`, `lazydb doctor`, and unrelated database drivers do not load DuckDB. If the optional library is missing, only attempts to open a DuckDB connection fail; saved DuckDB profiles remain intact. DuckDB JSON and Parquet support is provided by the external library and its available extensions.
 
 ## Connect
 
-Use a saved profile or pass a URL to the CLI:
+Use a saved profile or pass a URL to the CLI. A compatible external DuckDB runtime is needed only when opening the DuckDB connection:
 
 ```sh
 lazydb connections add --name analytics --url 'duckdb:./analytics.duckdb?schema=main' --scope project
