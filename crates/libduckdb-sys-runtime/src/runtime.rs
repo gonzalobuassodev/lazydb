@@ -297,11 +297,13 @@ mod tests {
 
     #[test]
     fn explicit_directory_does_not_fall_back() {
-        let missing = Path::new("/definitely/missing/lazydb-duckdb-runtime");
+        let root = tempdir();
+        let missing = root.join("missing-runtime");
         assert!(matches!(
-            resolve_library(Some(missing), None),
+            resolve_library(Some(&missing), None),
             Err(DuckDbRuntimeError::NotFound(_))
         ));
+        let _ = std::fs::remove_dir_all(root);
     }
 
     #[test]
@@ -323,7 +325,7 @@ mod tests {
     }
 
     #[test]
-    fn canonicalizes_versioned_library_symlink() {
+    fn resolves_versioned_library_path() {
         let root = tempdir();
         let versioned = root.join(if cfg!(target_os = "macos") {
             "libduckdb-v1.5.6.dylib"
@@ -339,7 +341,10 @@ mod tests {
         std::fs::copy(&versioned, root.join(library_filename())).unwrap();
 
         let resolved = resolve_library(Some(&root), None).unwrap();
+        #[cfg(unix)]
         let expected = versioned.canonicalize().unwrap();
+        #[cfg(windows)]
+        let expected = root.join(library_filename()).canonicalize().unwrap();
         assert_eq!(resolved, expected);
         let _ = std::fs::remove_dir_all(root);
     }
