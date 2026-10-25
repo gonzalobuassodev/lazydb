@@ -175,7 +175,7 @@ unsafe fn read_version(library: &Library) -> Result<String, DuckDbRuntimeError> 
     if pointer.is_null() {
         Ok(String::new())
     } else {
-        Ok(unsafe { CStr::from_ptr(pointer) }
+        Ok(unsafe { CStr::from_ptr(pointer.cast()) }
             .to_string_lossy()
             .into_owned())
     }
