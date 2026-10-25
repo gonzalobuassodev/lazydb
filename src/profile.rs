@@ -576,14 +576,20 @@ fn parse_duckdb_url(input: &str) -> Result<Option<ParsedConnectionUrl>, ProfileE
         path_and_authority
             .strip_prefix("//")
             .map_or(path_and_authority, |value| {
-                if value.starts_with('/') {
+                if value.starts_with('/') || is_windows_filesystem_path(value) {
                     value
                 } else {
                     path_and_authority
                 }
             });
+    let decoded_windows_path = percent_decode_str(path_and_authority).decode_utf8().ok();
+    let windows_path = decoded_windows_path
+        .as_deref()
+        .is_some_and(is_windows_filesystem_path);
     let path = if path_and_authority == ":memory:" {
         path_and_authority
+    } else if windows_path {
+        decoded_windows_path.as_deref().unwrap()
     } else if let Some(path) = path_and_authority.strip_prefix("//") {
         if path.starts_with('/') {
             path
@@ -640,9 +646,13 @@ fn parse_duckdb_url(input: &str) -> Result<Option<ParsedConnectionUrl>, ProfileE
         return Err(ProfileError::InvalidQueryParameter("read_only".into()));
     }
 
-    let decoded_path = percent_decode_str(path)
-        .decode_utf8()
-        .map_err(|_| ProfileError::InvalidQueryParameter("path".into()))?;
+    let decoded_path = if windows_path {
+        std::borrow::Cow::Owned(path.to_owned())
+    } else {
+        percent_decode_str(path)
+            .decode_utf8()
+            .map_err(|_| ProfileError::InvalidQueryParameter("path".into()))?
+    };
     let duckdb_path = (!memory).then(|| PathBuf::from(decoded_path.into_owned()));
     let database = duckdb_path
         .as_ref()
@@ -668,6 +678,18 @@ fn parse_duckdb_url(input: &str) -> Result<Option<ParsedConnectionUrl>, ProfileE
         read_only_explicit: read_only_seen,
         mongodb_options: None,
     }))
+}
+
+fn is_windows_filesystem_path(value: &str) -> bool {
+    let value = value.strip_prefix("\\\\?\\").unwrap_or(value);
+    if value.starts_with("\\\\") || value.starts_with("UNC\\") {
+        return true;
+    }
+    let bytes = value.as_bytes();
+    bytes.len() >= 3
+        && bytes[0].is_ascii_alphabetic()
+        && bytes[1] == b':'
+        && matches!(bytes[2], b'/' | b'\\')
 }
 
 #[derive(Debug)]
@@ -1868,8 +1890,11 @@ fn ssl_mode_value(value: SslMode) -> &'static str {
 #[cfg(test)]
 mod tests {
     use super::{
-        CatalogScope, DatabaseKind, SslMode, format_connection_url, import_connection_url,
+        CatalogScope, DatabaseKind, SQLITE_PATH, SslMode, format_connection_url,
+        import_connection_url,
     };
+    use percent_encoding::utf8_percent_encode;
+    use std::path::Path;
 
     #[test]
     fn imports_postgres_jdbc_url_and_current_schema() {
@@ -2036,6 +2061,19 @@ mod tests {
             assert_eq!(
                 format_connection_url(&profile, profile.url_format).unwrap(),
                 canonical
+            );
+        }
+
+        for path in [
+            r"C:\Users\runner\AppData\Local\Temp\duckdb file.duckdb",
+            r"\\?\C:\Users\runner\AppData\Local\Temp\duckdb file.duckdb",
+            r"\\?\UNC\server\share\duckdb file.duckdb",
+        ] {
+            let encoded: String = utf8_percent_encode(path, SQLITE_PATH).to_string();
+            let imported = import_connection_url(&format!("duckdb:{encoded}"), None).unwrap();
+            assert_eq!(
+                imported.profile.duckdb_path.as_deref(),
+                Some(Path::new(path))
             );
         }
     }
