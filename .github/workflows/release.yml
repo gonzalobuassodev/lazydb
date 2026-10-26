@@ -94,7 +94,7 @@ jobs:
 
   build:
     needs: plan
-    timeout-minutes: 30
+    timeout-minutes: 75
     strategy:
       fail-fast: false
       matrix:
@@ -129,14 +129,14 @@ jobs:
         run: |
           python3 scripts/ci/test-check-update-dependencies.py
           python3 scripts/ci/run-with-timeout.py 120 -- python3 scripts/ci/check-update-dependencies.py --target "${{ matrix.target }}"
+      - name: Prepare pinned Linux build image
+        if: runner.os == 'Linux'
+        run: sh scripts/release/build-linux.sh "${{ matrix.target }}" --prepare
       - name: Verify Linux updater dependencies in the pinned build image
         if: runner.os == 'Linux'
         run: |
           sh scripts/release/build-linux.sh "${{ matrix.target }}" --exec python3 scripts/ci/test-check-update-dependencies.py
           sh scripts/release/build-linux.sh "${{ matrix.target }}" --exec python3 scripts/ci/check-update-dependencies.py --target "${{ matrix.target }}"
-      - name: Prepare pinned Linux build image
-        if: runner.os == 'Linux'
-        run: sh scripts/release/build-linux.sh "${{ matrix.target }}" --prepare
       - name: Cache Rust build
         if: runner.os != 'Linux'
         uses: Swatinem/rust-cache@d1527c8f67ef9af357290475d4af4b0fab8f12e0 # v2
@@ -184,7 +184,7 @@ jobs:
       - name: Build macOS and Windows
         if: matrix.target != 'x86_64-unknown-linux-gnu' && matrix.target != 'aarch64-unknown-linux-gnu'
         shell: bash
-        run: python3 scripts/ci/run-with-timeout.py 600 -- cargo +1.94.0 build --release --locked --target "${{ matrix.target }}" --timings
+        run: python3 scripts/ci/run-with-timeout.py 3600 -- cargo +1.94.0 build --release --locked --target "${{ matrix.target }}" --timings
       - name: Check macOS binary dependencies
         if: matrix.target == 'x86_64-apple-darwin' || matrix.target == 'aarch64-apple-darwin'
         run: scripts/release/check-macos-dependencies.sh "target/${{ matrix.target }}/release/lazydb"
