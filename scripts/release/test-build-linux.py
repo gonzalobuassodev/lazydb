@@ -247,10 +247,10 @@ class ReleaseWorkflowContractTests(unittest.TestCase):
     def test_release_builds_have_cold_build_timeouts(self):
         workflow = (ROOT / ".github/workflows/release.yml").read_text(encoding="utf-8")
         linux_wrapper = (ROOT / "scripts/release/build-linux.sh").read_text(encoding="utf-8")
-        self.assertIn("  build:\n    needs: plan\n    timeout-minutes: 45\n", workflow)
-        self.assertIn("run-with-timeout.py 1800 -- cargo +1.94.0 build --release", workflow)
-        self.assertIn("run-with-timeout.py 1800 -- cargo +1.94.0 build --release", linux_wrapper)
-        self.assertIn('run-with-timeout.py 1800 -- "$@"', linux_wrapper)
+        self.assertIn("  build:\n    needs: plan\n    timeout-minutes: 75\n", workflow)
+        self.assertIn("run-with-timeout.py 3600 -- cargo +1.94.0 build --release", workflow)
+        self.assertIn("run-with-timeout.py 3600 -- cargo +1.94.0 build --release", linux_wrapper)
+        self.assertIn('run-with-timeout.py 3600 -- "$@"', linux_wrapper)
 
 
 if __name__ == "__main__":
