@@ -68,6 +68,28 @@ export LAZYDB_CONFIG_HOME=$HOME/lazydb
 
 Windows continues to use the standard `%APPDATA%\\lazydb\\` directory.
 
+## Prune old native releases
+
+`lazydb update --prune` previews eligible old releases and makes no filesystem
+changes. Review the JSON report with `--json`; only pass `--yes` to explicitly
+apply deletion. The command only operates on a native installation whose
+`install.json` and `current` activation agree. It keeps the active release and
+the previous version recorded in the release ownership chain. Legacy releases
+without an ownership marker, releases with changed files or links, unknown
+contents, and releases that may be used by another process are skipped. On
+platforms where a complete process-use check is unavailable, the release is
+kept. Homebrew, Cargo, and other package-manager installations are never pruned.
+
+```sh
+lazydb update --prune --json
+lazydb update --prune --yes --json
+```
+
+Pruning is never run automatically after an update. Preview and apply share the
+installer's `.install.lock`; if that lock is busy or has an unknown owner, the
+command fails closed. Do not delete user data or hand-created release files to
+make an old installation appear eligible.
+
 `AppPaths` uses the following platform-specific user configuration directories:
 
 | File | macOS | Linux | Windows | Purpose |
@@ -83,6 +105,14 @@ Native installation data also lives in this same application directory. The
 `current` symlink selects the active version and `releases/<VERSION>/` contains
 downloaded native releases. `LAZYDB_CONFIG_HOME` relocates all of these files
 together on macOS and Linux.
+
+`lazydb update --prune` previews eligible historical native releases. The
+preview is read-only; add `--yes` to apply it. It preserves `current` and the
+last previous version in the recorded activation chain, verifies each managed
+release's ownership marker and file hashes, and skips legacy, changed, linked,
+unknown, or potentially running releases. The command is conservative when
+process-use information is unavailable and never prunes package-manager
+installations or user data. It is not run automatically after an update.
 
 `LAZYDB_CONFIG_HOME` applies to macOS and Linux only. Windows uses the standard
 `%APPDATA%` roaming application-data directory. LazyDB creates private

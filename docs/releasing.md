@@ -97,6 +97,11 @@ Linux release assets include per-architecture runtime reports and schema 2
 channel requirements. The report and package checks are described in
 [Linux runtime compatibility](linux-runtime-compatibility.md).
 
+Every release target also reports the raw client binary and packaged archive
+byte sizes and SHA-256 digests. The artifact gate rejects DuckDB C API imports
+or engine payload in the default client archive; the optional DuckDB runtime is
+prepared separately for native CI tests and is not copied into release archives.
+
 The Pages job preserves the other channel manifest while publishing the
 channel associated with the newly published Release. It intentionally deploys
 only the channel manifests, `CNAME`, and installer scripts (including the generated

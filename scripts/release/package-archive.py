@@ -40,7 +40,7 @@ def main():
             parser.error(f"unsafe archive path: {name}")
         if path.is_symlink() or not (path.is_dir() or path.is_file()):
             parser.error(f"unsupported archive entry: {name}")
-    with tarfile.open(args.output, "w:xz", format=tarfile.USTAR_FORMAT, preset=6) as archive:
+    with tarfile.open(args.output, "w:xz", format=tarfile.USTAR_FORMAT, preset=9) as archive:
         for path in paths:
             info = CompatibleTarInfo(path.relative_to(root.parent).as_posix())
             info.mode = 0o755 if path.is_dir() or path.stat().st_mode & 0o111 else 0o644

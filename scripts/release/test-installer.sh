@@ -88,6 +88,23 @@ export TMPDIR_TEST="$TMP" PATH="$TMP/bin:$PATH" LAZYDB_CHANNEL_BASE_URL=https://
 export LAZYDB_CONFIG_HOME="$TMP/home/config"
 export SHELL=/bin/bash LAZYDB_MCP_SETUP=skip
 unset ZDOTDIR XDG_CONFIG_HOME LAZYDB_INSTALL_DIR
+for lock_case in active empty malformed; do
+    lock_home="$TMP/lock-$lock_case"
+    mkdir -p "$lock_home/config/.install.lock"
+    case "$lock_case" in
+        active) printf '%s\n' "$$" > "$lock_home/config/.install.lock/pid" ;;
+        empty) : > "$lock_home/config/.install.lock/pid" ;;
+        malformed) printf '%s\n' 'not-a-pid' > "$lock_home/config/.install.lock/pid" ;;
+    esac
+    if HOME="$lock_home" LAZYDB_CONFIG_HOME="$lock_home/config" \
+        sh "$ROOT/install.sh" --install-dir "$lock_home/bin" >"$TMP/lock-output" 2>&1; then
+        printf 'installer accepted %s lock\n' "$lock_case" >&2
+        exit 1
+    fi
+    [ -d "$lock_home/config/.install.lock" ]
+    [ -f "$lock_home/config/.install.lock/pid" ]
+    [ ! -f "$lock_home/config/install.json" ]
+done
 REAL_PYTHON=$(command -v python3)
 mkdir -p "$TMP/no-lzma-bin"
 cat > "$TMP/no-lzma-bin/python3" <<SH
@@ -114,6 +131,17 @@ fi
 [ -L "$TMP/home/config/current" ]
 [ -L "$TMP/install/lazydb" ]
 [ -f "$TMP/home/config/install.json" ]
+[ -f "$TMP/home/config/releases/1.2.3/.release.json" ]
+[ ! -e "$TMP/home/config/.install.lock" ]
+python3 - "$TMP/home/config/releases/1.2.3/.release.json" <<'PY'
+import json, sys
+from pathlib import Path
+marker = json.loads(Path(sys.argv[1]).read_text())
+assert marker['schema'] == 1 and marker['product'] == 'lazydb'
+assert marker['version'] == '1.2.3' and marker['target'] == 'x86_64-unknown-linux-gnu'
+assert marker['previous_version'] is None
+assert marker['binary_sha256'] == next(item['sha256'] for item in marker['files'] if item['path'] == 'lazydb')
+PY
 [ "$(python3 -c 'import json; print(json.load(open("'$TMP'/home/config/install.json"))["channel"])')" = stable ]
 [ -e "$TMP/install/lazydb" ]
 if HOME="$TMP/reject-home" LAZYDB_CONFIG_HOME="$TMP/reject-home/config" LAZYDB_INSTALL_TEST_LOG="$TMP/reject-downloads" FIXTURE_V2_STATUS=500 sh "$TMP/pages/install.sh" --install-dir "$TMP/reject-install" >"$TMP/reject-output" 2>&1; then

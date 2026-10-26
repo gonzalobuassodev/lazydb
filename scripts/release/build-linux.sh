@@ -73,7 +73,9 @@ fi
 [ "$mode" != prepare ] || exit 0
 
 if [ "$mode" = build ]; then
-    set -- cargo +1.94.0 build --release --locked --target "$target" --timings
+    set -- python3 scripts/ci/run-with-timeout.py 600 -- cargo +1.94.0 build --release --locked --target "$target" --timings
+elif [ "$mode" = exec ] && [ "${1:-}" = cargo ]; then
+    set -- python3 scripts/ci/run-with-timeout.py 600 -- "$@"
 fi
 
 # Cache metadata and compilation must see the same absolute paths. Cargo also

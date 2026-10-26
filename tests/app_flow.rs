@@ -1146,11 +1146,28 @@ async fn connects_loads_catalog_and_executes_through_runtime() {
         Action::ToggleExecutionConfirmationFocus,
     );
     dispatch(&mut app, &mut runtime, Action::ConfirmExecution);
-    let action = timeout(Duration::from_secs(3), receiver.recv())
-        .await
-        .unwrap()
-        .unwrap();
-    dispatch(&mut app, &mut runtime, action);
+    timeout(Duration::from_secs(3), async {
+        loop {
+            let action = receiver.recv().await.unwrap();
+            let terminal_query_action = matches!(
+                &action,
+                Action::QueryFinished {
+                    tab_id: completed_tab_id,
+                    ..
+                }
+                    | Action::QueryFailed {
+                        tab_id: completed_tab_id,
+                        ..
+                    } if *completed_tab_id == tab_id
+            );
+            dispatch(&mut app, &mut runtime, action);
+            if terminal_query_action {
+                break;
+            }
+        }
+    })
+    .await
+    .expect("SQL execution should finish within three seconds");
 
     let original_sql = app.active_editor_text().unwrap();
     let outcome = app.active_console().outcome.as_ref().unwrap_or_else(|| {

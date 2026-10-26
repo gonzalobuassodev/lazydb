@@ -16,7 +16,8 @@ size_bytes() {
     wc -c < "$1" | tr -d '[:space:]'
 }
 
-printf 'binary=%s raw_bytes=%s\n' "$binary" "$(size_bytes "$binary")"
+printf 'target=%s\n' "${TARGET:-$(rustc -vV | awk '/^host:/ { print $2 }')}"
+printf 'binary=%s raw_bytes=%s sha256=%s\n' "$binary" "$(size_bytes "$binary")" "$(shasum -a 256 "$binary" | awk '{ print $1 }')"
 
 compressed=$(mktemp "${TMPDIR:-/tmp}/lazydb-binary.XXXXXX.xz")
 trap 'rm -f "$compressed"' EXIT HUP INT TERM

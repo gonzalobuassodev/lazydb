@@ -80,6 +80,8 @@ class LinuxBuildWrapperTests(unittest.TestCase):
         self.script.parent.mkdir(parents=True)
         shutil.copyfile(ROOT / "scripts/release/build-linux.sh", self.script)
         shutil.copyfile(ROOT / "scripts/release/Dockerfile.linux", self.script.parent / "Dockerfile.linux")
+        (self.repo / "scripts/ci").mkdir(parents=True)
+        shutil.copyfile(ROOT / "scripts/ci/run-with-timeout.py", self.repo / "scripts/ci/run-with-timeout.py")
         self.bin = self.directory / "bin"
         self.bin.mkdir()
         for name, contents in (

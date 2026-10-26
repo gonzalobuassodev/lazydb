@@ -8,9 +8,10 @@ MySQL, MariaDB, Oracle, SQL Server, SQLite, DuckDB, Redis, Valkey, MongoDB, and
 ClickHouse. MongoDB uses a document explorer, bounded JSON console, and native BSON/EJSON handling; see the
 [MongoDB guide](docs/mongodb.md) for current scope and verification limits.
 
-DuckDB is available as an embedded file or in-memory database. See the
-[DuckDB guide](docs/duckdb.md) for connection URLs, session behavior, and supported
-catalog and data operations.
+DuckDB is available as an embedded file or in-memory database with an optional
+DuckDB 1.5.6 C API runtime (not bundled by default). See the
+[DuckDB guide](docs/duckdb.md) for installing/configuring the runtime, connection
+URLs, session behavior, and supported catalog and data operations.
 
 > **Project status:** LazyDB is currently in beta. The core database workspace,
 > connection management, SQL execution, and coding-agent interfaces are usable,

@@ -1,0 +1,37 @@
+[package]
+name = "libduckdb-sys"
+version = "1.10506.0"
+edition = "2024"
+rust-version = "1.94"
+license = "MIT"
+description = "Runtime-loaded DuckDB C API bindings for LazyDB"
+links = "duckdb"
+build = "build.rs"
+workspace = "../.."
+
+[lib]
+name = "libduckdb_sys"
+
+[features]
+default = []
+generator-tests = []
+
+[dependencies]
+libloading = "0.8"
+dirs = "6.0"
+
+[build-dependencies]
+quote = "1"
+syn = { version = "2", features = ["full", "parsing"] }
+
+[dev-dependencies]
+syn = { version = "2", features = ["full", "parsing"] }
+
+[[test]]
+name = "bindings_generation"
+path = "tests/bindings_generation.rs"
+required-features = ["generator-tests"]
+
+[[test]]
+name = "runtime_loading"
+path = "tests/runtime_loading.rs"

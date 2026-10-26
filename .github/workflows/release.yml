@@ -61,6 +61,7 @@ jobs:
   quality:
     needs: plan
     runs-on: ubuntu-24.04
+    timeout-minutes: 30
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
@@ -68,7 +69,13 @@ jobs:
           persist-credentials: false
           ref: ${{ github.event_name == 'workflow_dispatch' && 'main' || needs.plan.outputs.tag }}
       - run: rustup toolchain install 1.94.0 --profile minimal --component rustfmt --component clippy --no-self-update
-      - run: cargo +1.94.0 fmt --all -- --check
+      - name: Prepare pinned DuckDB runtime for quality tests
+        shell: bash
+        run: |
+          python3 scripts/ci/prepare-duckdb-runtime.py --target x86_64-unknown-linux-gnu --output-dir "$RUNNER_TEMP/lazydb-duckdb-runtime" --cache-dir "$RUNNER_TEMP/lazydb-duckdb-cache" --print-env >> "$GITHUB_ENV"
+          python3 scripts/ci/test-prepare-duckdb-runtime.py
+          python3 scripts/ci/test-run-with-timeout.py
+      - run: python3 scripts/ci/run-with-timeout.py 600 -- cargo +1.94.0 fmt --all -- --check
       - name: Cache Rust build
         uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2
         with:
@@ -79,14 +86,15 @@ jobs:
           save-if: false
       - name: Distribution contracts
         run: |
-          sh scripts/release/test-distribution.sh
+          python3 scripts/ci/run-with-timeout.py 120 -- sh scripts/release/test-distribution.sh
           python3 -B scripts/release/test-linux-runtime.py
           test "$(uname -s)" != Linux || python3 -B -c 'import runpy, unittest; module=runpy.run_path("scripts/release/test-linux-runtime.py"); suite=unittest.defaultTestLoader.loadTestsFromTestCase(module["LinuxElfIntegrationTests"]); result=unittest.TextTestRunner(verbosity=2).run(suite); raise SystemExit(not result.wasSuccessful() or result.skipped != [])'
-      - run: cargo +1.94.0 clippy --locked --all-targets --all-features --timings -- -D warnings
-      - run: cargo +1.94.0 test --locked --all-targets --all-features --timings
+      - run: python3 scripts/ci/run-with-timeout.py 600 -- cargo +1.94.0 clippy --locked --all-targets --all-features --timings -- -D warnings
+      - run: python3 scripts/ci/run-with-timeout.py 600 -- cargo +1.94.0 test --locked --all-targets --all-features --timings
 
   build:
     needs: plan
+    timeout-minutes: 30
     strategy:
       fail-fast: false
       matrix:
@@ -115,6 +123,17 @@ jobs:
       - name: Install Rust on the host
         if: runner.os != 'Linux'
         run: rustup toolchain install 1.94.0 --target "${{ matrix.target }}" --profile minimal --no-self-update
+      - name: Verify target-specific updater dependencies
+        if: runner.os != 'Linux'
+        shell: bash
+        run: |
+          python3 scripts/ci/test-check-update-dependencies.py
+          python3 scripts/ci/run-with-timeout.py 120 -- python3 scripts/ci/check-update-dependencies.py --target "${{ matrix.target }}"
+      - name: Verify Linux updater dependencies in the pinned build image
+        if: runner.os == 'Linux'
+        run: |
+          sh scripts/release/build-linux.sh "${{ matrix.target }}" --exec python3 scripts/ci/test-check-update-dependencies.py
+          sh scripts/release/build-linux.sh "${{ matrix.target }}" --exec python3 scripts/ci/check-update-dependencies.py --target "${{ matrix.target }}"
       - name: Prepare pinned Linux build image
         if: runner.os == 'Linux'
         run: sh scripts/release/build-linux.sh "${{ matrix.target }}" --prepare
@@ -164,7 +183,8 @@ jobs:
           PY
       - name: Build macOS and Windows
         if: matrix.target != 'x86_64-unknown-linux-gnu' && matrix.target != 'aarch64-unknown-linux-gnu'
-        run: cargo +1.94.0 build --release --locked --target "${{ matrix.target }}" --timings
+        shell: bash
+        run: python3 scripts/ci/run-with-timeout.py 600 -- cargo +1.94.0 build --release --locked --target "${{ matrix.target }}" --timings
       - name: Check macOS binary dependencies
         if: matrix.target == 'x86_64-apple-darwin' || matrix.target == 'aarch64-apple-darwin'
         run: scripts/release/check-macos-dependencies.sh "target/${{ matrix.target }}/release/lazydb"
@@ -172,8 +192,17 @@ jobs:
         if: matrix.os != 'windows-2025'
         run: scripts/release/smoke-artifact.sh "target/${{ matrix.target }}/release/lazydb" "${{ needs.plan.outputs.version }}"
       - name: Report binary size and dynamic dependencies
-        if: matrix.os != 'windows-2025'
-        run: scripts/release/check-binary-size.sh "target/${{ matrix.target }}/release/lazydb"
+        env:
+          TARGET: ${{ matrix.target }}
+        shell: bash
+        run: |
+          binary="target/${TARGET}/release/lazydb"
+          [ "$TARGET" = x86_64-pc-windows-msvc ] && binary="${binary}.exe"
+          python3 scripts/ci/run-with-timeout.py 120 -- python3 scripts/release/report-client-size.py --binary "$binary" --target "$TARGET"
+          case "$TARGET" in
+            *apple-darwin) scripts/release/check-macos-dependencies.sh "$binary" ;;
+            *linux-gnu) scripts/release/check-binary-size.sh "$binary" ;;
+          esac
       - name: Assemble archive
         env:
           TARGET: ${{ matrix.target }}
@@ -189,10 +218,14 @@ jobs:
           if [ "$TARGET" = x86_64-pc-windows-msvc ]; then executable="${executable}.exe"; output_name=lazydb.exe; fi
           cp "$executable" "$staging/$output_name"
           cp README.md LICENSE-MIT LICENSE-APACHE "$staging/"
-          if [ "$TARGET" = x86_64-pc-windows-msvc ]; then
-             (cd dist/package && 7z a -tzip "../lazydb_${VERSION}_${TARGET}.zip" "lazydb_${VERSION}_${TARGET}")
-          else
-            python3 scripts/release/package-archive.py "$staging" "dist/lazydb_${VERSION}_${TARGET}.tar.xz"
+           if [ "$TARGET" = x86_64-pc-windows-msvc ]; then
+              (cd dist/package && 7z a -tzip "../lazydb_${VERSION}_${TARGET}.zip" "lazydb_${VERSION}_${TARGET}")
+             python3 scripts/ci/run-with-timeout.py 120 -- python3 scripts/release/check-client-artifact.py --binary "$executable" --archive "dist/lazydb_${VERSION}_${TARGET}.zip" --target "$TARGET"
+             python3 scripts/ci/run-with-timeout.py 120 -- python3 scripts/release/report-client-size.py --binary "$executable" --archive "dist/lazydb_${VERSION}_${TARGET}.zip" --target "$TARGET"
+           else
+             python3 scripts/release/package-archive.py "$staging" "dist/lazydb_${VERSION}_${TARGET}.tar.xz"
+             python3 scripts/ci/run-with-timeout.py 120 -- python3 scripts/release/check-client-artifact.py --binary "$executable" --archive "dist/lazydb_${VERSION}_${TARGET}.tar.xz" --target "$TARGET"
+             python3 scripts/ci/run-with-timeout.py 120 -- python3 scripts/release/report-client-size.py --binary "$executable" --archive "dist/lazydb_${VERSION}_${TARGET}.tar.xz" --target "$TARGET"
             mkdir -p dist/smoke
             tar -xJf "dist/lazydb_${VERSION}_${TARGET}.tar.xz" -C dist/smoke
             cmp "$executable" "dist/smoke/lazydb_${VERSION}_${TARGET}/lazydb"
