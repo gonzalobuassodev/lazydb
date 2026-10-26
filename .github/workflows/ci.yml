@@ -36,6 +36,7 @@ jobs:
             target: aarch64-unknown-linux-gnu
           - os: macos-15-intel
             target: x86_64-apple-darwin
+            cargo_jobs: 4
           - os: macos-14
             target: aarch64-apple-darwin
           - os: windows-2025
@@ -43,6 +44,7 @@ jobs:
     env:
       RUSTUP_TOOLCHAIN: 1.94.0
       LAZYDB_DUCKDB_TARGET: ${{ matrix.target }}
+      CARGO_BUILD_JOBS: ${{ matrix.cargo_jobs || 2 }}
       CARGO_INCREMENTAL: '0'
       CARGO_PROFILE_TEST_DEBUG: '0'
     steps:
@@ -50,6 +52,14 @@ jobs:
         with: { persist-credentials: false }
       - name: Install Rust
         run: rustup toolchain install 1.94.0 --target "${{ matrix.target }}" --profile minimal --no-self-update
+      - name: Cache native runtime test build
+        uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2
+        with:
+          shared-key: duckdb-runtime-${{ matrix.os }}-${{ matrix.target }}
+          cache-bin: false
+          cache-targets: true
+          cache-on-failure: true
+          save-if: true
       - name: Prepare pinned DuckDB C API test runtime (Unix)
         if: runner.os != 'Windows'
         shell: bash
