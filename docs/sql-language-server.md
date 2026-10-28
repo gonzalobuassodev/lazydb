@@ -1,12 +1,75 @@
-# SQL Language Server Design Notes
+# Neovim Integration and SQL Language Server
 
-This document records the implementation boundaries for the Neovim SQL and
-MyBatis language server. It is intentionally separate from the user-facing
-configuration documentation while the protocol is still being implemented.
+LazyDB offers a Neovim terminal plugin and a standalone SQL/MyBatis language
+server. Install the [LazyDB CLI](installation.md) first. The plugin starts the
+TUI; the language server supplies editor diagnostics and completion.
 
-## Task 1 Findings
+## Neovim Integration
 
-### SQL parser locations
+[`yelog/lazydb.nvim`](https://github.com/yelog/lazydb.nvim) runs one LazyDB
+process per Neovim tab in a floating terminal. For `lazy.nvim`:
+
+```lua
+return {
+  {
+    "yelog/lazydb.nvim",
+    cmd = { "LazyDB", "LazyDBToggle", "LazyDBHide", "LazyDBStop", "LazyDBRestart" },
+    opts = {
+      executable = "lazydb",
+      window = { width = 0.92, height = 0.90, border = "rounded" },
+    },
+  },
+}
+```
+
+Use `:checkhealth lazydb` to verify the executable and CLI API. The plugin
+repository maintains native package installation instructions and the complete
+command reference. See [external themes](configuration.md#external-theme-file)
+for following Neovim colors.
+
+## Start the Language Server
+
+Configure your editor's LSP client to launch:
+
+```sh
+lazydb lsp --stdio --project . --dialect postgres
+```
+
+The project directory is resolved from the language server's working directory;
+use an explicit path when the editor starts it elsewhere. The server provides
+offline SQL/MyBatis syntax diagnostics and completion, plus profile-backed
+catalog completion when a project/profile can be resolved. It does not execute
+user SQL, perform database-backed diagnostics, or infer application-language
+types. Standard output is reserved for framed JSON-RPC messages; logs go to
+standard error.
+
+## Catalog Completion
+
+Completion replaces only the current identifier segment. Accepting `sys_user`
+inserts `sys_user` rather than an automatically generated full path. After a
+dot, completion navigates the next catalog level: `database.` lists schemas,
+`database.schema.` lists tables/views, and `schema.` resolves inside the active
+database, where the selected dialect supports those paths. Candidate details
+show the database/schema source for ambiguous names; visible aliases such as
+`u.` load their relation columns on demand.
+
+The path syntax follows the profile dialect. SQL Server supports three-part
+names, MySQL and MariaDB use a database-as-schema model, SQLite uses attached
+database names such as `main`, and PostgreSQL does not present ordinary
+cross-database paths. Oracle uses service/owner scope. Redis and Valkey use
+key/value workflows rather than SQL identifier completion. Profile
+`catalog_scope` and database permissions remain the visibility boundary.
+
+Without a usable profile, completion falls back to offline SQL candidates.
+If catalog candidates are missing, check the selected project's profile access,
+catalog scope, and database grants in [Configuration](configuration.md).
+
+## Implementation Notes
+
+The sections below preserve parser, protocol, and MyBatis design decisions.
+They explain implementation boundaries and the original rollout stages.
+
+### SQL Parser Locations
 
 The pinned `sqlparser` version is `0.62.0`. Its public `ParserError` has three
 variants, including a string-based `ParserError(String)` variant. It does not
@@ -31,7 +94,7 @@ The parser probe is covered by `tests/sql_parser_location_probe.rs`. A future
 upgrade of `sqlparser` must rerun this probe before changing the diagnostic
 adapter.
 
-### Protocol dependency decision
+### Protocol Dependency Decision
 
 Do not hand-roll JSON-RPC framing. Task 2 must select a maintained Rust LSP
 protocol implementation after checking its current MSRV, Tokio integration,
@@ -39,7 +102,7 @@ stdio transport, cancellation, and license. The server stdout contract is
 strict: only framed JSON-RPC messages may be written there; logs belong on
 stderr.
 
-### MyBatis XML recovery strategy
+### MyBatis XML Recovery Strategy
 
 The first implementation will use a bounded, source-span-preserving scanner
 for mapper XML rather than removing tags with a regular expression. It must
@@ -67,14 +130,14 @@ because their text can be concatenated. Until their source mapping is
 implemented, affected units must provide only safe local completion and must
 suppress whole-unit syntax diagnostics.
 
-## M1/M2 diagnostic boundary
+### M1/M2 Diagnostic Boundary
 
 The first release provides offline SQL syntax diagnostics for plain SQL and
 trusted static MyBatis SQL. It does not execute SQL, query the database for
 validation, infer Java/OGNL types, or prove that every dynamic SQL branch is
 valid.
 
-## Current implementation boundary
+### Current Implementation Boundary
 
 The stdio server, document lifecycle, UTF-16 conversion, offline completion,
 syntax diagnostics, static MyBatis extraction, conservative dynamic-tag

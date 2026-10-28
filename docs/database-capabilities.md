@@ -4,6 +4,10 @@ This page describes the implemented adapter contract. It is a capability
 reference, not a claim that a live server is available on the development
 machine.
 
+For connection setup, see [Configuration](configuration.md). Dedicated guides
+cover [DuckDB runtime and sessions](duckdb.md), [MongoDB](mongodb.md), and the
+[Redis/Valkey browser](redis-browser.md).
+
 ## Driver Matrix
 
 The static driver contract is split into interaction model, catalog/DDL,
@@ -22,7 +26,86 @@ disable it at runtime.
 | SQLite | Relational | Available; table/view DDL and catalog mutation | Rowid-table insert lookup; update/delete require primary key; table shape is gated | AUTO/MANUAL | Progress handler / close | Not applicable |
 | DuckDB | Embedded relational | Catalog/search/preview and native DDL; schema/table/view/sequence/ART index create; typed PK/UNIQUE/CHECK/FK constraints on table creation; table/column rename, nullable add, column drop/type/default/nullability and comment change; view rename/query/comment change; authoritative table constraints/index metadata and sequence/index definitions; table constraint edit and table index draft edit gated; macro structured management unavailable | Insert/update/delete for primary-key tables | AUTO/MANUAL | Native operation interrupt | Not applicable |
 | Redis | Key-value | No SQL catalog or DDL | Native key/value and collection mutation, separate from relation grid | No SQL transaction UI | Not applicable | Read-only `INFO` metrics |
-| ClickHouse | Relational | Available; database/table/view/MV and bounded native object catalog | Constrained table shape edits only; no general row editing | No manual transactions | Local request cancellation only; server query may continue | `system.events` counters and bounded `system.processes` |
+| Valkey | Key-value, Redis-compatible | No SQL catalog or DDL | Shared Redis-compatible key/value and collection mutation | No SQL transaction UI | Not applicable | Read-only `INFO` metrics |
+| MongoDB | Document | Database, collection, and index discovery; native document commands, no SQL DDL | Document operations use a separate BSON/EJSON workflow; no relational grid editing | Bounded console transactions on replica sets or sharded clusters; see [MongoDB](mongodb.md#transactions) | No advertised server-side cancellation | Manual `serverStatus`, `dbStats`, and bounded `currentOp`; see [MongoDB](mongodb.md#monitoring-and-principals) |
+| ClickHouse | Relational | Available; database/table/view/MV and bounded native object catalog | Not advertised; supported catalog table-shape edits are separate | No manual transactions | Local request cancellation only; server query may continue | `system.events` counters and bounded `system.processes` |
+
+Native key/value and document workflows have their own operation checks. The
+relational grid and SQL transaction flags do not describe those workflows;
+consult the linked database guide for the supported command scope.
+
+## Runtime Requirements
+
+Oracle connections require Oracle Database 12c or newer and a working native
+Oracle client. The default build includes the adapter; see
+[Oracle client discovery](configuration.md#connection-profile-fields).
+
+DuckDB connections require an optional DuckDB 1.5.6 C API runtime. It is not
+bundled with the default binary or downloaded automatically. See the
+[DuckDB guide](duckdb.md) for installation, local files, in-memory sessions,
+and supported catalog operations.
+
+## Current Limitations
+
+Shared workflows that are not available yet include general SQL query-plan
+visualization, SSH tunneling, general-purpose data import/export, and automatic
+recovery-bundle export for a corrupted or partially unreadable workspace.
+Normal console/tab persistence and console renaming are supported.
+
+Editing, transactions, cancellation, and monitoring differ by database as shown
+above. Relation operations can also be disabled by missing row identity,
+permissions, unsupported table shapes, or stale snapshots. Oracle relation-grid
+editing, advanced LOB metadata, and cancellation are not advertised. SQL Server
+authentication and monitoring limits are described in the catalog section below.
+
+See the [issue tracker](https://github.com/yelog/lazydb/issues) and
+[release notes](https://github.com/yelog/lazydb/releases) for current priorities
+and version-specific changes.
+
+## MariaDB
+
+MariaDB shares the MySQL-compatible transport but has its own dialect and
+product/version gates, with support starting at MariaDB 10.5. Implemented
+workflows include SQL execution, AUTO/MANUAL transactions, monitoring,
+database-is-schema catalog browsing, CHECK metadata, native trigger DDL, and
+version-gated sequence discovery.
+
+Relation data insertion uses `RETURNING`, including keyless inserts; existing-row
+updates and deletes require primary-key metadata. See the relation-data matrix
+below for operation-specific checks. Structured column/index/constraint
+mutation, sequence mutation, routine/event management, system-versioned history
+operations, and MariaDB-specific authentication options remain gated. The
+[MariaDB test database guide](mariadb-test-database.md) provides an isolated
+server with broad data-type coverage.
+
+## Redis and Valkey
+
+Redis and Valkey are distinct profiles using the same Redis-compatible transport
+and key/value browser. Use `redis://` or `rediss://` for Redis and `valkey://`
+or `valkeys://` for Valkey. Select the Valkey driver when importing a
+Redis-shaped endpoint for a Valkey server so the saved product identity stays
+Valkey. Imported credentials follow the configured secret policy and are omitted
+from exported profile URLs.
+
+Both drivers use a non-negative, server-configured logical database number.
+SQL editing, SQL transactions, and relational catalog DDL do not apply. The
+shared browser supports bounded discovery, typed value previews, key/value and
+collection mutations, TTL controls, and read-only `INFO` metrics. Valkey-specific
+Cluster/Sentinel routing and module types are not implemented.
+
+The isolated fixture verifies Valkey 8.1.10, pinned as
+`valkey/valkey@sha256:081c2f5cb575efc901aa80ff9cdbd1ec6a301682fd35e1ebb4b0990a4a4a8507`.
+See [Contributing](../CONTRIBUTING.md) for fixture commands, and the
+[browser](redis-browser.md) and [value-preview](redis-value-preview.md) guides
+for interaction details.
+
+## MongoDB
+
+MongoDB uses a document explorer, native BSON/EJSON values, and a bounded JSON
+command console. It has separate document, monitoring, principal-inspection,
+and transaction workflows. Console command support is narrower than the native
+MongoDB command set; see the [MongoDB guide](mongodb.md) for the current command
+scope, topology requirements, permission behavior, and live verification limits.
 
 ## ClickHouse
 
@@ -90,7 +173,7 @@ other secrets are never read or reproduced.
 | SQL Server | Bound database's `sys.database_principals`; `sys.database_role_members` and `sys.database_permissions` | Server logins are excluded; built-in fixed roles and users are described rather than emitted as replayable statements; identifiers use bracket quoting |
 | Oracle | `all_users` plus `dba_roles` (falling back to `user_role_privs`, marked incomplete) | User and role names are namespaced in the native identity because they can collide; `DBMS_METADATA.GET_DDL` is not used for users because it embeds `IDENTIFIED BY VALUES` |
 | SQLite | Not applicable | The group expands to an explicit "SQLite does not support users or roles" notice and issues no account query |
-| Redis | Not applicable | No `Users & Roles` group is shown |
+| Redis / Valkey | Not applicable | No `Users & Roles` group is shown |
 | ClickHouse | `system.users`, `system.roles`, `system.grants`, and `system.role_grants`; cluster scope | Safe identity/grant columns only; permission and role-inherited coverage is Partial; structured GRANT/REVOKE/membership mutations are unavailable |
 
 ## Relation Data Mutation Matrix
@@ -105,6 +188,7 @@ Relation Data 的行操作能力与 Catalog DDL 能力分开判断。新增一�
 | SQL Server | `OUTPUT inserted.*` | Available where OUTPUT semantics are supported | Primary key |
 | SQLite rowid table | Same-connection `last_insert_rowid()` lookup | Available for ordinary rowid tables | Primary key |
 | SQLite `WITHOUT ROWID` / unsupported virtual table shape | Shape-specific strategy required | Capability-gated | Primary key |
+| DuckDB | Typed insert for primary-key tables; see [DuckDB](duckdb.md#catalog-and-data) | Not advertised | Primary key |
 
 Review SQL uses the canonical catalog identity and driver identifier quoting. MariaDB/MySQL use backticks and `() VALUES ()` for an empty-column insert; PostgreSQL/SQLite retain `DEFAULT VALUES`. Review SQL is display-only; execution always uses typed, bound mutation requests.
 
@@ -125,7 +209,7 @@ their adapter tests pass.
 | MariaDB | Database is schema | MySQL core targets plus version-supported objects | MySQL core targets plus version-supported objects | Share safe implementation pieces, but gate MariaDB syntax independently |
 | SQL Server | Database + schema | Database, schema, table, view, sequence, principal | Database/schema/table/view/sequence/index/constraint/principal | Login, database user, and role have different scopes; batches matter |
 | SQLite | File database + attached aliases | File database, table, view, index, trigger | Table, view, index, trigger | No users/roles; complex table edits require a lossless rebuild plan |
-| Redis | Logical database + key namespace | Key and supported collection elements | Values, collection elements, and TTL where native semantics permit | Database number is not a creatable SQL catalog; streams are not freely editable |
+| Redis / Valkey | Logical database + key namespace | Key and supported collection elements | Values, collection elements, and TTL where native semantics permit | Database number is not a creatable SQL catalog; streams are not freely editable |
 | ClickHouse | Database is schema | Database, table, view and materialized view slices | Table rename/comment/simple appended columns; view rename/comment; unsupported engine/shape changes gated | Preserve native engine, sorting and target definitions; no drop/create emulation |
 
 The implementation is deliberately staged. The current implementation status
@@ -135,10 +219,13 @@ for the first mutation slice is:
 | --- | --- |
 | PostgreSQL | Existing PostgreSQL create/edit contract |
 | Oracle | Create and edit table/view/sequence from schema object groups; complex column/index/constraint edits remain gated |
-| MySQL/MariaDB | Create and edit table/view from the database-is-schema namespace; data-grid, column/index/constraint, sequence, principal, and event edits remain gated until their round-trip suites pass |
+| MySQL/MariaDB | Create and edit table/view from the database-is-schema namespace; column/index/constraint, sequence, principal, and event edits remain gated. Relation-data operations have separate checks in the matrix above |
 | SQL Server | Create and edit table/view from a database/schema object group; column/index/constraint edits remain gated |
 | SQLite | Create and edit table/view; complex table structure edits use a lossless rebuild plan |
-| Redis | No SQL catalog mutation; native Key-Value mutation supports typed replacement, targeted collection edits, and TTL preservation |
+| DuckDB | Native schema/table/view/sequence/index operations with operation-specific limits; see [DuckDB catalog and data](duckdb.md#catalog-and-data) |
+| Redis / Valkey | No SQL catalog mutation; native Key-Value mutation supports typed replacement, targeted collection edits, and TTL preservation |
+| MongoDB | Separate native document/catalog workflow; no SQL catalog mutation. See [MongoDB](mongodb.md) for the console and principal boundaries |
+| ClickHouse | Bounded database/table/view/materialized-view mutations; see [ClickHouse](#clickhouse) for engine and table-shape limits |
 
 Redis mutations are opened from the Redis browser: `a` creates a key under the
 selected database/prefix and `e` edits a loaded key value. Collection values are
@@ -165,7 +252,7 @@ mutation protocols even though they share the same Explorer action contract.
 
 ## Monitoring Dashboard
 
-The connection dashboard is available for PostgreSQL, MySQL, MariaDB, Redis, and ClickHouse.
+The connection dashboard is available for PostgreSQL, MySQL, MariaDB, Redis, Valkey, and ClickHouse.
 It collects read-only status counters and connection gauges; PostgreSQL, MySQL,
 and MariaDB also expose a bounded process list. SQLite and Oracle report
 monitoring as unsupported, while SQL Server's dashboard and process metrics are
@@ -179,6 +266,12 @@ restricted when the database role cannot inspect it; ClickHouse visibility is
 otherwise unknown because the server does not expose a completeness flag. Dashboard cancellation
 aborts the local request and does not confirm remote query termination.
 
+MongoDB has a separate, manually refreshed monitor for `serverStatus`, `dbStats`,
+and `currentOp`. See [MongoDB monitoring](mongodb.md#monitoring-and-principals)
+for permission handling and result limits.
+
+## Catalog and Version Reference
+
 | Driver | Server/version gate | Namespace model | Catalog groups | Metadata support |
 | --- | --- | --- | --- | --- |
 | PostgreSQL | PostgreSQL 12 or newer | Database + schema | Tables, views, materialized views, sequences, functions, procedures, types | Type family, defaults, identity, generated expressions, character length, collation, comments; numeric precision/scale is not advertised |
@@ -187,7 +280,10 @@ aborts the local request and does not confirm remote query termination.
 | Oracle | Profile/URL recognition, native connect/probe, basic query, catalog, preview, DDL, and generated result pagination implemented for Oracle 12c+; advanced contract pending | Service + owner/schema | Tables, views, sequences, columns, indexes, primary/unique/check constraints | Type family, defaults, numeric precision/scale, character length; advanced LOB metadata pending |
 | SQL Server | SQL Server 2012 or newer | Database + schema | Tables, views, functions, procedures, sequences, triggers; relation children include columns, indexes, keys, and foreign keys | Type family, defaults, identity, computed/generated expressions, numeric precision/scale, character length, collation, comments, and rowversion metadata |
 | SQLite | SQLite metadata support through native schema tables; no server-version gate | Database + attached schema aliases | Tables, views, triggers | Default expressions and hidden-column metadata; unsupported fields are represented as unsupported |
+| DuckDB | Optional DuckDB 1.5.6 C API runtime | Local file or in-memory database, catalog and schema; attached objects are session-scoped | Schemas, tables, views, sequences, indexes, and searchable native objects | Native types, columns, constraints, indexes, and definitions with the limits in the [DuckDB guide](duckdb.md) |
 | Redis | Redis server; logical database selected by profile | Logical database + key namespace | Keys and native collection metadata | Key type, TTL, memory, and value-shape metadata; relational catalog fields are not applicable |
+| Valkey | Valkey 8.1.10 verified by the pinned fixture | Logical database + key namespace | Shared Redis-compatible key and collection discovery | Key type, TTL, memory, and typed previews; no SQL catalog |
+| MongoDB | Server permissions gate discovery and monitoring; transactions require a replica set or sharded cluster | Database + collection | Databases, collections, and indexes | Native BSON/EJSON document values and dedicated metadata; see [verification limits](mongodb.md#verification-limits) |
 | ClickHouse | HTTP interface; supported and tested against ClickHouse 25.8 LTS | Database is schema | Tables, views, materialized views, dictionaries, functions; projections are table children | Names, engine/native kind, comments, columns, defaults, and native definition metadata where available |
 
 PostgreSQL, MySQL, MariaDB, SQLite, and ClickHouse advertise lazy children. SQLite opens a pool with
@@ -358,6 +454,7 @@ Cancelling SQL Server execution closes the active session because the TDS driver
 does not expose a cancellation primitive. SQL Server rolls back an open
 transaction when that session closes; LazyDB does not claim commit or rollback
 acknowledgement after the forced close.
+
 ## Coding Agent Boundary
 
 LazyDB's agent interface uses the same native adapters as the TUI, but each

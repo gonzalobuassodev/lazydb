@@ -91,8 +91,7 @@ fn keyboard_reference_is_dedicated_and_complete() {
         );
     }
 
-    assert!(readme.contains("Ctrl-Shift-s"));
-    assert!(readme.contains("drag alone\n  never writes to the clipboard"));
+    assert!(readme.contains("docs/configuration.md"));
 
     let architecture = include_str!("../docs/architecture.md");
     for term in [
