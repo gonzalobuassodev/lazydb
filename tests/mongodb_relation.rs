@@ -4,6 +4,11 @@
 //! DATA grid lists the collection's documents. BSON maps onto the existing
 //! `CellValue` variants (S5) and paging reuses `FindSpec` skip/limit, so the
 //! tab behaves like the SQL table tab it replaces.
+//!
+//! T4 (S3): the edit key opens the selected document as editable Canonical
+//! EJSON and saving replaces exactly that document, bounded to its original
+//! `_id`. This unit writes data, so every refusal below is a safety invariant:
+//! each one must leave stored documents and emitted commands untouched.
 
 mod support;
 
@@ -741,5 +746,1535 @@ fn opening_the_ddl_view_on_a_sql_table_still_loads_the_sql_ddl() {
             .iter()
             .any(|command| matches!(command, Command::LoadMongoRelationStructure { .. })),
         "sql tables never route through the mongodb structure loader, got {commands:?}"
+    );
+}
+
+// ---------------------------------------------------------------------------
+// T4 (S3): the document edit modal, Canonical EJSON, and one bounded write
+// ---------------------------------------------------------------------------
+
+use lazydb::{
+    db::{
+        DatabaseConnection, RelationPreview,
+        mongodb::mutation::MongoMutationOutcome,
+        query::{ColumnMeta, QueryOutcome, QueryStats, ResultSet},
+    },
+    model::{
+        cell_editor::JsonBuffer,
+        relation::{RelationDescriptor, RelationTab},
+        relation_edit::{
+            DOCUMENT_ID_IMMUTABLE_MESSAGE, DocumentEditorState, DocumentEditorView,
+            MONGODB_READ_ONLY_MESSAGE, RelationGridMode,
+        },
+    },
+};
+
+const RUEDAS_ID: &str = "6ae275e9e71e84bffceecaa8";
+const FRENO_ID: &str = "6ae275e9e71e84bffceecaa9";
+const CADENA_ID: &str = "6ae275e9e71e84bffceecaaa";
+
+fn object_id(hex: &str) -> mongodb::bson::Bson {
+    mongodb::bson::Bson::ObjectId(
+        mongodb::bson::oid::ObjectId::parse_str(hex).expect("test object id"),
+    )
+}
+
+/// The three documents the demo collection holds, as the grid loads them.
+fn bike_documents() -> Vec<MongoDocument> {
+    vec![
+        document(mongodb::bson::doc! {
+            "_id": object_id(RUEDAS_ID),
+            "name": "Ruedas Pro",
+            "price": 1200i64,
+            "active": true,
+        }),
+        document(mongodb::bson::doc! {
+            "_id": object_id(FRENO_ID),
+            "name": "Freno XT",
+            "price": 850i64,
+            "active": true,
+        }),
+        document(mongodb::bson::doc! {
+            "_id": object_id(CADENA_ID),
+            "name": "Cadena 11v",
+            "price": 340i64,
+            "active": false,
+        }),
+    ]
+}
+
+fn mongo_preview_request(commands: &[Command]) -> RelationRequest {
+    commands
+        .iter()
+        .find_map(|command| match command {
+            Command::LoadMongoRelationPreview(request) => Some(request.clone()),
+            _ => None,
+        })
+        .unwrap_or_else(|| panic!("the tab must request the first page, got {commands:?}"))
+}
+
+fn active_relation_tab(app: &App) -> &RelationTab {
+    match app.tabs.get(app.active_tab) {
+        Some(WorkspaceTab::Relation(tab)) => tab,
+        _ => panic!("the active tab must be a relation tab"),
+    }
+}
+
+fn active_relation_tab_mut(app: &mut App) -> &mut RelationTab {
+    match app.tabs.get_mut(app.active_tab) {
+        Some(WorkspaceTab::Relation(tab)) => tab,
+        _ => panic!("the active tab must be a relation tab"),
+    }
+}
+
+/// Opens the collection tab and answers its preview request exactly as the
+/// runtime does: one page of grid rows plus the BSON documents behind them.
+fn mongo_app_with_page(documents: Vec<MongoDocument>) -> (App, RelationRequest) {
+    let (mut app, profile_id, _generation) = mongo_app();
+    assert!(app.explorer.select_id(collection_node(profile_id)));
+    // The first activation expands the collection, the second opens the tab.
+    app.update(Action::ExplorerOpenSelected);
+    let commands = app.update(Action::ExplorerOpenSelected);
+    let request = mongo_preview_request(&commands);
+    let loaded = page(documents.clone(), None);
+    let preview = RelationPreview {
+        sql: find_description(&relation_find_spec(&mongo_namespace(), request.page)),
+        result: QueryOutcome {
+            result_sets: vec![page_result_set(&loaded)],
+            stats: QueryStats::new(Default::default(), Default::default(), documents.len()),
+        },
+        pagination: lazydb::model::pagination::ResultPagination::from_page(
+            request.page,
+            documents.len(),
+        ),
+        row_versions: None,
+    };
+    let commands = app.update(Action::MongoRelationPreviewLoaded {
+        request: request.clone(),
+        preview: Box::new(preview),
+        documents,
+    });
+    assert!(
+        commands.is_empty(),
+        "answering the preview writes nothing, got {commands:?}"
+    );
+    (app, request)
+}
+
+fn document_mode(app: &App) -> Option<RelationGridMode> {
+    active_relation_tab(app)
+        .edit
+        .as_ref()
+        .map(|edit| edit.mode.clone())
+}
+
+fn document_state(app: &App) -> DocumentEditorState {
+    match document_mode(app) {
+        Some(RelationGridMode::EditDocument(state)) => *state,
+        other => panic!("the document modal must be open, got {other:?}"),
+    }
+}
+
+/// Replaces the modal text the way a whole-document paste does.
+fn set_document_text(app: &mut App, text: &str) {
+    let tab = active_relation_tab_mut(app);
+    let Some(RelationGridMode::EditDocument(state)) = tab.edit.as_mut().map(|edit| &mut edit.mode)
+    else {
+        panic!("the document modal must be open");
+    };
+    state.input = JsonBuffer::new(text);
+}
+
+fn replace_commands(commands: &[Command]) -> Vec<&Command> {
+    commands
+        .iter()
+        .filter(|command| matches!(command, Command::ReplaceMongoRelationDocument { .. }))
+        .collect()
+}
+
+#[derive(Debug)]
+struct ReplaceCommand {
+    tab_id: Uuid,
+    tab_generation: u64,
+    namespace: MongoNamespace,
+    id: mongodb::bson::Bson,
+    replacement: mongodb::bson::Document,
+}
+
+fn one_replace_command(commands: &[Command]) -> ReplaceCommand {
+    let replaces = replace_commands(commands);
+    assert_eq!(
+        replaces.len(),
+        1,
+        "exactly one write must be emitted, got {commands:?}"
+    );
+    let Command::ReplaceMongoRelationDocument {
+        tab_id,
+        tab_generation,
+        namespace,
+        id,
+        replacement,
+        ..
+    } = replaces[0]
+    else {
+        unreachable!("filtered above")
+    };
+    ReplaceCommand {
+        tab_id: *tab_id,
+        tab_generation: *tab_generation,
+        namespace: namespace.clone(),
+        id: id.clone(),
+        replacement: replacement.clone(),
+    }
+}
+
+fn canonical_ejson(document: &MongoDocument) -> String {
+    document.canonical_ejson().expect("canonical ejson")
+}
+
+fn row_values(app: &App) -> Vec<Vec<CellValue>> {
+    active_relation_tab(app)
+        .edit
+        .as_ref()
+        .expect("the document grid session exists")
+        .rows
+        .iter()
+        .map(|row| row.current.clone())
+        .collect()
+}
+
+#[test]
+fn the_edit_key_opens_the_selected_document_as_canonical_ejson() {
+    let (mut app, _request) = mongo_app_with_page(bike_documents());
+
+    let commands = app.update(Action::RelationEditCell);
+
+    assert!(
+        commands.is_empty(),
+        "opening the modal writes nothing, got {commands:?}"
+    );
+    let state = document_state(&app);
+    assert_eq!(state.row, 0, "the modal edits the row under the cursor");
+    assert_eq!(state.collection, "speedbike_db.bikes");
+    assert_eq!(
+        state.id,
+        object_id(RUEDAS_ID),
+        "the modal keeps the original BSON _id value, not its rendering"
+    );
+    assert_eq!(
+        state.input.value(),
+        lazydb::model::relation_edit::canonical_document_ejson(&bike_documents()[0].bson),
+        "the modal opens with the whole document in Canonical EJSON"
+    );
+    assert_eq!(state.error, None);
+    assert!(!state.saving);
+    assert!(
+        state.title().contains("speedbike_db.bikes") && state.title().contains(RUEDAS_ID),
+        "the title names the collection and the document, got {}",
+        state.title()
+    );
+}
+
+#[test]
+fn the_modal_follows_the_row_under_the_cursor() {
+    let (mut app, _request) = mongo_app_with_page(bike_documents());
+    active_relation_tab_mut(&mut app).grid.selected_row = 2;
+
+    app.update(Action::RelationEditCell);
+
+    let state = document_state(&app);
+    assert_eq!(state.row, 2);
+    assert_eq!(state.id, object_id(CADENA_ID));
+    assert_eq!(
+        state.input.value(),
+        lazydb::model::relation_edit::canonical_document_ejson(&bike_documents()[2].bson)
+    );
+}
+
+/// Invariant 1: the write is bounded to the original `_id` value.
+#[test]
+fn saving_emits_one_replacement_bounded_to_the_original_id() {
+    let (mut app, _request) = mongo_app_with_page(bike_documents());
+    app.update(Action::RelationEditCell);
+    let edited = format!(
+        r#"{{"_id": {{"$oid": "{RUEDAS_ID}"}}, "name": "Ruedas Pro X", "price": {{"$numberLong": "1200"}}, "active": true}}"#
+    );
+    set_document_text(&mut app, &edited);
+
+    let commands = app.update(Action::RelationEditConfirm);
+
+    let replace = one_replace_command(&commands);
+    assert_eq!(
+        replace.id,
+        object_id(RUEDAS_ID),
+        "the filter carries the original _id value exactly"
+    );
+    assert_eq!(
+        replace.replacement.get("_id"),
+        Some(&object_id(RUEDAS_ID)),
+        "the replacement keeps the original _id"
+    );
+    assert_eq!(
+        replace.replacement.get_str("name"),
+        Ok("Ruedas Pro X"),
+        "the edited field is written"
+    );
+    assert_eq!(replace.namespace, mongo_namespace());
+    assert_eq!(replace.tab_id, active_relation_tab(&app).id);
+    assert_eq!(replace.tab_generation, active_relation_tab(&app).generation);
+    assert_eq!(
+        commands.len(),
+        1,
+        "the save must emit the write and nothing else, got {commands:?}"
+    );
+    let state = document_state(&app);
+    assert!(
+        state.saving,
+        "a second save is refused while the write runs"
+    );
+    assert_eq!(state.error, None);
+
+    assert!(
+        app.update(Action::RelationEditConfirm).is_empty(),
+        "one save emits one write"
+    );
+}
+
+/// Invariant 2: a replaced or removed `_id` is rejected with no command.
+#[test]
+fn a_replacement_that_changes_or_drops_the_id_emits_no_command() {
+    for edited in [
+        format!(r#"{{"_id": {{"$oid": "{FRENO_ID}"}}, "name": "Ruedas Pro"}}"#),
+        r#"{"name": "Ruedas Pro"}"#.to_owned(),
+    ] {
+        let (mut app, _request) = mongo_app_with_page(bike_documents());
+        app.update(Action::RelationEditCell);
+        set_document_text(&mut app, &edited);
+
+        let commands = app.update(Action::RelationEditConfirm);
+
+        assert!(
+            commands.is_empty(),
+            "a document that retargets or drops _id must not be written, got {commands:?}"
+        );
+        let state = document_state(&app);
+        assert_eq!(
+            state.error.as_deref(),
+            Some("the replacement document must keep the original _id"),
+            "the refusal is visible for {edited}"
+        );
+        assert!(!state.saving);
+    }
+}
+
+/// Invariant 3: invalid or non-document EJSON is rejected with no command.
+#[test]
+fn invalid_canonical_ejson_emits_no_command() {
+    for (edited, expected) in [
+        (r#"{"_id": {"$oid": "#.to_owned(), "invalid Canonical EJSON"),
+        (r#"[{"_id": 1}]"#.to_owned(), "requires a BSON document"),
+        (r#"""#.to_owned(), "invalid Canonical EJSON"),
+        (r#"{"_id": }"#.to_owned(), "invalid Canonical EJSON"),
+    ] {
+        let (mut app, _request) = mongo_app_with_page(bike_documents());
+        let before = row_values(&app);
+        app.update(Action::RelationEditCell);
+        set_document_text(&mut app, &edited);
+
+        let commands = app.update(Action::RelationEditConfirm);
+
+        assert!(
+            commands.is_empty(),
+            "invalid input {edited:?} must not reach the database, got {commands:?}"
+        );
+        let error = document_state(&app).error.unwrap_or_default();
+        assert!(
+            error.contains(expected),
+            "the refusal for {edited:?} must mention {expected:?}, got {error:?}"
+        );
+        assert_eq!(
+            row_values(&app),
+            before,
+            "a refused edit leaves the loaded page untouched"
+        );
+    }
+}
+
+/// Invariant 4: a read-only profile refuses before any command.
+#[test]
+fn a_read_only_profile_refuses_to_edit_documents() {
+    let (mut app, _request) = mongo_app_with_page(bike_documents());
+    for profile in &mut app.profiles {
+        profile.read_only = true;
+    }
+
+    let commands = app.update(Action::RelationEditCell);
+
+    assert!(
+        commands.is_empty(),
+        "opening the modal on a read-only profile writes nothing, got {commands:?}"
+    );
+    assert_eq!(
+        document_state(&app).error.as_deref(),
+        Some(MONGODB_READ_ONLY_MESSAGE),
+        "the modal reports that the profile is read-only"
+    );
+
+    set_document_text(
+        &mut app,
+        &format!(r#"{{"_id": {{"$oid": "{RUEDAS_ID}"}}, "name": "Nope"}}"#),
+    );
+    let commands = app.update(Action::RelationEditConfirm);
+
+    assert!(
+        commands.is_empty(),
+        "a read-only profile must never emit a write, got {commands:?}"
+    );
+    let state = document_state(&app);
+    assert_eq!(state.error.as_deref(), Some(MONGODB_READ_ONLY_MESSAGE));
+    assert!(!state.saving);
+}
+
+/// Invariant 5: no write without a document at the cursor.
+#[test]
+fn no_write_is_emitted_without_a_document_at_the_cursor() {
+    // An empty page has no row to edit, so the modal never opens.
+    let (mut app, _request) = mongo_app_with_page(Vec::new());
+    let commands = app.update(Action::RelationEditCell);
+    assert!(
+        commands.is_empty(),
+        "an empty page emits no command, got {commands:?}"
+    );
+    assert_eq!(document_mode(&app), Some(RelationGridMode::Browse));
+
+    // A cursor past the loaded page selects no document either.
+    let (mut app, _request) = mongo_app_with_page(bike_documents());
+    active_relation_tab_mut(&mut app).grid.selected_row = 7;
+    let commands = app.update(Action::RelationEditCell);
+    assert!(
+        commands.is_empty(),
+        "a cursor with no document emits no command, got {commands:?}"
+    );
+    assert_eq!(document_mode(&app), Some(RelationGridMode::Browse));
+    assert!(
+        app.notifications
+            .history()
+            .any(|notification| notification.body.contains("no document")),
+        "the refusal is visible"
+    );
+
+    // A page that no longer holds the edited row refuses to write it.
+    let (mut app, _request) = mongo_app_with_page(bike_documents());
+    app.update(Action::RelationEditCell);
+    active_relation_tab_mut(&mut app).mongodb_documents = Some(Vec::new());
+    let commands = app.update(Action::RelationEditConfirm);
+    assert!(
+        commands.is_empty(),
+        "a row that is no longer on the page emits no command, got {commands:?}"
+    );
+    assert!(document_state(&app).error.is_some());
+}
+
+/// Invariant 6 (success): the replacement is reported and the page reloads.
+#[test]
+fn a_replaced_document_is_reported_and_the_page_reloads() {
+    let (mut app, request) = mongo_app_with_page(bike_documents());
+    app.update(Action::RelationEditCell);
+    set_document_text(
+        &mut app,
+        &format!(r#"{{"_id": {{"$oid": "{RUEDAS_ID}"}}, "name": "Ruedas Pro X"}}"#),
+    );
+    let commands = app.update(Action::RelationEditConfirm);
+    let replace = one_replace_command(&commands);
+
+    let commands = app.update(Action::MongoRelationDocumentReplaced {
+        tab_id: replace.tab_id,
+        tab_generation: replace.tab_generation,
+        id: replace.id.clone(),
+    });
+
+    assert_eq!(
+        document_mode(&app),
+        Some(RelationGridMode::Browse),
+        "a successful replacement closes the modal"
+    );
+    assert!(
+        app.notifications.history().any(|notification| {
+            notification.body.contains("replaced") && notification.body.contains("bikes")
+        }),
+        "the replacement is reported"
+    );
+    let reload = mongo_preview_request(&commands);
+    assert_eq!(
+        reload.page, request.page,
+        "the page that was edited is the page that reloads"
+    );
+    assert_eq!(reload.tab_id, replace.tab_id);
+}
+
+/// Invariant 6 (failure): the adapter error is shown and the grid keeps its rows.
+#[test]
+fn a_failed_replacement_surfaces_the_error_and_keeps_the_page() {
+    let (mut app, _request) = mongo_app_with_page(bike_documents());
+    let before = row_values(&app);
+    app.update(Action::RelationEditCell);
+    set_document_text(
+        &mut app,
+        &format!(r#"{{"_id": {{"$oid": "{RUEDAS_ID}"}}, "name": "Ruedas Pro X"}}"#),
+    );
+    let commands = app.update(Action::RelationEditConfirm);
+    let replace = one_replace_command(&commands);
+
+    let commands = app.update(Action::MongoRelationDocumentReplaceFailed {
+        tab_id: replace.tab_id,
+        tab_generation: replace.tab_generation,
+        id: replace.id.clone(),
+        message: "MongoDB operation failed; inspect the error code and connection settings".into(),
+    });
+
+    assert!(
+        commands.is_empty(),
+        "a failed replacement reloads nothing, got {commands:?}"
+    );
+    let state = document_state(&app);
+    assert_eq!(
+        state.error.as_deref(),
+        Some("MongoDB operation failed; inspect the error code and connection settings"),
+        "the tab surfaces the adapter error"
+    );
+    assert!(!state.saving);
+    assert_eq!(
+        row_values(&app),
+        before,
+        "the grid keeps the values it had before the failed write"
+    );
+}
+
+/// The generation guard: a stale result cannot touch a newer modal.
+#[test]
+fn a_stale_replacement_result_is_ignored() {
+    let (mut app, _request) = mongo_app_with_page(bike_documents());
+    app.update(Action::RelationEditCell);
+    set_document_text(
+        &mut app,
+        &format!(r#"{{"_id": {{"$oid": "{RUEDAS_ID}"}}, "name": "Ruedas Pro X"}}"#),
+    );
+    let commands = app.update(Action::RelationEditConfirm);
+    let replace = one_replace_command(&commands);
+
+    let stale = app.update(Action::MongoRelationDocumentReplaced {
+        tab_id: replace.tab_id,
+        tab_generation: replace.tab_generation.saturating_add(1),
+        id: replace.id.clone(),
+    });
+
+    assert!(
+        stale.is_empty(),
+        "a stale result reloads nothing, got {stale:?}"
+    );
+    assert!(
+        matches!(document_mode(&app), Some(RelationGridMode::EditDocument(_))),
+        "a stale result never closes a newer modal"
+    );
+}
+
+/// Regression: the SQL cell editor opens and applies exactly as before.
+#[test]
+fn the_sql_cell_editor_still_opens_and_applies() {
+    let (mut app, _profile_id, _table_id) = sql_app_with_table();
+    app.update(Action::ExplorerOpenSelected);
+    let table = match app.tabs.last_mut() {
+        Some(WorkspaceTab::Relation(tab)) => tab,
+        _ => panic!("activating a sql table must open a relation tab"),
+    };
+    table.data = RelationLoad::Ready(lazydb::model::relation::OwnedSnapshot {
+        value: RelationPreview {
+            sql: "select id, name from app.public.users".into(),
+            result: QueryOutcome {
+                result_sets: vec![ResultSet {
+                    columns: vec![
+                        ColumnMeta {
+                            name: "id".into(),
+                            type_name: "INTEGER".into(),
+                        },
+                        ColumnMeta {
+                            name: "name".into(),
+                            type_name: "TEXT".into(),
+                        },
+                    ],
+                    rows: vec![vec![CellValue::Integer(1), CellValue::Text("old".into())]],
+                    affected_rows: 0,
+                }],
+                stats: QueryStats::new(Default::default(), Default::default(), 1),
+            },
+            pagination: lazydb::model::pagination::ResultPagination::from_page(
+                PageRequest::first(PageSize::Ten),
+                1,
+            ),
+            row_versions: None,
+        },
+        attribution: lazydb::model::relation::SnapshotAttribution {
+            connection: ConnectionIdentity {
+                profile_id: _profile_id,
+                generation: 1,
+            },
+            profile_id: _profile_id,
+            scope: lazydb::profile::CatalogScope::for_profile(
+                DatabaseKind::Postgres,
+                SQL_DATABASE,
+                Some(SQL_SCHEMA),
+            ),
+        },
+    });
+    table.edit = Some(
+        lazydb::model::relation_edit::RelationEditSession::from_rows(vec![vec![
+            CellValue::Integer(1),
+            CellValue::Text("old".into()),
+        ]]),
+    );
+    table.grid.selected_column = 1;
+
+    let commands = app.update(Action::RelationEditCell);
+
+    assert!(
+        commands.is_empty(),
+        "opening the sql cell editor emits no command, got {commands:?}"
+    );
+    assert!(
+        matches!(document_mode(&app), Some(RelationGridMode::EditCell(_))),
+        "a sql table still opens the cell editor, got {:?}",
+        document_mode(&app)
+    );
+    app.update(Action::RelationEditDeleteToStart);
+    for character in "new".chars() {
+        app.update(Action::RelationEditInsert(character));
+    }
+    let commands = app.update(Action::RelationEditConfirm);
+
+    assert!(
+        commands.is_empty(),
+        "applying a sql cell draft emits no command, got {commands:?}"
+    );
+    let edit = active_relation_tab(&app).edit.as_ref().expect("edit");
+    assert_eq!(edit.mode, RelationGridMode::Browse);
+    assert_eq!(edit.rows[0].original[1], CellValue::Text("old".into()));
+    assert_eq!(edit.rows[0].current[1], CellValue::Text("new".into()));
+}
+
+/// The relation edit mode of the SQL tab a regression test just opened.
+fn sql_relation_mode(app: &App) -> Option<RelationGridMode> {
+    match app.tabs.last() {
+        Some(WorkspaceTab::Relation(tab)) => tab.edit.as_ref().map(|edit| edit.mode.clone()),
+        _ => None,
+    }
+}
+
+/// Regression: the SQL JSON cell editor keeps its own keys and its own value.
+///
+/// The document modal gained a field-by-field view, but a `json` column still
+/// opens the multi-line JSON cell editor: `Enter` inserts a newline, `Ctrl-F`
+/// formats, `Ctrl-S` applies the text as the cell value, and invalid JSON is
+/// still refused with the cell untouched.
+#[test]
+fn the_sql_json_cell_editor_still_opens_and_applies() {
+    let mut app = sql_relation_app_with(
+        vec![("id", "INTEGER"), ("payload", "json")],
+        vec![CellValue::Integer(1), CellValue::Text(r#"{"a":1}"#.into())],
+    );
+    if let Some(WorkspaceTab::Relation(tab)) = app.tabs.last_mut() {
+        tab.grid.selected_column = 1;
+    }
+
+    let commands = app.update(Action::RelationEditCell);
+
+    assert!(
+        commands.is_empty(),
+        "opening the json cell editor emits no command, got {commands:?}"
+    );
+    assert!(
+        matches!(sql_relation_mode(&app), Some(RelationGridMode::EditCell(_))),
+        "a json column still opens the cell editor, got {:?}",
+        sql_relation_mode(&app)
+    );
+
+    // Enter inserts a newline instead of applying, exactly as before.
+    app.update(Action::RelationEditInsert('\n'));
+    assert!(matches!(
+        sql_relation_mode(&app),
+        Some(RelationGridMode::EditCell(_))
+    ));
+    // Ctrl-F formats the JSON text in place.
+    app.update(Action::RelationEditJsonFormat);
+    let commands = app.update(Action::RelationEditConfirm);
+
+    assert!(
+        commands.is_empty(),
+        "applying a json cell emits no command, got {commands:?}"
+    );
+    let applied = {
+        let Some(WorkspaceTab::Relation(tab)) = app.tabs.last() else {
+            panic!("relation tab");
+        };
+        let edit = tab.edit.as_ref().expect("edit session");
+        assert_eq!(edit.mode, RelationGridMode::Browse);
+        let CellValue::Text(applied) = &edit.rows[0].current[1] else {
+            panic!(
+                "the applied json cell is text, got {:?}",
+                edit.rows[0].current[1]
+            );
+        };
+        applied.clone()
+    };
+    assert_eq!(
+        serde_json::from_str::<serde_json::Value>(&applied)
+            .expect("the applied value is valid JSON"),
+        serde_json::json!({ "a": 1 }),
+        "the formatted value is the same JSON, got {applied:?}"
+    );
+    assert!(
+        applied.contains('\n'),
+        "Ctrl-F formatted the text, got {applied:?}"
+    );
+
+    // Invalid JSON is still refused and leaves the cell untouched.
+    let Some(WorkspaceTab::Relation(tab)) = app.tabs.last_mut() else {
+        panic!("relation tab");
+    };
+    tab.grid.selected_column = 1;
+    app.update(Action::RelationEditCell);
+    app.update(Action::RelationEditDeleteToStart);
+    app.update(Action::RelationEditInsert('{'));
+    let commands = app.update(Action::RelationEditConfirm);
+    assert!(
+        commands.is_empty(),
+        "an invalid json cell emits no command, got {commands:?}"
+    );
+    let current_after_refusal = {
+        let Some(WorkspaceTab::Relation(tab)) = app.tabs.last() else {
+            panic!("relation tab");
+        };
+        let edit = tab.edit.as_ref().expect("edit session");
+        assert!(
+            matches!(edit.mode, RelationGridMode::EditCell(_)),
+            "an invalid value keeps the cell editor open"
+        );
+        edit.rows[0].current[1].clone()
+    };
+    assert_eq!(
+        current_after_refusal,
+        CellValue::Text(applied),
+        "a refused value leaves the cell untouched"
+    );
+}
+
+/// Opens a SQL relation tab loaded with `columns` and one row, the way the
+/// runtime answers a relation preview.
+fn sql_relation_app_with(columns: Vec<(&str, &str)>, values: Vec<CellValue>) -> App {
+    let (mut app, profile_id, _table_id) = sql_app_with_table();
+    app.update(Action::ExplorerOpenSelected);
+    let table = match app.tabs.last_mut() {
+        Some(WorkspaceTab::Relation(tab)) => tab,
+        _ => panic!("activating a sql table must open a relation tab"),
+    };
+    table.data = RelationLoad::Ready(lazydb::model::relation::OwnedSnapshot {
+        value: RelationPreview {
+            sql: "select id, payload from app.public.users".into(),
+            result: QueryOutcome {
+                result_sets: vec![ResultSet {
+                    columns: columns
+                        .into_iter()
+                        .map(|(name, type_name)| ColumnMeta {
+                            name: name.into(),
+                            type_name: type_name.into(),
+                        })
+                        .collect(),
+                    rows: vec![values.clone()],
+                    affected_rows: 0,
+                }],
+                stats: QueryStats::new(Default::default(), Default::default(), 1),
+            },
+            pagination: lazydb::model::pagination::ResultPagination::from_page(
+                PageRequest::first(PageSize::Ten),
+                1,
+            ),
+            row_versions: None,
+        },
+        attribution: lazydb::model::relation::SnapshotAttribution {
+            connection: ConnectionIdentity {
+                profile_id,
+                generation: 1,
+            },
+            profile_id,
+            scope: lazydb::profile::CatalogScope::for_profile(
+                DatabaseKind::Postgres,
+                SQL_DATABASE,
+                Some(SQL_SCHEMA),
+            ),
+        },
+    });
+    table.edit = Some(lazydb::model::relation_edit::RelationEditSession::from_rows(vec![values]));
+    app
+}
+
+/// The modal is rendered inside the relation tab with its title and hints.
+#[test]
+fn the_document_modal_renders_the_collection_id_and_save_hints() {
+    let (mut app, _request) = mongo_app_with_page(bike_documents());
+    app.update(Action::RelationEditCell);
+
+    let output = render_app(&app, 200, 40);
+
+    assert!(
+        output.contains("EDIT DOCUMENT"),
+        "the modal is titled, got:\n{output}"
+    );
+    assert!(
+        output.contains("speedbike_db.bikes"),
+        "the modal names the collection, got:\n{output}"
+    );
+    assert!(
+        output.contains(RUEDAS_ID),
+        "the modal names the _id it will write, got:\n{output}"
+    );
+    assert!(
+        output.contains("Ctrl-S apply") && output.contains("Esc cancel"),
+        "the modal shows how to save and cancel, got:\n{output}"
+    );
+}
+
+// ---------------------------------------------------------------------------
+// T5 (S3): the field-by-field view inside the document modal
+// ---------------------------------------------------------------------------
+
+/// One document of every scalar BSON type the field editor parses, plus the
+/// containers it edits as JSON text.
+fn typed_documents() -> Vec<MongoDocument> {
+    vec![document(mongodb::bson::doc! {
+        "_id": object_id(RUEDAS_ID),
+        "name": "Ruedas Pro",
+        "stock": 4i32,
+        "price": 1200i64,
+        "weight": 1.5f64,
+        "active": true,
+        "retired": mongodb::bson::Bson::Null,
+        "tags": ["road", "fast"],
+        "geometry": { "wheels": 2i32, "frame": "carbon" },
+        "spokes": object_id(FRENO_ID),
+    })]
+}
+
+fn open_fields_view(app: &mut App) {
+    app.update(Action::RelationEditCell);
+    if document_state(app).view != DocumentEditorView::Fields {
+        app.update(Action::RelationEditDocumentToggleView);
+    }
+    assert_eq!(document_state(app).view, DocumentEditorView::Fields);
+}
+
+fn field_names(app: &App) -> Vec<String> {
+    document_state(app)
+        .fields()
+        .expect("the document text is valid")
+        .into_iter()
+        .map(|field| field.name)
+        .collect()
+}
+
+fn field_value(app: &App, name: &str) -> Option<String> {
+    document_state(app)
+        .fields()
+        .expect("the document text is valid")
+        .into_iter()
+        .find(|field| field.name == name)
+        .map(|field| field.value)
+}
+
+/// Selects one field the way the list does: with relative cursor moves.
+fn select_field(app: &mut App, name: &str) {
+    let index = field_names(app)
+        .iter()
+        .position(|field| field == name)
+        .unwrap_or_else(|| panic!("the document has no field {name}"));
+    let current = document_state(app).selected_field;
+    app.update(Action::RelationEditDocumentFieldMove(
+        index as isize - current as isize,
+    ));
+    assert_eq!(
+        document_state(app).selected_field,
+        index,
+        "the cursor must stop on {name}"
+    );
+}
+
+/// Opens the field editor on `name` and replaces its text with `text`.
+fn type_field_value(app: &mut App, name: &str, text: &str) {
+    select_field(app, name);
+    app.update(Action::RelationEditDocumentFieldEdit);
+    assert!(
+        document_state(app).field_edit.is_some(),
+        "the {name} field editor must open"
+    );
+    app.update(Action::RelationEditDeleteToStart);
+    for character in text.chars() {
+        app.update(Action::RelationEditInsert(character));
+    }
+}
+
+/// Applies the open field editor and returns the resulting document.
+fn apply_field_value(app: &mut App) -> mongodb::bson::Document {
+    let commands = app.update(Action::RelationEditDocumentFieldApply);
+    assert!(
+        commands.is_empty(),
+        "applying a field writes nothing to the database, got {commands:?}"
+    );
+    let state = document_state(app);
+    assert!(
+        state.field_edit.is_none(),
+        "applying closes the field editor"
+    );
+    assert_eq!(state.field_error, None, "the applied value is accepted");
+    state
+        .replacement_document()
+        .expect("the document text is still a valid document")
+}
+
+#[test]
+fn toggling_the_document_modal_lists_the_top_level_fields_with_their_types() {
+    let (mut app, _request) = mongo_app_with_page(bike_documents());
+    app.update(Action::RelationEditCell);
+    let ejson = document_state(&app).input.value().to_owned();
+    assert_eq!(
+        document_state(&app).view,
+        DocumentEditorView::Fields,
+        "the modal opens on the field list"
+    );
+
+    let commands = app.update(Action::RelationEditDocumentToggleView);
+    assert!(
+        commands.is_empty(),
+        "switching views writes nothing, got {commands:?}"
+    );
+    assert_eq!(
+        document_state(&app).view,
+        DocumentEditorView::Ejson,
+        "the first toggle shows the EJSON text"
+    );
+    let commands = app.update(Action::RelationEditDocumentToggleView);
+    assert!(
+        commands.is_empty(),
+        "switching back writes nothing, got {commands:?}"
+    );
+    let state = document_state(&app);
+    assert_eq!(state.view, DocumentEditorView::Fields);
+    assert_eq!(state.error, None);
+    assert_eq!(state.field_error, None);
+    assert_eq!(
+        state
+            .fields()
+            .expect("the document text is valid")
+            .iter()
+            .map(|field| (field.name.as_str(), field.type_name, field.value.as_str()))
+            .collect::<Vec<_>>(),
+        vec![
+            ("_id", "objectId", RUEDAS_ID),
+            ("name", "string", "Ruedas Pro"),
+            ("price", "int64", "1200"),
+            ("active", "bool", "true"),
+        ],
+        "one row per top-level field, with its observed BSON type and compact value"
+    );
+    assert_eq!(
+        state.selected_field, 0,
+        "the list starts on the first field"
+    );
+    assert_eq!(
+        state.input.value(),
+        ejson,
+        "the EJSON text is the source of truth and is not rewritten by the toggle"
+    );
+
+    let output = render_app(&app, 200, 40);
+    assert!(
+        output.contains("Ruedas Pro") && output.contains("int64") && output.contains("objectId"),
+        "the field list renders names, types and values, got:\n{output}"
+    );
+
+    app.update(Action::RelationEditDocumentToggleView);
+    let state = document_state(&app);
+    assert_eq!(state.view, DocumentEditorView::Ejson);
+    assert_eq!(state.input.value(), ejson);
+}
+
+#[test]
+fn the_field_list_moves_between_fields_and_stops_at_both_ends() {
+    let (mut app, _request) = mongo_app_with_page(bike_documents());
+    open_fields_view(&mut app);
+
+    let commands = app.update(Action::RelationEditDocumentFieldMove(1));
+
+    assert!(
+        commands.is_empty(),
+        "moving the field cursor writes nothing, got {commands:?}"
+    );
+    assert_eq!(document_state(&app).selected_field, 1);
+    app.update(Action::RelationEditDocumentFieldMove(1));
+    app.update(Action::RelationEditDocumentFieldMove(1));
+    assert_eq!(
+        document_state(&app).selected_field,
+        3,
+        "the last field is reachable"
+    );
+    app.update(Action::RelationEditDocumentFieldMove(1));
+    assert_eq!(
+        document_state(&app).selected_field,
+        3,
+        "the cursor stops at the last field"
+    );
+    for _ in 0..9 {
+        app.update(Action::RelationEditDocumentFieldMove(-1));
+    }
+    assert_eq!(
+        document_state(&app).selected_field,
+        0,
+        "the cursor stops at the first field"
+    );
+}
+
+#[test]
+fn editing_a_scalar_field_applies_into_the_ejson_text_and_keeps_the_id() {
+    let (mut app, _request) = mongo_app_with_page(bike_documents());
+    open_fields_view(&mut app);
+    let ejson = document_state(&app).input.value().to_owned();
+
+    select_field(&mut app, "name");
+    app.update(Action::RelationEditDocumentFieldEdit);
+    let state = document_state(&app);
+    let field = state
+        .field_edit
+        .clone()
+        .expect("the name field editor opens");
+    assert_eq!(field.name, "name");
+    assert_eq!(
+        field.input.value(),
+        "Ruedas Pro",
+        "the field editor starts on the value the row shows"
+    );
+
+    app.update(Action::RelationEditDeleteToStart);
+    for character in "Ruedas Pro X".chars() {
+        app.update(Action::RelationEditInsert(character));
+    }
+    assert_eq!(
+        document_state(&app).input.value(),
+        ejson,
+        "typing into a field leaves the document text alone until it is applied"
+    );
+
+    let document = apply_field_value(&mut app);
+
+    assert_eq!(document.get_str("name"), Ok("Ruedas Pro X"));
+    assert_eq!(
+        document.get("_id"),
+        Some(&object_id(RUEDAS_ID)),
+        "applying a field keeps the same _id"
+    );
+    let state = document_state(&app);
+    assert_eq!(
+        state.input.value(),
+        &lazydb::model::relation_edit::canonical_document_ejson(&document),
+        "the applied value is written into the EJSON text"
+    );
+    assert_eq!(
+        state
+            .fields()
+            .expect("the document text is valid")
+            .iter()
+            .map(|field| field.value.clone())
+            .collect::<Vec<_>>(),
+        vec![
+            RUEDAS_ID.to_owned(),
+            "Ruedas Pro X".into(),
+            "1200".into(),
+            "true".into()
+        ],
+        "the list shows the applied value"
+    );
+
+    // Saving still runs the one bounded replacement the whole-document save uses.
+    let replace = one_replace_command(&app.update(Action::RelationEditConfirm));
+    assert_eq!(replace.id, object_id(RUEDAS_ID));
+    assert_eq!(
+        replace.replacement.get("_id"),
+        Some(&object_id(RUEDAS_ID)),
+        "the replacement is still bounded to the original _id"
+    );
+    assert_eq!(replace.replacement.get_str("name"), Ok("Ruedas Pro X"));
+}
+
+#[test]
+fn leaving_a_field_edit_with_escape_keeps_the_document_text() {
+    let (mut app, _request) = mongo_app_with_page(bike_documents());
+    open_fields_view(&mut app);
+    let ejson = document_state(&app).input.value().to_owned();
+    type_field_value(&mut app, "name", "discarded");
+
+    let commands = app.update(Action::RelationEditDocumentFieldCancel);
+
+    assert!(
+        commands.is_empty(),
+        "leaving a field edit writes nothing, got {commands:?}"
+    );
+    let state = document_state(&app);
+    assert!(state.field_edit.is_none());
+    assert_eq!(state.field_error, None);
+    assert_eq!(
+        state.view,
+        DocumentEditorView::Fields,
+        "the list stays open"
+    );
+    assert_eq!(
+        state.input.value(),
+        ejson,
+        "an abandoned field edit never touches the document text"
+    );
+
+    // The second escape is the modal's own cancel, exactly as before.
+    app.update(Action::RelationEditCancel);
+    assert_eq!(document_mode(&app), Some(RelationGridMode::Browse));
+}
+
+#[test]
+fn typed_field_values_are_parsed_with_the_field_bson_type() {
+    let (mut app, _request) = mongo_app_with_page(typed_documents());
+    open_fields_view(&mut app);
+
+    for (field, text, expected) in [
+        ("stock", "9", mongodb::bson::Bson::Int32(9)),
+        ("price", "950", mongodb::bson::Bson::Int64(950)),
+        ("weight", "2.25", mongodb::bson::Bson::Double(2.25)),
+        ("active", "false", mongodb::bson::Bson::Boolean(false)),
+        ("retired", "null", mongodb::bson::Bson::Null),
+        ("name", "true", mongodb::bson::Bson::String("true".into())),
+        (
+            "spokes",
+            FRENO_ID,
+            mongodb::bson::Bson::ObjectId(
+                mongodb::bson::oid::ObjectId::parse_str(FRENO_ID).expect("object id"),
+            ),
+        ),
+        (
+            "tags",
+            r#"["road"]"#,
+            mongodb::bson::Bson::Array(vec![mongodb::bson::Bson::String("road".into())]),
+        ),
+        (
+            "geometry",
+            r#"{"wheels": 3}"#,
+            mongodb::bson::Bson::Document(mongodb::bson::doc! { "wheels": 3i32 }),
+        ),
+    ] {
+        type_field_value(&mut app, field, text);
+        let document = apply_field_value(&mut app);
+        assert_eq!(
+            document.get(field),
+            Some(&expected),
+            "{field} must be parsed as its own BSON type from {text:?}"
+        );
+        assert_eq!(
+            document.get("_id"),
+            Some(&object_id(RUEDAS_ID)),
+            "editing {field} keeps the same _id"
+        );
+    }
+}
+
+#[test]
+fn invalid_typed_input_is_rejected_and_leaves_the_text_unchanged() {
+    let (mut app, _request) = mongo_app_with_page(typed_documents());
+    open_fields_view(&mut app);
+
+    for (field, text, expected) in [
+        ("stock", "7.5", "expected a 32-bit integer"),
+        ("price", "12x", "expected a 64-bit integer"),
+        ("weight", "heavy", "expected a double"),
+        ("active", "yes", "expected true or false"),
+        ("retired", "nil", "expected null"),
+        ("spokes", "not-an-id", "expected a 24-character objectId"),
+        ("tags", "road", "invalid Canonical EJSON"),
+        ("geometry", "{", "invalid Canonical EJSON"),
+    ] {
+        let ejson = document_state(&app).input.value().to_owned();
+        let value_before = field_value(&app, field);
+        type_field_value(&mut app, field, text);
+
+        let commands = app.update(Action::RelationEditDocumentFieldApply);
+
+        assert!(
+            commands.is_empty(),
+            "an invalid {field} value must never reach the database, got {commands:?}"
+        );
+        let state = document_state(&app);
+        let error = state.field_error.clone().unwrap_or_default();
+        assert!(
+            error.contains(expected),
+            "the refusal for {field} {text:?} must mention {expected:?}, got {error:?}"
+        );
+        assert!(
+            state.field_edit.is_some(),
+            "a refused value keeps the field editor open so it can be corrected"
+        );
+        assert_eq!(
+            state.input.value(),
+            ejson,
+            "a refused {field} value leaves the document text unchanged"
+        );
+        assert_eq!(
+            field_value(&app, field),
+            value_before,
+            "the refused field keeps the value it had before the edit"
+        );
+        app.update(Action::RelationEditDocumentFieldCancel);
+    }
+}
+
+#[test]
+fn the_id_field_cannot_be_edited_from_the_field_list() {
+    let (mut app, _request) = mongo_app_with_page(bike_documents());
+    open_fields_view(&mut app);
+    let ejson = document_state(&app).input.value().to_owned();
+    assert_eq!(
+        document_state(&app).selected_field,
+        0,
+        "the field list starts on _id"
+    );
+    assert_eq!(field_names(&app).first().map(String::as_str), Some("_id"));
+
+    let commands = app.update(Action::RelationEditDocumentFieldEdit);
+
+    assert!(
+        commands.is_empty(),
+        "attempting to edit _id writes nothing, got {commands:?}"
+    );
+    let state = document_state(&app);
+    assert!(state.field_edit.is_none(), "_id never opens a field editor");
+    assert_eq!(
+        state.field_error.as_deref(),
+        Some(DOCUMENT_ID_IMMUTABLE_MESSAGE),
+        "the refusal reports that the identifier is immutable"
+    );
+    assert_eq!(state.input.value(), ejson);
+
+    // Keys typed in the list reach neither the identifier nor the document.
+    for character in "ffffffffffff".chars() {
+        app.update(Action::RelationEditInsert(character));
+    }
+    app.update(Action::RelationEditConfirm);
+    let state = document_state(&app);
+    assert_eq!(
+        state.input.value(),
+        ejson,
+        "the identifier cannot be changed from the field list"
+    );
+    assert_eq!(
+        state
+            .replacement_document()
+            .expect("the document is still valid")
+            .get("_id"),
+        Some(&object_id(RUEDAS_ID)),
+        "the document keeps its original _id"
+    );
+
+    // Any other field of the same list is editable, so the refusal is about
+    // _id and not about the view.
+    select_field(&mut app, "name");
+    app.update(Action::RelationEditDocumentFieldEdit);
+    assert!(
+        document_state(&app).field_edit.is_some(),
+        "a field other than _id still opens its editor"
+    );
+}
+
+// ---------------------------------------------------------------------------
+// Integration: one real replacement against a local MongoDB
+// ---------------------------------------------------------------------------
+
+async fn load_documents(
+    adapter: &lazydb::db::mongodb::MongoAdapter,
+    namespace: &MongoNamespace,
+) -> Vec<MongoDocument> {
+    adapter
+        .find_page(&FindSpec::new(namespace.clone()))
+        .await
+        .expect("read the demo collection")
+        .documents
+}
+
+fn by_id(documents: &[MongoDocument]) -> Vec<(mongodb::bson::Bson, String)> {
+    let mut entries = documents
+        .iter()
+        .map(|document| {
+            (
+                document.bson.get("_id").cloned().expect("_id"),
+                canonical_ejson(document),
+            )
+        })
+        .collect::<Vec<_>>();
+    entries.sort_by_key(|(id, _)| format!("{id:?}"));
+    entries
+}
+
+#[tokio::test]
+async fn replacing_one_document_changes_only_that_document() {
+    let Some(url) = support::mongodb_standalone_url() else {
+        return;
+    };
+    // The relation needs a database on the profile, exactly like a profile the
+    // app builds from a URL the user typed.
+    let url = format!("{}/lazydb_demo", url.trim_end_matches('/'));
+    let imported = import_connection_url(&url, Some("mongodb-relation-edit")).expect("test url");
+    let profile = imported.profile.clone();
+    let connection = DatabaseConnection::connect(&profile, imported.transient_password.as_ref())
+        .await
+        .expect("connect to the local test server");
+    let DatabaseConnection::MongoDb(adapter) = connection else {
+        panic!("expected a MongoDB adapter");
+    };
+    let namespace = MongoNamespace::collection("lazydb_demo", "bikes");
+
+    let before = load_documents(&adapter, &namespace).await;
+    // The write target is the first document in `_id` order, which is also the
+    // first grid row because the relation page sorts by `_id`.
+    let mut ordered = before.clone();
+    ordered.sort_by_key(|document| format!("{:?}", document.bson.get("_id")));
+    let original = ordered
+        .first()
+        .cloned()
+        .expect("the collection is not empty");
+    let original_id = original.bson.get("_id").cloned().expect("_id");
+    let original_name = original
+        .bson
+        .get_str("name")
+        .expect("the demo documents are named")
+        .to_owned();
+    let edited_name = format!("{original_name} (editada)");
+    let untouched = by_id(&before)
+        .into_iter()
+        .filter(|(id, _)| *id != original_id)
+        .collect::<Vec<_>>();
+
+    // The reducer plans the write from the loaded page.
+    let mut app = App::new(vec![profile.clone()]);
+    let profile_id = profile.id;
+    let generation = match app.update(Action::RequestConnect(profile_id)).as_slice() {
+        [Command::Connect { generation, .. }] => *generation,
+        commands => panic!("unexpected commands: {commands:?}"),
+    };
+    let identity = ConnectionIdentity {
+        profile_id,
+        generation,
+    };
+    app.sessions
+        .register_attempt(ExecutionTarget::from_profile(&profile), identity);
+    let mut tab = RelationTab::with_descriptor(
+        RelationDescriptor::mongodb_collection(profile_id, &namespace).expect("descriptor"),
+        RelationView::Data,
+    );
+    let request = RelationRequest {
+        tab_id: tab.id,
+        console_id: tab.id,
+        tab_generation: tab.generation,
+        request_id: tab.next_request_id,
+        connection: identity,
+        relation: tab.descriptor.key.clone(),
+        kind: RelationRequestKind::Preview,
+        scope: profile.catalog_scope.clone(),
+        options: Default::default(),
+        page: PageRequest::first(PageSize::Ten),
+    };
+    tab.next_request_id += 1;
+    tab.data = RelationLoad::Loading {
+        request: request.clone(),
+        previous: None,
+    };
+    app.tabs.push(WorkspaceTab::Relation(tab));
+    app.active_tab = app.tabs.len() - 1;
+    app.focus = Focus::Results;
+    app.connection.profile_id = Some(profile_id);
+    app.connection.generation = generation;
+    app.connection.status = lazydb::model::workspace::ConnectionStatus::Connected;
+
+    let loaded = adapter
+        .relation_page(&namespace, request.page)
+        .await
+        .expect("load the page through the relation preview path");
+    let target_row = loaded
+        .documents
+        .iter()
+        .position(|document| document.bson.get("_id") == Some(&original_id))
+        .expect("the grid page holds the target document");
+    let page_documents = loaded.documents.len();
+    let commands = app.update(Action::MongoRelationPreviewLoaded {
+        request,
+        preview: Box::new(loaded.preview),
+        documents: loaded.documents,
+    });
+    assert!(commands.is_empty(), "loading a page writes nothing");
+    active_relation_tab_mut(&mut app).grid.selected_row = target_row;
+
+    app.update(Action::RelationEditCell);
+    let mut edited = original.bson.clone();
+    edited.insert("name", edited_name.clone());
+    let edited_ejson = mongodb::bson::to_bson(&edited)
+        .expect("encode")
+        .into_canonical_extjson()
+        .to_string();
+    set_document_text(&mut app, &edited_ejson);
+    let commands = app.update(Action::RelationEditConfirm);
+    let replace = one_replace_command(&commands);
+
+    // The runtime executes exactly that command against the adapter.
+    let outcome = adapter
+        .replace_document_by_id_detailed(
+            &replace.namespace,
+            replace.id.clone(),
+            replace.replacement,
+        )
+        .await
+        .expect("replace one document");
+
+    // Re-read: only the edited document differs from the load.
+    let after = load_documents(&adapter, &namespace).await;
+    let edited_after = after
+        .iter()
+        .find(|document| document.bson.get("_id") == Some(&original_id))
+        .cloned();
+    let untouched_after = by_id(&after)
+        .into_iter()
+        .filter(|(id, _)| *id != original_id)
+        .collect::<Vec<_>>();
+
+    // The reload the reducer asks for shows the new values in the grid.
+    let commands = app.update(Action::MongoRelationDocumentReplaced {
+        tab_id: replace.tab_id,
+        tab_generation: replace.tab_generation,
+        id: replace.id.clone(),
+    });
+    let reload = mongo_preview_request(&commands);
+    let reloaded = adapter
+        .relation_page(&namespace, reload.page)
+        .await
+        .expect("reload the edited page");
+    app.update(Action::MongoRelationPreviewLoaded {
+        request: reload,
+        preview: Box::new(reloaded.preview),
+        documents: reloaded.documents,
+    });
+    let rows = row_values(&app);
+
+    // Restore the demo document before asserting, so a failed assertion can
+    // never leave the shared local collection modified.
+    let restored = adapter
+        .replace_document_by_id_detailed(&namespace, original_id.clone(), original.bson.clone())
+        .await
+        .expect("restore the demo document");
+    let final_state = load_documents(&adapter, &namespace).await;
+
+    assert_eq!(
+        restored,
+        MongoMutationOutcome::Confirmed { affected: 1 },
+        "the restore matched one document"
+    );
+    assert_eq!(before.len(), 3, "the demo collection holds three documents");
+    assert_eq!(page_documents, 3);
+    assert!(
+        original_name.contains("Ruedas"),
+        "the first document in _id order is the demo's Ruedas Pro, got {original_name:?}"
+    );
+    assert_eq!(
+        replace.id, original_id,
+        "the write is bounded to the original _id value"
+    );
+    assert_eq!(
+        outcome,
+        MongoMutationOutcome::Confirmed { affected: 1 },
+        "exactly one document matched the _id filter"
+    );
+    assert_eq!(after.len(), 3, "no document was inserted or deleted");
+    let edited_after = edited_after.expect("the edited document still exists");
+    let expected = MongoDocument {
+        bson: edited.clone(),
+        raw: mongodb::bson::raw::RawDocumentBuf::from_bytes(
+            mongodb::bson::to_vec(&edited).expect("encode"),
+        )
+        .expect("raw"),
+        editable: true,
+    };
+    assert_eq!(
+        canonical_ejson(&edited_after),
+        canonical_ejson(&expected),
+        "the edited document holds the saved values"
+    );
+    assert_ne!(
+        canonical_ejson(&edited_after),
+        canonical_ejson(&original),
+        "the replacement really changed the stored document"
+    );
+    assert_eq!(
+        untouched_after, untouched,
+        "the other two documents are byte-identical after the replace"
+    );
+    assert_eq!(
+        rows[target_row][1],
+        CellValue::Text(edited_name.clone()),
+        "the reloaded grid shows the saved value"
+    );
+    assert_eq!(
+        by_id(&final_state),
+        by_id(&before),
+        "the demo collection is restored to its original documents"
+    );
+    adapter.close().await;
+}
+
+// ---------------------------------------------------------------------------
+// S3 (user feedback): the modal opens on the fields, and EJSON is formatted
+// ---------------------------------------------------------------------------
+
+#[test]
+fn the_document_modal_opens_on_the_field_view() {
+    let (mut app, _request) = mongo_app_with_page(bike_documents());
+
+    app.update(Action::RelationEditCell);
+
+    let state = document_state(&app);
+    assert_eq!(
+        state.view,
+        DocumentEditorView::Fields,
+        "opening a document must land on the per-field view"
+    );
+    let names = field_names(&app);
+    assert!(names.contains(&"_id".to_owned()), "{names:?}");
+    assert!(names.contains(&"name".to_owned()), "{names:?}");
+}
+
+#[test]
+fn the_document_modal_renders_indented_ejson() {
+    let (mut app, _request) = mongo_app_with_page(bike_documents());
+    app.update(Action::RelationEditCell);
+    app.update(Action::RelationEditDocumentToggleView);
+
+    let text = document_state(&app).input.value().to_owned();
+
+    assert!(
+        text.lines().count() > 1,
+        "the document must be formatted, got {text:?}"
+    );
+    assert!(
+        text.lines().any(|line| line.starts_with("  ")),
+        "fields must be indented, got {text:?}"
+    );
+    assert!(
+        text.starts_with("{\n"),
+        "the object must open its own line, got {text:?}"
     );
 }

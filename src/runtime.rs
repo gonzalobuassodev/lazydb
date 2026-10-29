@@ -1128,6 +1128,21 @@ impl Runtime {
                 expected,
                 replacement,
             ),
+            Command::ReplaceMongoRelationDocument {
+                tab_id,
+                tab_generation,
+                connection,
+                namespace,
+                id,
+                replacement,
+            } => self.replace_mongo_relation_document(
+                tab_id,
+                tab_generation,
+                connection,
+                namespace,
+                id,
+                replacement,
+            ),
             Command::InsertMongoDocuments {
                 tab_id,
                 profile_id,
@@ -2053,6 +2068,62 @@ impl Runtime {
                     });
                 }
             }
+        }));
+    }
+
+    /// Replaces the one document a MongoDB relation tab is editing, bounded to
+    /// its original `_id` value.
+    ///
+    /// The result carries the tab generation the save was planned under, so the
+    /// reducer can drop a result that belongs to a page or connection that has
+    /// already been replaced.
+    fn replace_mongo_relation_document(
+        &mut self,
+        tab_id: Uuid,
+        tab_generation: u64,
+        connection: ConnectionIdentity,
+        namespace: crate::db::mongodb::types::MongoNamespace,
+        id: mongodb::bson::Bson,
+        replacement: mongodb::bson::Document,
+    ) {
+        let active = Arc::clone(&self.connection);
+        let sender = self.event_sender.clone();
+        self.background_tasks.push(tokio::spawn(async move {
+            let database = active_database(active, connection).await;
+            let result = match database {
+                Some(DatabaseConnection::MongoDb(adapter)) => {
+                    adapter
+                        .replace_document_by_id_detailed(&namespace, id.clone(), replacement)
+                        .await
+                }
+                _ => Err(DatabaseError::configuration(
+                    "MongoDB connection is not active",
+                )),
+            };
+            let action = match result {
+                Ok(outcome) => {
+                    match crate::db::mongodb::mutation::replace_outcome_message(&outcome) {
+                        None => Action::MongoRelationDocumentReplaced {
+                            tab_id,
+                            tab_generation,
+                            id,
+                        },
+                        Some(message) => Action::MongoRelationDocumentReplaceFailed {
+                            tab_id,
+                            tab_generation,
+                            id,
+                            message: message.to_owned(),
+                        },
+                    }
+                }
+                Err(error) => Action::MongoRelationDocumentReplaceFailed {
+                    tab_id,
+                    tab_generation,
+                    id,
+                    message: error.message,
+                },
+            };
+            let _ = sender.send(action);
         }));
     }
 

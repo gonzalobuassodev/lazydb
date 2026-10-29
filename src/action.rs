@@ -919,6 +919,16 @@ pub enum Action {
     RelationEditPaste(String),
     RelationEditJsonFormat,
     RelationEditJsonMove(isize),
+    /// Switches the MongoDB document modal between EJSON and the field list.
+    RelationEditDocumentToggleView,
+    /// Moves the field-list cursor by `delta` rows.
+    RelationEditDocumentFieldMove(isize),
+    /// Opens the single-line editor on the selected field.
+    RelationEditDocumentFieldEdit,
+    /// Applies the open field editor back into the document text.
+    RelationEditDocumentFieldApply,
+    /// Leaves the field editor without touching the document text.
+    RelationEditDocumentFieldCancel,
     RelationEditBackspace,
     RelationEditDeletePreviousWord,
     RelationEditDeleteToStart,
@@ -963,6 +973,20 @@ pub enum Action {
         request: crate::model::relation::RelationRequest,
         preview: Box<crate::db::RelationPreview>,
         documents: Vec<crate::db::mongodb::types::MongoDocument>,
+    },
+    /// Reports that the document edited in a MongoDB relation tab was replaced.
+    MongoRelationDocumentReplaced {
+        tab_id: Uuid,
+        tab_generation: u64,
+        id: mongodb::bson::Bson,
+    },
+    /// Reports why the document edited in a MongoDB relation tab was not
+    /// replaced. The grid keeps the values it already had.
+    MongoRelationDocumentReplaceFailed {
+        tab_id: Uuid,
+        tab_generation: u64,
+        id: mongodb::bson::Bson,
+        message: String,
     },
     RelationTransactionStarted {
         tab_id: Uuid,
@@ -1853,6 +1877,16 @@ pub enum Command {
     LoadMongoRelationStructure {
         request: crate::model::relation::RelationRequest,
         from_page: Option<crate::model::pagination::PageRequest>,
+    },
+    /// Replaces the one document edited in a MongoDB relation tab, bounded to
+    /// the original `_id` value the modal was opened with.
+    ReplaceMongoRelationDocument {
+        tab_id: Uuid,
+        tab_generation: u64,
+        connection: ConnectionIdentity,
+        namespace: crate::db::mongodb::types::MongoNamespace,
+        id: mongodb::bson::Bson,
+        replacement: mongodb::bson::Document,
     },
     RunMongoConsole {
         tab_id: Uuid,
