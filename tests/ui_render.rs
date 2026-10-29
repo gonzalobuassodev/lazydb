@@ -8708,3 +8708,77 @@ fn explorer_renders_users_and_roles_group_with_distinct_icons_and_colors() {
     assert!(find_text_cell(&unicode, "●").is_some());
     assert!(find_text_cell(&unicode, "◇").is_some());
 }
+
+fn mongodb_browser_app(documents: usize) -> App {
+    use lazydb::db::mongodb::types::{MongoDocument, MongoDocumentPage, MongoNamespace};
+    use lazydb::model::explorer::{ProfilePlacement, ProfileProvenance};
+    use lazydb::model::mongodb_browser::{MongoBrowserTab, MongoPageState};
+    use lazydb::profile::DatabaseKind;
+
+    let profile_id = uuid::Uuid::from_u128(11);
+    let mut app = App::new(Vec::new());
+    app.explorer.normalized.add_profile_with_placement(
+        profile_id,
+        "speedbike".into(),
+        DatabaseKind::MongoDb,
+        "cluster0.example.net".into(),
+        ProfileProvenance::Saved,
+        ProfilePlacement::Global,
+    );
+    let mut tab = MongoBrowserTab::new(
+        profile_id,
+        MongoNamespace::collection("speedbike_db", "rankings"),
+    );
+    tab.page = MongoPageState::Ready(MongoDocumentPage {
+        documents: (0..documents)
+            .map(|index| {
+                let bson = mongodb::bson::doc! {"_id": index as i32, "position": index as i64};
+                MongoDocument {
+                    raw: mongodb::bson::raw::RawDocumentBuf::from_bytes(
+                        mongodb::bson::to_vec(&bson).unwrap(),
+                    )
+                    .unwrap(),
+                    bson,
+                    editable: true,
+                }
+            })
+            .collect(),
+        next_offset: None,
+        truncated: false,
+        oversized_document: false,
+        bytes: 64,
+    });
+    app.tabs.push(WorkspaceTab::MongoBrowser(tab));
+    app.active_tab = app.tabs.len() - 1;
+    app
+}
+
+#[test]
+fn mongodb_browser_keeps_the_explorer_visible() {
+    let app = mongodb_browser_app(2);
+
+    let output = render(&app, 160, 30);
+
+    assert!(
+        output.contains("GLOBAL"),
+        "the explorer must keep rendering next to a mongodb browser tab:\n{output}"
+    );
+}
+
+#[test]
+fn mongodb_browser_hides_the_inspector_until_requested() {
+    let mut app = mongodb_browser_app(2);
+
+    let output = render(&app, 160, 30);
+    assert!(
+        !output.contains("Canonical EJSON"),
+        "the document inspector must stay hidden by default:\n{output}"
+    );
+
+    app.update(Action::MongoToggleInspector);
+    let output = render(&app, 160, 30);
+    assert!(
+        output.contains("Canonical EJSON"),
+        "toggling must reveal the document inspector:\n{output}"
+    );
+}

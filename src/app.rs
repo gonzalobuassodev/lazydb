@@ -15653,6 +15653,12 @@ impl App {
                 Vec::new()
             }
             Action::MongoPageRetry => self.load_mongodb_page(self.active_tab),
+            Action::MongoToggleInspector => {
+                if let Some(WorkspaceTab::MongoBrowser(tab)) = self.tabs.get_mut(self.active_tab) {
+                    tab.show_inspector = !tab.show_inspector;
+                }
+                Vec::new()
+            }
             Action::OpenMongoConsole {
                 profile_id,
                 database,

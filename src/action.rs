@@ -1566,6 +1566,8 @@ pub enum Action {
     RedisPreviewEdit,
     MongoPageNext,
     MongoPageRetry,
+    /// Show or hide the MongoDB document inspector pane.
+    MongoToggleInspector,
     MongoDocumentPrevious,
     MongoDocumentNext,
     MongoDocumentEdit,

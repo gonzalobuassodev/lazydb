@@ -270,6 +270,7 @@ impl Keymap {
                     KeyCode::Char('i') if tab.import_draft.is_some() => {
                         Some(Action::MongoImportAccept)
                     }
+                    KeyCode::Char('t') => Some(Action::MongoToggleInspector),
                     KeyCode::Char('d') => Some(Action::MongoDeleteSelected),
                     KeyCode::Char('l') => Some(Action::MongoPageNext),
                     KeyCode::Char('r')
