@@ -960,6 +960,10 @@ impl Runtime {
                 connection_generation,
                 spec,
             } => self.load_mongo_page(tab_id, profile_id, generation, connection_generation, spec),
+            Command::LoadMongoRelationPreview(request) => self.load_mongo_relation_preview(request),
+            Command::LoadMongoRelationStructure { request, from_page } => {
+                self.load_mongo_relation_structure(request, from_page)
+            }
             Command::RunMongoConsole {
                 tab_id,
                 profile_id,
@@ -1122,6 +1126,21 @@ impl Runtime {
                 namespace,
                 id,
                 expected,
+                replacement,
+            ),
+            Command::ReplaceMongoRelationDocument {
+                tab_id,
+                tab_generation,
+                connection,
+                namespace,
+                id,
+                replacement,
+            } => self.replace_mongo_relation_document(
+                tab_id,
+                tab_generation,
+                connection,
+                namespace,
+                id,
                 replacement,
             ),
             Command::InsertMongoDocuments {
@@ -2049,6 +2068,175 @@ impl Runtime {
                     });
                 }
             }
+        }));
+    }
+
+    /// Replaces the one document a MongoDB relation tab is editing, bounded to
+    /// its original `_id` value.
+    ///
+    /// The result carries the tab generation the save was planned under, so the
+    /// reducer can drop a result that belongs to a page or connection that has
+    /// already been replaced.
+    fn replace_mongo_relation_document(
+        &mut self,
+        tab_id: Uuid,
+        tab_generation: u64,
+        connection: ConnectionIdentity,
+        namespace: crate::db::mongodb::types::MongoNamespace,
+        id: mongodb::bson::Bson,
+        replacement: mongodb::bson::Document,
+    ) {
+        let active = Arc::clone(&self.connection);
+        let sender = self.event_sender.clone();
+        self.background_tasks.push(tokio::spawn(async move {
+            let database = active_database(active, connection).await;
+            let result = match database {
+                Some(DatabaseConnection::MongoDb(adapter)) => {
+                    adapter
+                        .replace_document_by_id_detailed(&namespace, id.clone(), replacement)
+                        .await
+                }
+                _ => Err(DatabaseError::configuration(
+                    "MongoDB connection is not active",
+                )),
+            };
+            let action = match result {
+                Ok(outcome) => {
+                    match crate::db::mongodb::mutation::replace_outcome_message(&outcome) {
+                        None => Action::MongoRelationDocumentReplaced {
+                            tab_id,
+                            tab_generation,
+                            id,
+                        },
+                        Some(message) => Action::MongoRelationDocumentReplaceFailed {
+                            tab_id,
+                            tab_generation,
+                            id,
+                            message: message.to_owned(),
+                        },
+                    }
+                }
+                Err(error) => Action::MongoRelationDocumentReplaceFailed {
+                    tab_id,
+                    tab_generation,
+                    id,
+                    message: error.message,
+                },
+            };
+            let _ = sender.send(action);
+        }));
+    }
+
+    /// Loads one document page as a relation preview so a MongoDB collection
+    /// reuses the SQL relation tab, its grid and its pagination.
+    fn load_mongo_relation_preview(&mut self, request: crate::model::relation::RelationRequest) {
+        let Some(namespace) = crate::db::mongodb::types::MongoNamespace::from_native_path(
+            &request.relation.object_id.native_path,
+        ) else {
+            let _ = self.event_sender.send(Action::RelationFailed {
+                request,
+                message: "MongoDB relation is not addressable as a collection".to_owned(),
+            });
+            return;
+        };
+        let connection = Arc::clone(&self.connection);
+        let sender = self.event_sender.clone();
+        self.background_tasks.push(tokio::spawn(async move {
+            let database = active_database(connection, request.connection).await;
+            let result = match database {
+                Some(DatabaseConnection::MongoDb(adapter)) => {
+                    adapter.relation_page(&namespace, request.page).await
+                }
+                _ => Err(DatabaseError::configuration(
+                    "MongoDB connection is not active",
+                )),
+            };
+            match result {
+                Ok(page) => {
+                    // The BSON originals travel with the preview: the document
+                    // modal must write the `_id` the server returned, not the
+                    // text the grid renders.
+                    let _ = sender.send(Action::MongoRelationPreviewLoaded {
+                        request,
+                        preview: Box::new(page.preview),
+                        documents: page.documents,
+                    });
+                }
+                Err(error) => {
+                    let _ = sender.send(Action::RelationFailed {
+                        request,
+                        message: error.to_string(),
+                    });
+                }
+            }
+        }));
+    }
+
+    /// Loads the structure report of a MongoDB collection for the DDL view.
+    ///
+    /// MongoDB has no DDL, so the report combines the metadata the server
+    /// really reports with a schema inferred from the documents the DATA grid
+    /// loaded. The page is read again with the same `find` spec the grid used,
+    /// because the relation snapshot keeps the mapped grid rows, not the BSON
+    /// values whose types the inference needs.
+    fn load_mongo_relation_structure(
+        &mut self,
+        request: crate::model::relation::RelationRequest,
+        from_page: Option<crate::model::pagination::PageRequest>,
+    ) {
+        let Some(namespace) = crate::db::mongodb::types::MongoNamespace::from_native_path(
+            &request.relation.object_id.native_path,
+        ) else {
+            let _ = self
+                .event_sender
+                .send(Action::MongoRelationStructureLoaded {
+                    request,
+                    result: Err("MongoDB relation is not addressable as a collection".to_owned()),
+                });
+            return;
+        };
+        let connection = Arc::clone(&self.connection);
+        let sender = self.event_sender.clone();
+        self.background_tasks.push(tokio::spawn(async move {
+            let database = active_database(connection, request.connection).await;
+            let result = match database {
+                Some(DatabaseConnection::MongoDb(adapter)) => {
+                    match adapter.collection_structure(&namespace).await {
+                        Ok(metadata) => {
+                            let schema = match from_page {
+                                Some(page) => {
+                                    let spec = crate::db::mongodb::read::relation_find_spec(
+                                        &namespace, page,
+                                    );
+                                    match adapter.find_page(&spec).await {
+                                        Ok(loaded) => Some(
+                                            crate::model::mongodb_structure::infer_schema(&loaded),
+                                        ),
+                                        Err(error) => {
+                                            let _ =
+                                                sender.send(Action::MongoRelationStructureLoaded {
+                                                    request,
+                                                    result: Err(error.to_string()),
+                                                });
+                                            return;
+                                        }
+                                    }
+                                }
+                                None => None,
+                            };
+                            Ok(Box::new(
+                                crate::model::mongodb_structure::MongoStructureSnapshot {
+                                    metadata,
+                                    schema,
+                                },
+                            ))
+                        }
+                        Err(error) => Err(error.to_string()),
+                    }
+                }
+                _ => Err("MongoDB connection is not active".to_owned()),
+            };
+            let _ = sender.send(Action::MongoRelationStructureLoaded { request, result });
         }));
     }
 
