@@ -26965,6 +26965,13 @@ impl App {
                 generation,
             }];
         }
+        if let ExplorerNodeId::Mongo { profile_id, node } = &selected {
+            let was_expanded = self.explorer.normalized.expanded.contains(&selected);
+            if was_expanded || !self.explorer.normalized.expand() {
+                return Vec::new();
+            }
+            return self.mongo_discovery_commands(*profile_id, node);
+        }
         let expanded = self.explorer.normalized.expanded.contains(&selected);
         if expanded || !self.explorer.normalized.expand() {
             return Vec::new();
@@ -26977,6 +26984,37 @@ impl App {
                     Vec::new()
                 }
             })
+    }
+
+    /// Children of a MongoDB node are document namespaces, not SQL catalog
+    /// pages, so expanding one starts a MongoDB discovery command.
+    fn mongo_discovery_commands(
+        &self,
+        profile_id: Uuid,
+        node: &crate::db::mongodb::types::MongoExplorerNodeId,
+    ) -> Vec<Command> {
+        use crate::db::mongodb::types::MongoExplorerNodeId;
+        let Some(generation) = self
+            .sessions
+            .identities_for_profile(profile_id)
+            .first()
+            .map(|identity| identity.generation)
+        else {
+            return Vec::new();
+        };
+        match node {
+            MongoExplorerNodeId::Database(database) => vec![Command::DiscoverMongoCollections {
+                profile_id,
+                generation,
+                database: database.clone(),
+            }],
+            MongoExplorerNodeId::Collection(namespace) => vec![Command::DiscoverMongoIndexes {
+                profile_id,
+                generation,
+                namespace: namespace.clone(),
+            }],
+            _ => Vec::new(),
+        }
     }
 
     fn collapse_explorer_selected(&mut self) -> Vec<Command> {

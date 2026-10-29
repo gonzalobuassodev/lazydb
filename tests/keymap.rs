@@ -5722,3 +5722,51 @@ fn profile_confirmation_and_paste_are_contextual_and_redacted() {
         [Action::EditorPaste("a\nb".into()),]
     );
 }
+
+#[test]
+fn m_and_u_open_monitor_and_users_from_a_mongodb_database_row() {
+    use lazydb::db::mongodb::types::MongoExplorerNodeId;
+    use lazydb::model::explorer::{ProfilePlacement, ProfileProvenance};
+    use lazydb::profile::DatabaseKind;
+
+    let profile_id = Uuid::from_u128(4242);
+    let mut app = App::new(Vec::new());
+    app.explorer.normalized.add_profile_with_placement(
+        profile_id,
+        "MongoDemo".into(),
+        DatabaseKind::MongoDb,
+        "127.0.0.1".into(),
+        ProfileProvenance::Saved,
+        ProfilePlacement::Global,
+    );
+    let profile_node = ExplorerNodeId::Profile(profile_id);
+    app.explorer
+        .normalized
+        .profiles
+        .get_mut(&profile_id)
+        .unwrap()
+        .mongodb_databases = vec!["lazydb_demo".into()];
+    app.explorer.normalized.expanded.insert(profile_node);
+    let database_node = ExplorerNodeId::Mongo {
+        profile_id,
+        node: MongoExplorerNodeId::Database("lazydb_demo".into()),
+    };
+    assert!(app.explorer.select_id(database_node));
+    app.focus = Focus::Explorer;
+    let mut keymap = Keymap::default();
+
+    assert_eq!(
+        keymap.map(key(KeyCode::Char('m')), &app),
+        Some(Action::OpenMongoNode(MongoExplorerNodeId::Monitor(
+            "lazydb_demo".into()
+        ))),
+        "m opens the database monitor"
+    );
+    assert_eq!(
+        keymap.map(key(KeyCode::Char('u')), &app),
+        Some(Action::OpenMongoNode(MongoExplorerNodeId::Users(
+            "lazydb_demo".into()
+        ))),
+        "u opens users and roles"
+    );
+}

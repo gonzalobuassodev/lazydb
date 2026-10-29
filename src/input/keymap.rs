@@ -3416,6 +3416,26 @@ fn map_configured_navigation(
         if bindings.matches("explorer-move-up", event) {
             return Some(Action::ExplorerMove(-1));
         }
+        if let Some(crate::model::explorer::ExplorerNodeId::Mongo {
+            node: crate::db::mongodb::types::MongoExplorerNodeId::Database(database),
+            ..
+        }) = app.explorer.selected_id()
+        {
+            let database = database.clone();
+            match event.code {
+                KeyCode::Char('m') => {
+                    return Some(Action::OpenMongoNode(
+                        crate::db::mongodb::types::MongoExplorerNodeId::Monitor(database),
+                    ));
+                }
+                KeyCode::Char('u') => {
+                    return Some(Action::OpenMongoNode(
+                        crate::db::mongodb::types::MongoExplorerNodeId::Users(database),
+                    ));
+                }
+                _ => {}
+            }
+        }
         if bindings.matches("explorer-expand", event) {
             return Some(Action::ExplorerExpand);
         }
