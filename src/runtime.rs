@@ -960,6 +960,7 @@ impl Runtime {
                 connection_generation,
                 spec,
             } => self.load_mongo_page(tab_id, profile_id, generation, connection_generation, spec),
+            Command::LoadMongoRelationPreview(request) => self.load_mongo_relation_preview(request),
             Command::RunMongoConsole {
                 tab_id,
                 profile_id,
@@ -2046,6 +2047,51 @@ impl Runtime {
                         tab_id,
                         generation,
                         message: error.message,
+                    });
+                }
+            }
+        }));
+    }
+
+    /// Loads one document page as a relation preview so a MongoDB collection
+    /// reuses the SQL relation tab, its grid and its pagination.
+    fn load_mongo_relation_preview(&mut self, request: crate::model::relation::RelationRequest) {
+        let Some(namespace) = crate::db::mongodb::types::MongoNamespace::from_native_path(
+            &request.relation.object_id.native_path,
+        ) else {
+            let _ = self.event_sender.send(Action::RelationFailed {
+                request,
+                message: "MongoDB relation is not addressable as a collection".to_owned(),
+            });
+            return;
+        };
+        let connection = Arc::clone(&self.connection);
+        let sender = self.event_sender.clone();
+        self.background_tasks.push(tokio::spawn(async move {
+            let database = active_database(connection, request.connection).await;
+            let result = match database {
+                Some(DatabaseConnection::MongoDb(adapter)) => {
+                    adapter.relation_page(&namespace, request.page).await
+                }
+                _ => Err(DatabaseError::configuration(
+                    "MongoDB connection is not active",
+                )),
+            };
+            match result {
+                Ok(page) => {
+                    // The BSON originals travel with the preview: the document
+                    // modal must write the `_id` the server returned, not the
+                    // text the grid renders.
+                    let _ = sender.send(Action::MongoRelationPreviewLoaded {
+                        request,
+                        preview: Box::new(page.preview),
+                        documents: page.documents,
+                    });
+                }
+                Err(error) => {
+                    let _ = sender.send(Action::RelationFailed {
+                        request,
+                        message: error.to_string(),
                     });
                 }
             }

@@ -863,9 +863,31 @@ fn render_data(
             )
             .map(provenance_label)
             .unwrap_or("UNKNOWN");
+        // A MongoDB collection has no SQL: it shows the find it executed and the
+        // field under the cursor, the way a SQL snapshot shows its statement.
+        let mongo = app.profiles.iter().any(|profile| {
+            profile.id == tab.descriptor.key.profile_id
+                && profile.kind == crate::profile::DatabaseKind::MongoDb
+        });
+        let statement_label = if mongo { "Find" } else { "SQL" };
+        let active_field = mongo
+            .then(|| {
+                snapshot
+                    .value
+                    .result
+                    .result_sets
+                    .last()
+                    .and_then(|set| set.columns.get(tab.grid.selected_column))
+                    .map(|column| column.name.clone())
+            })
+            .flatten();
+        let field_status = active_field
+            .as_deref()
+            .map(|field| format!("  field: {field}"))
+            .unwrap_or_default();
         frame.render_widget(
             Paragraph::new(format!(
-                "SQL: {sql}  {row_count} rows  Snapshot: {provenance}",
+                "{statement_label}: {sql}  {row_count} rows{field_status}  Snapshot: {provenance}",
             ))
             .style(Style::new().fg(theme.muted).bg(theme.surface)),
             footer,
@@ -874,7 +896,9 @@ fn render_data(
             area: footer,
             target: HitTarget::OpenTextDetail(super::readonly_detail_request(
                 "Relation snapshot",
-                format!("SQL: {sql}\nRows: {row_count}\nSnapshot: {provenance}",),
+                format!(
+                    "{statement_label}: {sql}\nRows: {row_count}{field_status}\nSnapshot: {provenance}",
+                ),
             )),
         });
         super::pagination::render(

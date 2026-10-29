@@ -30,6 +30,14 @@ impl MongoNamespace {
             None => self.database.clone(),
         }
     }
+
+    /// Rebuilds the namespace from a catalog native path (`[database, collection]`).
+    pub fn from_native_path(path: &[String]) -> Option<Self> {
+        match path {
+            [database, collection] => Some(Self::collection(database.clone(), collection.clone())),
+            _ => None,
+        }
+    }
 }
 
 /// Holds typed BSON as the source of truth. JSON rendering is explicitly

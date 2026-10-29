@@ -181,6 +181,36 @@ pub struct RelationDescriptor {
     pub title: String,
 }
 
+impl RelationDescriptor {
+    /// Describes a MongoDB collection as a relation so it reuses the relation
+    /// tab. MongoDB has no SQL catalog entry, so the descriptor is derived from
+    /// the namespace itself: the native path is `[database, collection]` and the
+    /// collection is addressed as a table.
+    pub fn mongodb_collection(
+        profile_id: Uuid,
+        namespace: &crate::db::mongodb::types::MongoNamespace,
+    ) -> Option<Self> {
+        let collection = namespace.collection.clone()?;
+        Some(Self {
+            key: RelationKey {
+                profile_id,
+                object_id: CatalogId::new(
+                    profile_id,
+                    CatalogKind::Table,
+                    [namespace.database.clone(), collection.clone()],
+                ),
+            },
+            qualified_name: QualifiedName {
+                database: Some(namespace.database.clone()),
+                schema: None,
+                object: collection.clone(),
+            },
+            kind: CatalogKind::Table,
+            title: collection,
+        })
+    }
+}
+
 #[derive(Clone, Debug, PartialEq)]
 pub struct RelationTab {
     pub id: Uuid,
@@ -270,26 +300,27 @@ impl RelationTab {
         let Some(profile) = profile else {
             return Some(RelationSnapshotProvenance::ProfileDeletedSnapshot);
         };
-        let in_scope = self
-            .descriptor
-            .qualified_name
-            .database
-            .as_deref()
-            .is_none_or(|database| profile.catalog_scope.allows_database(database))
-            && self
+        let in_scope = profile.kind == crate::profile::DatabaseKind::MongoDb
+            || self
                 .descriptor
                 .qualified_name
-                .schema
+                .database
                 .as_deref()
-                .is_none_or(|schema| {
-                    self.descriptor
-                        .qualified_name
-                        .database
-                        .as_deref()
-                        .is_none_or(|database| {
-                            profile.catalog_scope.allows_schema(database, schema)
-                        })
-                });
+                .is_none_or(|database| profile.catalog_scope.allows_database(database))
+                && self
+                    .descriptor
+                    .qualified_name
+                    .schema
+                    .as_deref()
+                    .is_none_or(|schema| {
+                        self.descriptor
+                            .qualified_name
+                            .database
+                            .as_deref()
+                            .is_none_or(|database| {
+                                profile.catalog_scope.allows_schema(database, schema)
+                            })
+                    });
         if !in_scope {
             Some(RelationSnapshotProvenance::OutOfScopeSnapshot)
         } else if active == Some(snapshot_connection) {

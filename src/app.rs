@@ -13483,6 +13483,11 @@ impl App {
                 }
                 commands
             }
+            Action::MongoRelationPreviewLoaded {
+                request,
+                preview,
+                documents,
+            } => self.mongo_relation_preview_loaded(request, *preview, documents),
             Action::RequestProfileConnect { profile_id } => self.request_connection(profile_id),
             Action::RequestConnect(profile_id) => self.request_connection(profile_id),
             Action::RetryActiveConsoleConnection => {
@@ -17906,7 +17911,7 @@ impl App {
                 };
                 match node {
                     crate::db::mongodb::types::MongoExplorerNodeId::Collection(namespace) => {
-                        self.open_mongodb_browser(profile_id, namespace)
+                        self.open_mongodb_relation(profile_id, namespace)
                     }
                     crate::db::mongodb::types::MongoExplorerNodeId::Monitor(database) => {
                         let mut tab =
@@ -25793,7 +25798,7 @@ impl App {
                     let expanded = self.explorer.normalized.expanded.contains(&selected);
                     self.explorer.toggle_selected();
                     if expanded {
-                        self.open_mongodb_browser(*profile_id, namespace.clone())
+                        self.open_mongodb_relation(*profile_id, namespace.clone())
                     } else {
                         let generation = self
                             .sessions
@@ -25899,17 +25904,39 @@ impl App {
         self.ensure_redis_browser_loaded(index, true)
     }
 
-    fn open_mongodb_browser(
+    /// Opens a MongoDB collection in the same relation tab a SQL table uses, on
+    /// the DATA grid fed by its documents.
+    fn open_mongodb_relation(
         &mut self,
         profile_id: Uuid,
         namespace: crate::db::mongodb::types::MongoNamespace,
     ) -> Vec<Command> {
-        let index = self.tabs.iter().position(|tab| matches!(tab, WorkspaceTab::MongoBrowser(tab) if tab.profile_id == profile_id && tab.namespace == namespace)).unwrap_or_else(|| {
-            self.tabs.push(WorkspaceTab::MongoBrowser(crate::model::mongodb_browser::MongoBrowserTab::new(profile_id, namespace)));
-            self.tabs.len() - 1
-        });
-        self.active_tab = index;
-        self.load_mongodb_page(index)
+        let Some(descriptor) = RelationDescriptor::mongodb_collection(profile_id, &namespace)
+        else {
+            return Vec::new();
+        };
+        let key = descriptor.key.clone();
+        if let Some(index) = self.tabs.iter().position(
+            |tab| matches!(tab, WorkspaceTab::Relation(existing) if existing.descriptor.key == key),
+        ) {
+            if let Some(WorkspaceTab::Relation(tab)) = self.tabs.get_mut(index) {
+                tab.view = RelationView::Data;
+            }
+            self.active_tab = index;
+            self.focus = Focus::Results;
+            return self.load_active_relation(false);
+        }
+        self.tabs
+            .push(WorkspaceTab::Relation(RelationTab::with_descriptor(
+                descriptor,
+                RelationView::Data,
+            )));
+        if let Some(WorkspaceTab::Relation(tab)) = self.tabs.last() {
+            self.editor.open_read_only(tab.ddl_editor_id, "");
+        }
+        self.active_tab = self.tabs.len() - 1;
+        self.focus = Focus::Results;
+        self.load_active_relation(true)
     }
 
     fn load_mongodb_page(&mut self, index: usize) -> Vec<Command> {
@@ -29624,6 +29651,9 @@ impl App {
         refresh: bool,
         requested_page: Option<crate::model::pagination::PageRequest>,
     ) -> Vec<Command> {
+        if self.active_relation_is_mongodb() {
+            return self.load_active_mongo_relation(refresh, requested_page);
+        }
         let console_id = self
             .tabs
             .get(self.active_tab)
@@ -29792,6 +29822,144 @@ impl App {
                     .collect()
             }
         }
+    }
+
+    fn active_relation_is_mongodb(&self) -> bool {
+        match self.tabs.get(self.active_tab) {
+            Some(WorkspaceTab::Relation(tab)) => self
+                .profiles
+                .iter()
+                .find(|profile| profile.id == tab.descriptor.key.profile_id)
+                .is_some_and(|profile| profile.kind == DatabaseKind::MongoDb),
+            _ => false,
+        }
+    }
+
+    /// Loads the active MongoDB relation tab through the document preview path.
+    ///
+    /// A MongoDB relation is addressed directly by its namespace, so it skips the
+    /// SQL catalog scope, descriptor resolution and SQL preview options; the page
+    /// request carries the offset and size the grid asks for.
+    fn load_active_mongo_relation(
+        &mut self,
+        refresh: bool,
+        requested_page: Option<crate::model::pagination::PageRequest>,
+    ) -> Vec<Command> {
+        match self.tabs.get(self.active_tab) {
+            Some(WorkspaceTab::Relation(_)) => {}
+            _ => return Vec::new(),
+        }
+        let console_id = self
+            .tabs
+            .get(self.active_tab)
+            .map_or(Uuid::nil(), WorkspaceTab::id);
+        let Some(WorkspaceTab::Relation(tab)) = self.tabs.get(self.active_tab) else {
+            return Vec::new();
+        };
+        if tab.transaction_state != TransactionState::Idle || relation_has_pending_edits(tab) {
+            self.notify_warning(
+                "Relation",
+                "Commit or discard relation edits before refreshing",
+            );
+            return Vec::new();
+        }
+        let profile_id = tab.descriptor.key.profile_id;
+        let Some(profile) = self
+            .profiles
+            .iter()
+            .find(|profile| profile.id == profile_id)
+            .cloned()
+        else {
+            return Vec::new();
+        };
+        let Some(connection) = self
+            .sessions
+            .identities_for_profile(profile_id)
+            .into_iter()
+            .next()
+        else {
+            return Vec::new();
+        };
+        let Some(WorkspaceTab::Relation(tab)) = self.tabs.get_mut(self.active_tab) else {
+            return Vec::new();
+        };
+        if refresh && requested_page.is_none() {
+            tab.pagination = crate::model::pagination::ResultPagination::from_page(
+                crate::model::pagination::PageRequest::first(tab.pagination.page_size),
+                0,
+            );
+            tab.pagination.total = crate::model::pagination::TotalRows::LowerBound(0);
+            tab.grid.selected_row = 0;
+            tab.grid.row_offset = 0;
+        }
+        let should_load = refresh
+            || matches!(
+                tab.data,
+                RelationLoad::Empty | RelationLoad::Failed { .. } | RelationLoad::Cancelled { .. }
+            );
+        if !should_load {
+            return Vec::new();
+        }
+        let previous_request = pending_relation_request(&tab.data);
+        let previous = match std::mem::replace(&mut tab.data, RelationLoad::Empty) {
+            RelationLoad::Ready(snapshot) => Some(snapshot),
+            RelationLoad::Loading { previous, .. }
+            | RelationLoad::Failed { previous, .. }
+            | RelationLoad::Cancelled { previous } => previous,
+            RelationLoad::Empty => None,
+        };
+        let request = RelationRequest {
+            tab_id: tab.id,
+            console_id,
+            tab_generation: tab.generation,
+            request_id: tab.next_request_id,
+            connection,
+            relation: tab.descriptor.key.clone(),
+            kind: RelationRequestKind::Preview,
+            scope: profile.catalog_scope.clone(),
+            options: tab.query.submitted.clone(),
+            page: requested_page.unwrap_or(crate::model::pagination::PageRequest::at(
+                tab.pagination.page_size,
+                tab.pagination.offset,
+            )),
+        };
+        tab.next_request_id = tab.next_request_id.saturating_add(1);
+        tab.data = RelationLoad::Loading {
+            request: request.clone(),
+            previous,
+        };
+        previous_request
+            .map(Command::CancelRelationRequest)
+            .into_iter()
+            .chain([Command::LoadMongoRelationPreview(request)])
+            .collect()
+    }
+
+    /// Fills the DATA grid of a MongoDB relation with one page.
+    ///
+    /// Staleness is decided by the same guard the SQL preview uses, so a late
+    /// page can never replace a newer one.
+    fn mongo_relation_preview_loaded(
+        &mut self,
+        request: RelationRequest,
+        preview: crate::db::RelationPreview,
+        _documents: Vec<crate::db::mongodb::types::MongoDocument>,
+    ) -> Vec<Command> {
+        let tab_id = request.tab_id;
+        let is_current = self.tabs.iter().any(|tab| match tab {
+            WorkspaceTab::Relation(tab) => {
+                tab.id == tab_id && self.relation_result_is_current(&request, tab)
+            }
+            _ => false,
+        });
+        let commands = self.accept_relation(request, Ok(RelationSnapshot::Preview(preview)));
+        if !is_current {
+            return commands;
+        }
+        if self.active_tab_id() == Some(tab_id) {
+            self.refresh_active_data_query_completion();
+        }
+        commands
     }
 
     fn relation_page(&mut self, action: Action) -> Vec<Command> {
@@ -29978,7 +30146,12 @@ impl App {
                 .profiles
                 .iter()
                 .find(|profile| profile.id == request.connection.profile_id)
-                .is_some_and(|profile| relation_is_in_scope(tab, &profile.catalog_scope))
+                .is_some_and(|profile| {
+                    // A MongoDB relation is addressed by its namespace, not by the
+                    // SQL catalog, so the catalog scope never hides its snapshot.
+                    profile.kind == DatabaseKind::MongoDb
+                        || relation_is_in_scope(tab, &profile.catalog_scope)
+                })
     }
 
     fn manual_matches(

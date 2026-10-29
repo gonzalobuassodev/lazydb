@@ -952,6 +952,13 @@ pub enum Action {
         request: crate::model::relation::RelationRequest,
         message: String,
     },
+    /// Answers the DATA request of a MongoDB relation tab with the page the grid
+    /// rows were mapped from, so the document modal can edit the original BSON.
+    MongoRelationPreviewLoaded {
+        request: crate::model::relation::RelationRequest,
+        preview: Box<crate::db::RelationPreview>,
+        documents: Vec<crate::db::mongodb::types::MongoDocument>,
+    },
     RelationTransactionStarted {
         tab_id: Uuid,
         generation: u64,
@@ -1833,6 +1840,8 @@ pub enum Command {
         connection_generation: u64,
         spec: crate::db::mongodb::types::FindSpec,
     },
+    /// Loads one page of documents for a MongoDB relation tab.
+    LoadMongoRelationPreview(crate::model::relation::RelationRequest),
     RunMongoConsole {
         tab_id: Uuid,
         profile_id: Uuid,
