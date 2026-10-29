@@ -961,6 +961,9 @@ impl Runtime {
                 spec,
             } => self.load_mongo_page(tab_id, profile_id, generation, connection_generation, spec),
             Command::LoadMongoRelationPreview(request) => self.load_mongo_relation_preview(request),
+            Command::LoadMongoRelationStructure { request, from_page } => {
+                self.load_mongo_relation_structure(request, from_page)
+            }
             Command::RunMongoConsole {
                 tab_id,
                 profile_id,
@@ -2095,6 +2098,74 @@ impl Runtime {
                     });
                 }
             }
+        }));
+    }
+
+    /// Loads the structure report of a MongoDB collection for the DDL view.
+    ///
+    /// MongoDB has no DDL, so the report combines the metadata the server
+    /// really reports with a schema inferred from the documents the DATA grid
+    /// loaded. The page is read again with the same `find` spec the grid used,
+    /// because the relation snapshot keeps the mapped grid rows, not the BSON
+    /// values whose types the inference needs.
+    fn load_mongo_relation_structure(
+        &mut self,
+        request: crate::model::relation::RelationRequest,
+        from_page: Option<crate::model::pagination::PageRequest>,
+    ) {
+        let Some(namespace) = crate::db::mongodb::types::MongoNamespace::from_native_path(
+            &request.relation.object_id.native_path,
+        ) else {
+            let _ = self
+                .event_sender
+                .send(Action::MongoRelationStructureLoaded {
+                    request,
+                    result: Err("MongoDB relation is not addressable as a collection".to_owned()),
+                });
+            return;
+        };
+        let connection = Arc::clone(&self.connection);
+        let sender = self.event_sender.clone();
+        self.background_tasks.push(tokio::spawn(async move {
+            let database = active_database(connection, request.connection).await;
+            let result = match database {
+                Some(DatabaseConnection::MongoDb(adapter)) => {
+                    match adapter.collection_structure(&namespace).await {
+                        Ok(metadata) => {
+                            let schema = match from_page {
+                                Some(page) => {
+                                    let spec = crate::db::mongodb::read::relation_find_spec(
+                                        &namespace, page,
+                                    );
+                                    match adapter.find_page(&spec).await {
+                                        Ok(loaded) => Some(
+                                            crate::model::mongodb_structure::infer_schema(&loaded),
+                                        ),
+                                        Err(error) => {
+                                            let _ =
+                                                sender.send(Action::MongoRelationStructureLoaded {
+                                                    request,
+                                                    result: Err(error.to_string()),
+                                                });
+                                            return;
+                                        }
+                                    }
+                                }
+                                None => None,
+                            };
+                            Ok(Box::new(
+                                crate::model::mongodb_structure::MongoStructureSnapshot {
+                                    metadata,
+                                    schema,
+                                },
+                            ))
+                        }
+                        Err(error) => Err(error.to_string()),
+                    }
+                }
+                _ => Err("MongoDB connection is not active".to_owned()),
+            };
+            let _ = sender.send(Action::MongoRelationStructureLoaded { request, result });
         }));
     }
 

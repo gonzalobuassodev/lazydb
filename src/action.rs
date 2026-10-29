@@ -952,6 +952,11 @@ pub enum Action {
         request: crate::model::relation::RelationRequest,
         message: String,
     },
+    /// Answers the structure request of a MongoDB relation tab.
+    MongoRelationStructureLoaded {
+        request: crate::model::relation::RelationRequest,
+        result: Result<Box<crate::model::mongodb_structure::MongoStructureSnapshot>, String>,
+    },
     /// Answers the DATA request of a MongoDB relation tab with the page the grid
     /// rows were mapped from, so the document modal can edit the original BSON.
     MongoRelationPreviewLoaded {
@@ -1842,6 +1847,13 @@ pub enum Command {
     },
     /// Loads one page of documents for a MongoDB relation tab.
     LoadMongoRelationPreview(crate::model::relation::RelationRequest),
+    /// Loads the structure report of a MongoDB relation tab: the collection
+    /// metadata plus, when `from_page` is set, the schema inferred from the
+    /// page the DATA grid is showing.
+    LoadMongoRelationStructure {
+        request: crate::model::relation::RelationRequest,
+        from_page: Option<crate::model::pagination::PageRequest>,
+    },
     RunMongoConsole {
         tab_id: Uuid,
         profile_id: Uuid,

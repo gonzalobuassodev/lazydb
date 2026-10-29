@@ -17,8 +17,9 @@ use lazydb::{
         mongodb::{
             read::{find_description, page_result_set, relation_find_spec},
             types::{
-                FindSpec, MongoCollectionInfo, MongoCollectionType, MongoDatabaseListing,
-                MongoDocument, MongoDocumentPage, MongoExplorerNodeId, MongoNamespace,
+                FindSpec, MongoCollectionInfo, MongoCollectionStructure, MongoCollectionType,
+                MongoDatabaseListing, MongoDocument, MongoDocumentPage, MongoExplorerNodeId,
+                MongoIndexInfo, MongoNamespace,
             },
         },
         value::CellValue,
@@ -27,8 +28,9 @@ use lazydb::{
     model::{
         execution_target::ExecutionTarget,
         explorer::ExplorerNodeId,
+        mongodb_structure::{MongoSchemaInference, MongoStructureSnapshot, infer_schema},
         pagination::{PageRequest, PageSize},
-        relation::{RelationRequestKind, RelationView},
+        relation::{RelationLoad, RelationRequest, RelationRequestKind, RelationView},
         tab::WorkspaceTab,
         workspace::Focus,
     },
@@ -531,5 +533,213 @@ fn mongodb_relation_status_line_names_the_active_field() {
             .flat_map(|line| line.split('│'))
             .any(|pane| pane.contains("raceId") && pane.contains("field:")),
         "the status line must name the field under the cursor:\n{output}"
+    );
+}
+
+// ---------------------------------------------------------------------------
+// T3 (S2): the DDL view reports the collection structure
+// ---------------------------------------------------------------------------
+
+fn structure_metadata() -> MongoCollectionStructure {
+    use mongodb::bson::Bson;
+
+    MongoCollectionStructure {
+        namespace: mongo_namespace(),
+        collection_type: MongoCollectionType::Collection,
+        options_ejson: None,
+        validator_ejson: None,
+        indexes: vec![
+            MongoIndexInfo {
+                name: "_id_".into(),
+                keys: mongodb::bson::doc! { "_id": 1_i32 },
+                unique: true,
+                ttl_seconds: None,
+                raw: mongodb::bson::doc! { "name": "_id_", "key": { "_id": 1_i32 } },
+                key_description: vec![("_id".into(), Bson::Int32(1))],
+            },
+            MongoIndexInfo {
+                name: "race_position".into(),
+                keys: mongodb::bson::doc! { "raceId": 1_i32, "position": -1_i32 },
+                unique: false,
+                ttl_seconds: None,
+                raw: mongodb::bson::doc! {
+                    "name": "race_position",
+                    "key": { "raceId": 1_i32, "position": -1_i32 },
+                },
+                key_description: vec![
+                    ("raceId".into(), Bson::Int32(1)),
+                    ("position".into(), Bson::Int32(-1)),
+                ],
+            },
+        ],
+        indexes_error: None,
+    }
+}
+
+fn inferred_schema() -> MongoSchemaInference {
+    infer_schema(&page(
+        vec![
+            document(mongodb::bson::doc! {
+                "_id": 1_i32,
+                "raceId": "race-1",
+                "position": 3_i64,
+            }),
+            document(mongodb::bson::doc! {
+                "_id": 2_i32,
+                "raceId": "race-2",
+            }),
+        ],
+        None,
+    ))
+}
+
+fn structure_request(commands: &[Command]) -> RelationRequest {
+    commands
+        .iter()
+        .find_map(|command| match command {
+            Command::LoadMongoRelationStructure { request, .. } => Some(request.clone()),
+            _ => None,
+        })
+        .unwrap_or_else(|| {
+            panic!("the ddl view must request the collection structure, got {commands:?}")
+        })
+}
+
+#[test]
+fn opening_the_ddl_view_on_a_mongodb_relation_requests_the_structure() {
+    let (mut app, profile_id, _generation) = mongo_app();
+    loaded_mongo_relation(&mut app, profile_id);
+    let page_size = match app.tabs.last() {
+        Some(WorkspaceTab::Relation(tab)) => tab.pagination.page_size,
+        _ => panic!("expected a relation tab"),
+    };
+
+    let commands = app.update(Action::SetRelationView(RelationView::Ddl));
+
+    let Some(WorkspaceTab::Relation(tab)) = app.tabs.last() else {
+        panic!("expected a relation tab");
+    };
+    let tab_id = tab.id;
+    let key = tab.descriptor.key.clone();
+    assert_eq!(tab.view, RelationView::Ddl);
+    assert!(
+        matches!(&tab.ddl, RelationLoad::Loading { .. }),
+        "the ddl view must show the structure load in flight, got {:?}",
+        tab.ddl
+    );
+    assert!(
+        commands.iter().any(|command| matches!(
+            command,
+            Command::LoadMongoRelationStructure { request, from_page: Some(page) }
+                if request.tab_id == tab_id
+                    && request.kind == RelationRequestKind::Ddl
+                    && request.relation == key
+                    && *page == PageRequest::first(page_size)
+        )),
+        "the structure must be requested for the page the grid shows, got {commands:?}"
+    );
+    assert!(
+        !commands
+            .iter()
+            .any(|command| matches!(command, Command::LoadRelationDdl(_))),
+        "a mongodb collection never asks for SQL DDL, got {commands:?}"
+    );
+}
+
+#[test]
+fn opening_the_ddl_view_without_a_loaded_page_asks_for_metadata_only() {
+    let (mut app, profile_id, _generation) = mongo_app();
+    assert!(app.explorer.select_id(collection_node(profile_id)));
+    app.update(Action::ExplorerOpenSelected);
+    app.update(Action::ExplorerOpenSelected);
+
+    let commands = app.update(Action::SetRelationView(RelationView::Ddl));
+
+    assert!(
+        commands.iter().any(|command| matches!(
+            command,
+            Command::LoadMongoRelationStructure {
+                from_page: None,
+                ..
+            }
+        )),
+        "with no loaded page the report carries metadata only, got {commands:?}"
+    );
+}
+
+#[test]
+fn the_structure_result_fills_the_ddl_view_with_indexes_and_inferred_fields() {
+    let (mut app, profile_id, _generation) = mongo_app();
+    loaded_mongo_relation(&mut app, profile_id);
+    let commands = app.update(Action::SetRelationView(RelationView::Ddl));
+    let request = structure_request(&commands);
+    let ddl_editor_id = match app.tabs.last() {
+        Some(WorkspaceTab::Relation(tab)) => tab.ddl_editor_id,
+        _ => panic!("expected a relation tab"),
+    };
+
+    app.update(Action::MongoRelationStructureLoaded {
+        request,
+        result: Ok(Box::new(MongoStructureSnapshot {
+            metadata: structure_metadata(),
+            schema: Some(inferred_schema()),
+        })),
+    });
+
+    let Some(WorkspaceTab::Relation(tab)) = app.tabs.last() else {
+        panic!("expected a relation tab");
+    };
+    let RelationLoad::Ready(snapshot) = &tab.ddl else {
+        panic!(
+            "the structure result must fill the ddl view, got {:?}",
+            tab.ddl
+        );
+    };
+    let text = snapshot.value.sql.clone();
+    for expected in [
+        "validator: none",
+        "_id_",
+        "race_position",
+        "\"position\": -1",
+        "raceId",
+        "position",
+    ] {
+        assert!(
+            text.contains(expected),
+            "the structure report must contain {expected:?}:\n{text}"
+        );
+    }
+    let editor_text = app
+        .editor_text(ddl_editor_id)
+        .expect("the ddl editor session exists");
+    assert!(
+        editor_text.contains("race_position"),
+        "the read-only DDL editor shows the report exactly like a SQL DDL:\n{editor_text}"
+    );
+}
+
+// ---------------------------------------------------------------------------
+// Regression: a SQL table's DDL view keeps loading through the SQL path
+// ---------------------------------------------------------------------------
+
+#[test]
+fn opening_the_ddl_view_on_a_sql_table_still_loads_the_sql_ddl() {
+    let (mut app, _profile_id, table_id) = sql_app_with_table();
+    app.update(Action::ExplorerOpenSelected);
+
+    let commands = app.update(Action::SetRelationView(RelationView::Ddl));
+
+    assert!(
+        commands.iter().any(|command| matches!(
+            command,
+            Command::LoadRelationDdl(request) if request.relation.object_id == table_id
+        )),
+        "sql tables must keep loading their DDL through the SQL request, got {commands:?}"
+    );
+    assert!(
+        !commands
+            .iter()
+            .any(|command| matches!(command, Command::LoadMongoRelationStructure { .. })),
+        "sql tables never route through the mongodb structure loader, got {commands:?}"
     );
 }

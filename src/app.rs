@@ -13483,6 +13483,9 @@ impl App {
                 }
                 commands
             }
+            Action::MongoRelationStructureLoaded { request, result } => {
+                self.mongo_relation_structure_loaded(request, result)
+            }
             Action::MongoRelationPreviewLoaded {
                 request,
                 preview,
@@ -29846,6 +29849,9 @@ impl App {
         requested_page: Option<crate::model::pagination::PageRequest>,
     ) -> Vec<Command> {
         match self.tabs.get(self.active_tab) {
+            Some(WorkspaceTab::Relation(tab)) if tab.view == RelationView::Ddl => {
+                return self.load_active_mongo_structure(refresh);
+            }
             Some(WorkspaceTab::Relation(_)) => {}
             _ => return Vec::new(),
         }
@@ -29935,6 +29941,86 @@ impl App {
             .collect()
     }
 
+    /// Loads the structure report for a MongoDB relation tab shown on DDL.
+    ///
+    /// A collection reuses the relation DDL view, whose text is the structure
+    /// report: the real metadata plus, when the DATA grid has loaded a page, the
+    /// schema inferred from that page.
+    fn load_active_mongo_structure(&mut self, refresh: bool) -> Vec<Command> {
+        let console_id = self
+            .tabs
+            .get(self.active_tab)
+            .map_or(Uuid::nil(), WorkspaceTab::id);
+        let Some(WorkspaceTab::Relation(tab)) = self.tabs.get_mut(self.active_tab) else {
+            return Vec::new();
+        };
+        if tab.view != RelationView::Ddl {
+            return Vec::new();
+        }
+        let profile_id = tab.descriptor.key.profile_id;
+        let Some(profile) = self
+            .profiles
+            .iter()
+            .find(|profile| profile.id == profile_id)
+            .cloned()
+        else {
+            return Vec::new();
+        };
+        let Some(connection) = self
+            .sessions
+            .identities_for_profile(profile_id)
+            .into_iter()
+            .next()
+        else {
+            return Vec::new();
+        };
+        let should_load = refresh
+            || matches!(
+                tab.ddl,
+                RelationLoad::Empty | RelationLoad::Cancelled { .. }
+            );
+        if !should_load {
+            return Vec::new();
+        }
+        let page = crate::model::pagination::PageRequest::at(
+            tab.pagination.page_size,
+            tab.pagination.offset,
+        );
+        // The schema is inferred from the page the grid shows; with no loaded
+        // page the report carries metadata only instead of guessing.
+        let from_page = matches!(tab.data, RelationLoad::Ready(_)).then_some(page);
+        let previous_request = pending_relation_request(&tab.ddl);
+        let previous = match std::mem::replace(&mut tab.ddl, RelationLoad::Empty) {
+            RelationLoad::Ready(snapshot) => Some(snapshot),
+            RelationLoad::Loading { previous, .. }
+            | RelationLoad::Failed { previous, .. }
+            | RelationLoad::Cancelled { previous } => previous,
+            RelationLoad::Empty => None,
+        };
+        let request = RelationRequest {
+            tab_id: tab.id,
+            console_id,
+            tab_generation: tab.generation,
+            request_id: tab.next_request_id,
+            connection,
+            relation: tab.descriptor.key.clone(),
+            kind: RelationRequestKind::Ddl,
+            scope: profile.catalog_scope.clone(),
+            options: tab.query.submitted.clone(),
+            page,
+        };
+        tab.next_request_id = tab.next_request_id.saturating_add(1);
+        tab.ddl = RelationLoad::Loading {
+            request: request.clone(),
+            previous,
+        };
+        previous_request
+            .map(Command::CancelRelationRequest)
+            .into_iter()
+            .chain([Command::LoadMongoRelationStructure { request, from_page }])
+            .collect()
+    }
+
     /// Fills the DATA grid of a MongoDB relation with one page.
     ///
     /// Staleness is decided by the same guard the SQL preview uses, so a late
@@ -29960,6 +30046,77 @@ impl App {
             self.refresh_active_data_query_completion();
         }
         commands
+    }
+
+    /// Fills the DDL view of a MongoDB relation with its structure report.
+    ///
+    /// The report text and the `RelationDdl` wrapper go through exactly the same
+    /// `tab.ddl` slot and read-only editor the SQL DDL path uses.
+    fn mongo_relation_structure_loaded(
+        &mut self,
+        request: RelationRequest,
+        result: Result<Box<crate::model::mongodb_structure::MongoStructureSnapshot>, String>,
+    ) -> Vec<Command> {
+        let Some(tab_index) = self.tabs.iter().position(|tab| match tab {
+            WorkspaceTab::Relation(tab) => tab.id == request.tab_id,
+            _ => false,
+        }) else {
+            return Vec::new();
+        };
+        let is_current = self.tabs.get(tab_index).is_some_and(|tab| match tab {
+            WorkspaceTab::Relation(tab) => self.relation_result_is_current(&request, tab),
+            _ => false,
+        });
+        if !is_current {
+            return Vec::new();
+        }
+        let Some(WorkspaceTab::Relation(tab)) = self.tabs.get_mut(tab_index) else {
+            return Vec::new();
+        };
+        let failure = match result {
+            Ok(snapshot) => {
+                let text = crate::model::mongodb_structure::render_report(&snapshot);
+                match crate::model::mongodb_structure::relation_ddl(
+                    &request,
+                    &tab.descriptor,
+                    text.clone(),
+                ) {
+                    Ok(ddl) => {
+                        tab.ddl = RelationLoad::Ready(crate::model::relation::OwnedSnapshot {
+                            value: ddl,
+                            attribution: crate::model::relation::SnapshotAttribution {
+                                connection: request.connection,
+                                profile_id: request.connection.profile_id,
+                                scope: request.scope.clone(),
+                            },
+                        });
+                        let _ = self
+                            .editor
+                            .set_read_only_text(tab.ddl_editor_id, &text, false);
+                        None
+                    }
+                    Err(error) => Some(error),
+                }
+            }
+            Err(message) => Some(message),
+        };
+        let Some(failure) = failure else {
+            return Vec::new();
+        };
+        let message = format!("Could not load collection structure: {failure}");
+        let previous = match std::mem::replace(&mut tab.ddl, RelationLoad::Empty) {
+            RelationLoad::Ready(snapshot) => Some(snapshot),
+            RelationLoad::Loading { previous, .. }
+            | RelationLoad::Failed { previous, .. }
+            | RelationLoad::Cancelled { previous } => previous,
+            RelationLoad::Empty => None,
+        };
+        tab.ddl = RelationLoad::Failed {
+            message: message.clone(),
+            previous,
+        };
+        self.notify_error("Relation", &message);
+        Vec::new()
     }
 
     fn relation_page(&mut self, action: Action) -> Vec<Command> {
