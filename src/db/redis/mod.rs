@@ -9,6 +9,7 @@ pub mod read;
 pub mod reconnect;
 pub mod reply;
 pub mod scan_scheduler;
+pub mod server_info;
 pub mod types;
 
 use redis::{
@@ -29,6 +30,7 @@ use crate::{
 pub struct RedisAdapter {
     connection: ConnectionManager,
     target_database: u32,
+    configured_kind: DatabaseKind,
     connection_id: Uuid,
     metadata_cache: Arc<Mutex<metadata_cache::MetadataCache>>,
 }
@@ -52,10 +54,15 @@ impl RedisAdapter {
         profile: &ConnectionProfile,
         password: Option<&SecretString>,
     ) -> Result<Self, DatabaseError> {
+        if !profile.kind.is_redis_compatible() {
+            return Err(DatabaseError::configuration(
+                "Redis-compatible adapter requires a Redis or Valkey profile",
+            ));
+        }
         let host = profile
             .host
             .as_deref()
-            .ok_or_else(|| DatabaseError::configuration("Redis host is required"))?;
+            .ok_or_else(|| DatabaseError::configuration("Redis-compatible host is required"))?;
         let port = profile.port.unwrap_or(6379);
         let database = parse_database(profile.database.as_deref())?;
         let scheme = match profile.ssl_mode {
@@ -106,6 +113,7 @@ impl RedisAdapter {
         let adapter = Self {
             connection,
             target_database: database,
+            configured_kind: profile.kind,
             connection_id: profile.id,
             metadata_cache: Arc::new(Mutex::new(metadata_cache::MetadataCache::new(
                 2_048,
@@ -160,19 +168,16 @@ impl RedisAdapter {
 
     pub async fn probe(&self) -> Result<ServerInfo, DatabaseError> {
         let mut connection = self.connection.clone();
-        let version = redis::cmd("INFO")
+        let info = redis::cmd("INFO")
             .arg("server")
             .query_async::<String>(&mut connection)
             .await
-            .ok()
-            .and_then(|info| {
-                info.lines()
-                    .find_map(|line| line.strip_prefix("redis_version:"))
-                    .map(str::to_owned)
-            })
+            .unwrap_or_default();
+        let version = server_info::parse(&info)
+            .version
             .unwrap_or_else(|| "unknown".to_owned());
         Ok(ServerInfo {
-            kind: DatabaseKind::Redis,
+            kind: self.configured_kind,
             version,
             database: self.target_database.to_string(),
             current_user: None,
@@ -181,6 +186,10 @@ impl RedisAdapter {
 
     pub fn database(&self) -> u32 {
         self.target_database
+    }
+
+    pub fn kind(&self) -> DatabaseKind {
+        self.configured_kind
     }
 
     pub async fn close(self) {
@@ -232,10 +241,9 @@ impl RedisAdapter {
 }
 
 fn parse_database(value: Option<&str>) -> Result<u32, DatabaseError> {
-    value
-        .unwrap_or("0")
-        .parse::<u32>()
-        .map_err(|_| DatabaseError::configuration("Redis database must be a non-negative integer"))
+    value.unwrap_or("0").parse::<u32>().map_err(|_| {
+        DatabaseError::configuration("Redis-compatible database must be a non-negative integer")
+    })
 }
 
 fn encode_url_part(value: &str) -> String {

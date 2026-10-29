@@ -24,6 +24,15 @@ fn saved_postgres_profile() -> ConnectionProfile {
     valid_postgres_draft().validate(&[]).unwrap().profile
 }
 
+fn replace_profile_url(draft: &mut ProfileDraft, url: &str) {
+    draft.move_home(ProfileField::Url);
+    let length = draft.url_display().chars().count();
+    for _ in 0..length {
+        draft.delete(ProfileField::Url);
+    }
+    draft.paste(ProfileField::Url, url);
+}
+
 #[test]
 fn profile_text_fields_support_shell_style_cursor_editing() {
     let mut draft = ProfileDraft::new(DatabaseKind::Postgres);
@@ -986,6 +995,92 @@ fn visible_fields_follow_the_selected_driver_and_sqlite_mode() {
     assert_eq!(redis.database.value(), "0");
     assert!(!redis.visible_fields().contains(&ProfileField::Schema));
     assert!(!redis.visible_fields().contains(&ProfileField::SqlitePath));
+
+    let valkey = ProfileDraft::new(DatabaseKind::Valkey);
+    assert_eq!(valkey.host.value(), "localhost");
+    assert_eq!(valkey.port.value(), "6379");
+    assert_eq!(valkey.database.value(), "0");
+    assert_eq!(valkey.url_format, ConnectionUrlFormat::Valkey);
+    assert!(!valkey.visible_fields().contains(&ProfileField::Schema));
+}
+
+#[test]
+fn switching_between_redis_and_valkey_preserves_tls_and_custom_port() {
+    let mut state = ProfileManagerState::new(false);
+    state.start_new(DatabaseKind::Redis);
+    let draft = state.draft.as_mut().unwrap();
+    draft.ssl_mode = SslMode::Require;
+    draft.port.set("6380");
+    state.select_driver(DatabaseKind::Valkey);
+
+    let draft = state.draft.as_ref().unwrap();
+    assert_eq!(draft.kind, DatabaseKind::Valkey);
+    assert_eq!(draft.url_format, ConnectionUrlFormat::ValkeyTls);
+    assert!(draft.url_display().starts_with("valkeys://"));
+    assert_eq!(draft.port.value(), "6380");
+
+    state.select_driver(DatabaseKind::Redis);
+    let draft = state.draft.as_ref().unwrap();
+    assert_eq!(draft.url_format, ConnectionUrlFormat::RedisTls);
+    assert!(draft.url_display().starts_with("rediss://"));
+
+    let mut state = ProfileManagerState::new(false);
+    state.start_new(DatabaseKind::Valkey);
+    replace_profile_url(
+        state.draft.as_mut().unwrap(),
+        "rediss://acl@cache.example:6380/2",
+    );
+    state.draft.as_mut().unwrap().commit_url().unwrap();
+    assert_eq!(state.draft.as_ref().unwrap().kind, DatabaseKind::Redis);
+    assert_eq!(
+        state.draft.as_ref().unwrap().url_format,
+        ConnectionUrlFormat::RedisTls
+    );
+}
+
+#[test]
+fn redis_compatible_ssl_toggle_updates_scheme_and_keeps_security_modes_consistent() {
+    let mut state = ProfileManagerState::new(false);
+    state.start_new(DatabaseKind::Valkey);
+    state.selected_field = ProfileField::SslMode;
+
+    state.cycle(1);
+    let draft = state.draft.as_ref().unwrap();
+    assert_eq!(draft.ssl_mode, SslMode::Require);
+    assert_eq!(draft.url_format, ConnectionUrlFormat::ValkeyTls);
+    assert!(draft.url_display().starts_with("valkeys://"));
+
+    state.cycle(1);
+    let draft = state.draft.as_ref().unwrap();
+    assert_eq!(draft.ssl_mode, SslMode::Disable);
+    assert_eq!(draft.url_format, ConnectionUrlFormat::Valkey);
+    assert!(draft.url_display().starts_with("valkey://"));
+}
+
+#[test]
+fn valkey_draft_validation_and_url_commit_keep_valkey_identity() {
+    let mut draft = ProfileDraft::new(DatabaseKind::Valkey);
+    draft.name.set("cache");
+    let profile = draft.validate(&[]).unwrap().profile;
+    assert_eq!(profile.kind, DatabaseKind::Valkey);
+    assert_eq!(profile.url_format, ConnectionUrlFormat::Valkey);
+    assert_eq!(profile.database.as_deref(), Some("0"));
+    assert!(matches!(
+        profile.catalog_scope.databases,
+        CatalogSelection::All
+    ));
+
+    let mut state = ProfileManagerState::new(false);
+    state.start_new(DatabaseKind::Valkey);
+    replace_profile_url(
+        state.draft.as_mut().unwrap(),
+        "valkeys://acl@cache.example:6380/2",
+    );
+    state.draft.as_mut().unwrap().commit_url().unwrap();
+    let draft = state.draft.as_ref().unwrap();
+    assert_eq!(draft.kind, DatabaseKind::Valkey);
+    assert_eq!(draft.url_format, ConnectionUrlFormat::ValkeyTls);
+    assert_eq!(draft.ssl_mode, SslMode::Require);
 }
 
 #[test]

@@ -3,6 +3,9 @@
 LazyDB releases are prepared with the project-level OpenCode `release` skill
 and built by `.github/workflows/release.yml`.
 
+See [CI builds and dependency caches](ci.md) for the pinned toolchain, build
+profiles, cache ownership, and build timing diagnostics used by both workflows.
+
 ## Prerequisites
 
 - Work from an up-to-date `main` checkout with no unrelated changes.
@@ -93,6 +96,11 @@ curl --fail --proto '=https' --tlsv1.2 https://lazydb.yelog.org/channels/v2/beta
 Linux release assets include per-architecture runtime reports and schema 2
 channel requirements. The report and package checks are described in
 [Linux runtime compatibility](linux-runtime-compatibility.md).
+
+Every release target also reports the raw client binary and packaged archive
+byte sizes and SHA-256 digests. The artifact gate rejects DuckDB C API imports
+or engine payload in the default client archive; the optional DuckDB runtime is
+prepared separately for native CI tests and is not copied into release archives.
 
 The Pages job preserves the other channel manifest while publishing the
 channel associated with the newly published Release. It intentionally deploys

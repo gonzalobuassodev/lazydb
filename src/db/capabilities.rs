@@ -9,7 +9,7 @@ pub enum InteractionModel {
 
 pub const fn interaction_model(kind: DatabaseKind) -> InteractionModel {
     match kind {
-        DatabaseKind::Redis => InteractionModel::KeyValue,
+        DatabaseKind::Redis | DatabaseKind::Valkey => InteractionModel::KeyValue,
         DatabaseKind::MongoDb => InteractionModel::Document,
         _ => InteractionModel::Relational,
     }
@@ -86,7 +86,7 @@ impl DatabaseCapabilities {
                 manual_transactions: true,
                 cancellation: false,
             },
-            DatabaseKind::Redis => Self {
+            DatabaseKind::Redis | DatabaseKind::Valkey => Self {
                 catalog: false,
                 relation_ddl: false,
                 relation_edit: false,

@@ -1835,7 +1835,7 @@ impl Runtime {
                         Ok(server) => {
                             let capabilities = database.catalog_capabilities();
                             let discovery =
-                                if profile.kind == crate::profile::DatabaseKind::Redis {
+                                if profile.kind.is_redis_compatible() {
                                     None
                                 } else {
                                     Some(database.discover_catalog_scope().await.map_err(|error| {
@@ -3013,13 +3013,13 @@ impl Runtime {
                     .await
                     .map_err(|_| {
                         DatabaseError::configuration(
-                            "Redis database discovery timed out after 30 seconds",
+                            "Key-value database discovery timed out after 30 seconds",
                         )
                     })
                     .unwrap_or_else(Err)
                 }
                 _ => Err(DatabaseError::configuration(
-                    "Redis database discovery requires a Redis connection",
+                    "Key-value database discovery requires a Redis-compatible connection",
                 )),
             };
             match result {

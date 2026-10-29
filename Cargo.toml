@@ -1,6 +1,6 @@
 [package]
 name = "lazydb"
-version = "0.2.1"
+version = "0.2.2"
 edition = "2024"
 rust-version = "1.94"
 description = "A keyboard-first terminal database IDE"
@@ -21,7 +21,8 @@ chacha20poly1305 = "0.10"
 clap = { version = "4.5", features = ["derive"] }
 crossterm = { version = "0.29", features = ["event-stream"] }
 directories = "6.0"
-duckdb = { version = "=1.10506.0", default-features = false, features = ["bundled", "chrono", "json", "parquet"] }
+duckdb = { version = "=1.10506.0", default-features = false, features = ["chrono"] }
+libduckdb-sys = { version = "=1.10506.0", default-features = false }
 futures-util = { version = "0.3", features = ["io"] }
 keyring = "4.1.6"
 jsonc-parser = { version = "0.33", features = ["cst", "serde_json"] }
@@ -34,7 +35,6 @@ reqwest = { version = "0.12", default-features = false, features = ["rustls-tls"
 redis = { version = "=1.5.0", default-features = false, features = ["connection-manager", "tokio-rustls-comp"] }
 mongodb = { version = "=3.8.2", default-features = false, features = ["rustls-tls", "dns-resolver", "compat-3-0-0"] }
 sha2 = "0.10"
-tar = "0.4"
 rmcp = { version = "3.1.4", default-features = false, features = ["client", "server", "macros", "transport-io", "transport-child-process"] }
 secrecy = { version = "0.10", features = ["serde"] }
 serde = { version = "1.0", features = ["derive"] }
@@ -57,8 +57,6 @@ tracing-subscriber = { version = "0.3", features = ["env-filter", "fmt"] }
 unicode-width = "0.2"
 url = "2.5"
 uuid = { version = "1.18", features = ["serde", "v4"] }
-xz2 = { version = "0.1", features = ["static"] }
-zip = "6.0"
 serde_yaml = "0.9"
 jaded = { version = "0.5", features = ["serde", "derive"] }
 serde-pickle = "1.2.0"
@@ -79,6 +77,32 @@ incremental = false
 [features]
 default = ["driver-oracle"]
 driver-oracle = ["dep:oracle"]
+
+[workspace]
+members = ["crates/libduckdb-sys-runtime"]
+resolver = "3"
+
+[patch.crates-io]
+libduckdb-sys = { path = "crates/libduckdb-sys-runtime" }
+
+[target.'cfg(windows)'.dependencies]
+zip = { version = "6.0", default-features = false, features = ["deflate-flate2-zlib-rs"] }
+
+[target.'cfg(unix)'.dependencies]
+tar = "0.4"
+xz2 = { version = "0.1", features = ["static"] }
+
+[dev-dependencies.zip]
+version = "6.0"
+default-features = false
+features = ["deflate-flate2-zlib-rs"]
+
+[dev-dependencies.tar]
+version = "0.4"
+
+[dev-dependencies.xz2]
+version = "0.1"
+features = ["static"]
 
 [dependencies.oracle]
 version = "0.6.3"

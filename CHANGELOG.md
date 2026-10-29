@@ -1,5 +1,74 @@
 # Changelog
 
+## [0.2.2] - 2026-10-26
+
+### Added
+
+- Add Valkey as a Redis-compatible key-value database, including connection profiles, URL handling, database discovery, and key browsing ([`07a5c8d`](https://github.com/yelog/lazydb/commit/07a5c8d)).
+
+### Changed
+
+- Load the DuckDB native engine runtime on demand to reduce eager runtime loading ([`18f080f`](https://github.com/yelog/lazydb/commit/18f080f)).
+
+### Fixed
+
+- Preserve SQL Server table and view previews for catalog relation identities while retaining support for existing three-part identities ([`1004cd5`](https://github.com/yelog/lazydb/commit/1004cd5), [`5fa13b7`](https://github.com/yelog/lazydb/commit/5fa13b7)).
+- Keep DuckDB database paths and runtime loading portable across Windows, including archive update paths ([`a84f5b7`](https://github.com/yelog/lazydb/commit/a84f5b7), [`26e333e`](https://github.com/yelog/lazydb/commit/26e333e)).
+- Confirm PostgreSQL schema cascades explicitly and retain schema snapshots during Explorer refresh ([`e82a335`](https://github.com/yelog/lazydb/commit/e82a335), [`092e436`](https://github.com/yelog/lazydb/commit/092e436)).
+
+### Internal
+
+- Improve CI build caching, database test execution, Linux compatibility checks, installers, and release distribution validation across supported targets ([`144c751`](https://github.com/yelog/lazydb/commit/144c751), [`7afadf5`](https://github.com/yelog/lazydb/commit/7afadf5)).
+- Expand documentation for Valkey, DuckDB runtime behavior, release workflows, and verified CI build performance ([`bb4f454`](https://github.com/yelog/lazydb/commit/bb4f454), [`e345a92`](https://github.com/yelog/lazydb/commit/e345a92)).
+
+### Commits
+- [`5ba1f48`](https://github.com/yelog/lazydb/commit/5ba1f48) Merge remote-tracking branch 'origin/main'
+- [`3e66665`](https://github.com/yelog/lazydb/commit/3e66665) build(deps): bump Swatinem/rust-cache from 2.9.2 to 2.9.3 (#19)
+- [`802608d`](https://github.com/yelog/lazydb/commit/802608d) Merge branch 'task/lazydb-duckdb-runtime-size-optimization'
+- [`5ca29b8`](https://github.com/yelog/lazydb/commit/5ca29b8) ci: cache native DuckDB runtime builds
+- [`b228914`](https://github.com/yelog/lazydb/commit/b228914) fix(tests): handle native DuckDB paths and query events
+- [`a84f5b7`](https://github.com/yelog/lazydb/commit/a84f5b7) fix(duckdb): parse Windows file paths in profiles
+- [`26e333e`](https://github.com/yelog/lazydb/commit/26e333e) fix(update): compile archive paths on Windows
+- [`3c8e7d8`](https://github.com/yelog/lazydb/commit/3c8e7d8) fix(duckdb): make runtime tests portable to Windows
+- [`75c3de0`](https://github.com/yelog/lazydb/commit/75c3de0) fix(duckdb): use portable C string pointer type
+- [`3f1b3ae`](https://github.com/yelog/lazydb/commit/3f1b3ae) fix(ci): select DuckDB runtime target from matrix
+- [`18f080f`](https://github.com/yelog/lazydb/commit/18f080f) feat(duckdb): load engine runtime on demand
+- [`8565ee1`](https://github.com/yelog/lazydb/commit/8565ee1) Merge branch 'main' of github.com:yelog/lazydb
+- [`bb4f454`](https://github.com/yelog/lazydb/commit/bb4f454) docs(valkey): include implementation plan
+- [`f309e5e`](https://github.com/yelog/lazydb/commit/f309e5e) test(cli): include Valkey in capabilities contract
+- [`07a5c8d`](https://github.com/yelog/lazydb/commit/07a5c8d) feat(valkey): add Redis-compatible Valkey support
+- [`80e118a`](https://github.com/yelog/lazydb/commit/80e118a) fix(installer): preserve release version during glibc checks
+- [`6386593`](https://github.com/yelog/lazydb/commit/6386593) fix(release): use supported CLI for SQLite runtime smoke
+- [`431679e`](https://github.com/yelog/lazydb/commit/431679e) fix(release): allow native x86_64 runtime dependencies
+- [`e345a92`](https://github.com/yelog/lazydb/commit/e345a92) docs(ci): record verified cold and warm build results
+- [`2e2e8a0`](https://github.com/yelog/lazydb/commit/2e2e8a0) ci: hash only the pinned compiler in host dependency caches
+- [`10015e5`](https://github.com/yelog/lazydb/commit/10015e5) fix(app): remove redundant catalog refresh bindings
+- [`144c751`](https://github.com/yelog/lazydb/commit/144c751) ci: reuse Rust dependency builds across checks and workflows
+- [`e4a7ce6`](https://github.com/yelog/lazydb/commit/e4a7ce6) Merge remote-tracking branch 'origin/main'
+- [`9b0c182`](https://github.com/yelog/lazydb/commit/9b0c182) Merge pull request #18 from yelog/fix/pr17-sqlserver-preview
+- [`f9ffe3a`](https://github.com/yelog/lazydb/commit/f9ffe3a) Merge pull request #17 from lansisDev/fix/sqlserver-relation-preview
+- [`d77031b`](https://github.com/yelog/lazydb/commit/d77031b) ci(mongodb): separate compilation from test timeout
+- [`332d559`](https://github.com/yelog/lazydb/commit/332d559) ci(mongodb): use runner compatible with MongoDB 8.0
+- [`3577302`](https://github.com/yelog/lazydb/commit/3577302) test(sqlserver): cover table and view catalog previews
+- [`092e436`](https://github.com/yelog/lazydb/commit/092e436) fix(explorer): preserve schema snapshots during refresh
+- [`5fa13b7`](https://github.com/yelog/lazydb/commit/5fa13b7) fix(sqlserver): keep previewing three-component relation ids
+- [`1004cd5`](https://github.com/yelog/lazydb/commit/1004cd5) fix(sqlserver): accept the catalog relation path in preview
+- [`a889a88`](https://github.com/yelog/lazydb/commit/a889a88) fix(ci): restore Linux release compatibility
+- [`c5e3051`](https://github.com/yelog/lazydb/commit/c5e3051) fix(release): preserve Linux build cache ownership
+- [`fa683dd`](https://github.com/yelog/lazydb/commit/fa683dd) Merge branch 'task/confirm-nonempty-postgres-schema-drop'
+- [`e82a335`](https://github.com/yelog/lazydb/commit/e82a335) feat(postgres): confirm cascading schema drops
+- [`fc0a56a`](https://github.com/yelog/lazydb/commit/fc0a56a) ci: speed up Linux release builds
+- [`773a2a3`](https://github.com/yelog/lazydb/commit/773a2a3) fix(release): accept glibc component symbol versions
+- [`e0beadf`](https://github.com/yelog/lazydb/commit/e0beadf) fix(release): inspect readelf in build image
+- [`cfce89a`](https://github.com/yelog/lazydb/commit/cfce89a) fix(release): quote workflow glob patterns
+- [`7afadf5`](https://github.com/yelog/lazydb/commit/7afadf5) fix(ci): repair Linux distribution and database gates
+
+## Unreleased
+
+### Fixed
+
+- Restore SQL Server table and view DATA previews by accepting relation identities returned by the catalog ([#17](https://github.com/yelog/lazydb/pull/17), fixes [#16](https://github.com/yelog/lazydb/issues/16)).
+
 ## [0.1.0] - 2026-09-04
 
 ### Added

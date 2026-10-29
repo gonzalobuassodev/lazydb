@@ -1,5 +1,8 @@
 # Configuration
 
+For installation, upgrades, and removal, see the
+[installation guide](installation.md).
+
 This document is the reference for LazyDB's configuration surfaces. LazyDB has
 four kinds of settings:
 
@@ -19,9 +22,10 @@ silently accepting a setting that LazyDB does not use.
 
 New and edited connection forms show **Category** above **Driver**. Choose
 **Relational** for PostgreSQL, MySQL, MariaDB, Oracle, SQL Server, SQLite, DuckDB
-or ClickHouse; choose **Non-relational** for Redis or MongoDB. Left/Right changes the focused category or
-cycles drivers within that category. Categories and drivers also support mouse
-selection. Narrow forms keep full driver names in a selection-following window.
+or ClickHouse; choose **Non-relational** for Redis, Valkey, or MongoDB. Left/Right
+changes the focused category or cycles drivers within that category. Categories
+and drivers also support mouse selection. Narrow forms keep full driver names
+in a selection-following window.
 
 The form remembers the last driver in each category for the current draft only.
 Category is derived from the selected driver and is not saved as another profile
@@ -41,22 +45,6 @@ directory because doing so would prevent new defaults from being inherited on
 upgrade.
 
 ## Configuration Files
-
-## ClickHouse Profiles
-
-ClickHouse uses its HTTP(S) interface. Use `clickhouse://host[:8123]/database`
-for HTTP or `clickhouses://host[:8443]/database` for verified HTTPS. Explicit
-ports are preserved. If no database or user is supplied, ClickHouse's `default`
-database and user are used. Passwords are stored using the selected LazyDB
-credential policy and sent in the `X-ClickHouse-Key` request header; they are
-not embedded in the HTTP URL. `SSL mode = Disable` selects HTTP; every other
-SSL mode uses HTTPS with certificate verification. The adapter does not convert
-native TCP ports or silently downgrade TLS.
-
-ClickHouse maps the selected database to LazyDB's database/schema catalog
-namespace. The profile's visible-object selection scopes Explorer search and
-catalog requests. See [database capabilities](database-capabilities.md#clickhouse)
-for supported objects, mutation boundaries, monitoring and transaction limits.
 
 `AppPaths` uses `~/lazydb/` for new users on macOS and Linux. Existing users
 continue using the root selected by their installation during upgrades. Set
@@ -83,6 +71,9 @@ Native installation data also lives in this same application directory. The
 `current` symlink selects the active version and `releases/<VERSION>/` contains
 downloaded native releases. `LAZYDB_CONFIG_HOME` relocates all of these files
 together on macOS and Linux.
+
+See [Prune old native releases](#prune-old-native-releases) for inspecting and
+removing eligible historical releases.
 
 `LAZYDB_CONFIG_HOME` applies to macOS and Linux only. Windows uses the standard
 `%APPDATA%` roaming application-data directory. LazyDB creates private
@@ -312,6 +303,22 @@ Agent and MCP execution options include `--project`, `--connection`, `--limit`,
 and `--connection`. The MCP and agent execution write policy defaults to
 `deny`; see [Coding-Agent Database Access](coding-agent-access.md).
 
+## ClickHouse Profiles
+
+ClickHouse uses its HTTP(S) interface. Use `clickhouse://host[:8123]/database`
+for HTTP or `clickhouses://host[:8443]/database` for verified HTTPS. Explicit
+ports are preserved. If no database or user is supplied, ClickHouse's `default`
+database and user are used. Passwords are stored using the selected LazyDB
+credential policy and sent in the `X-ClickHouse-Key` request header; they are
+not embedded in the HTTP URL. `SSL mode = Disable` selects HTTP; every other
+SSL mode uses HTTPS with certificate verification. The adapter does not convert
+native TCP ports or silently downgrade TLS.
+
+ClickHouse maps the selected database to LazyDB's database/schema catalog
+namespace. The profile's visible-object selection scopes Explorer search and
+catalog requests. See [database capabilities](database-capabilities.md#clickhouse)
+for supported objects, mutation boundaries, monitoring and transaction limits.
+
 ## Connection Profile Fields
 
 The current profile file format is version `5`:
@@ -321,7 +328,7 @@ The current profile file format is version `5`:
 | `id` | UUID string | Generated on creation | Stable identity used by workspace state and system credential references. Must be unique within the file. |
 | `name` | String | Derived from the database, host, or SQLite filename | Name shown in the Explorer and accepted by `--profile` and agent `--connection`. |
 | `access` | Table | `{ scope = "global" }` | Controls which projects can see a saved profile. |
-| `kind` | `postgres`, `mysql`, `mariadb`, `oracle`, `sqlserver`, `sqlite`, `duckdb`, `redis` | Required | Database adapter to use. Oracle uses the native driver included in the default build and requires Oracle Instant Client at runtime; DuckDB is embedded; Redis is the non-relational key-value adapter. |
+| `kind` | `postgres`, `mysql`, `mariadb`, `oracle`, `sqlserver`, `sqlite`, `duckdb`, `redis`, `valkey`, `mongodb`, `clickhouse` | Required | Database adapter to use. Oracle requires Oracle Instant Client; DuckDB requires an optional C API runtime. Redis/Valkey use key/value workflows; MongoDB uses document workflows. See [database capabilities](database-capabilities.md). |
 | `url_format` | Kebab-case enum | Driver-specific | URL spelling used when LazyDB displays or regenerates the connection URL. |
 | `host` | String or `null` | `null` | Server hostname or address. PostgreSQL, MySQL/MariaDB, Oracle, SQL Server, and Redis use this field. |
 | `port` | Integer or `null` | Driver default when imported | Server port. PostgreSQL defaults to `5432`, MySQL/MariaDB to `3306`, Oracle to `1521`, SQL Server to `1433`, and Redis to `6379`. SQL Server profiles require an explicit TCP port when connecting. |
@@ -435,6 +442,29 @@ M0 loads connection profiles from the platform configuration directory:
 Use `lazydb --config /path/to/connections.toml` to override the profile file for
 the current run. This option will point to a broader app configuration in a later
 migration; M0 treats it as the connection-profile file.
+
+## Prune old native releases
+
+`lazydb update --prune` previews eligible old releases and makes no filesystem
+changes. Review the JSON report with `--json`; only pass `--yes` to explicitly
+apply deletion. The command only operates on a native installation whose
+`install.json` and `current` activation agree. It keeps the active release and
+the previous version recorded in the release ownership chain. Legacy releases
+without an ownership marker, releases with changed files or links, unknown
+contents, and releases that may be used by another process are skipped. On
+platforms where a complete process-use check is unavailable, the release is
+kept. Homebrew, Cargo, and other package-manager installations are never pruned.
+
+```sh
+lazydb update --prune --json
+lazydb update --prune --yes --json
+```
+
+Pruning verifies each managed release's ownership marker and file hashes.
+It is not run automatically after an update. Preview and apply share the
+installer's `.install.lock`; if that lock is busy or has an unknown owner, the
+command fails closed. Do not delete user data or hand-created release files to
+make an old installation appear eligible.
 
 ## Icon Mode
 

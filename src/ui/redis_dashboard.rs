@@ -9,6 +9,33 @@ use ratatui::{
 use super::{HitRegion, HitTarget, Theme, UiState, panel_block};
 use crate::{app::App, model::tab::WorkspaceTab};
 
+fn configured_name(app: &App, profile_id: Option<uuid::Uuid>) -> &'static str {
+    profile_id
+        .and_then(|profile_id| app.profiles.iter().find(|profile| profile.id == profile_id))
+        .map(|profile| match profile.kind {
+            crate::profile::DatabaseKind::Valkey => "Valkey",
+            _ => "Redis",
+        })
+        .unwrap_or("Redis-compatible")
+}
+
+fn observed_identity(
+    details: &crate::db::redis::monitor::RedisMonitorDetails,
+    configured_name: &'static str,
+) -> String {
+    let identity = &details.server_identity;
+    format!(
+        "{} {} · {} · {}",
+        identity.display_name_or(configured_name),
+        identity.version.as_deref().unwrap_or("--"),
+        identity.mode.as_deref().unwrap_or("--"),
+        details
+            .uptime_in_seconds
+            .map(format_uptime)
+            .unwrap_or_else(|| "uptime --".into())
+    )
+}
+
 pub(crate) fn render(
     frame: &mut Frame<'_>,
     area: Rect,
@@ -19,7 +46,14 @@ pub(crate) fn render(
     let Some(WorkspaceTab::Dashboard(tab)) = app.tabs.get(app.active_tab) else {
         return;
     };
-    let block = panel_block(" REDIS DASHBOARD ", true, theme);
+    let configured_name = configured_name(
+        app,
+        tab.connection
+            .map(|connection| connection.profile_id)
+            .or(tab.profile_id),
+    );
+    let title = format!(" {configured_name} DASHBOARD ");
+    let block = panel_block(&title, true, theme);
     let inner = block.inner(area);
     frame.render_widget(block, area);
     if inner.is_empty() {
@@ -40,18 +74,8 @@ pub(crate) fn render(
         ])
         .split(inner);
     let identity = details
-        .map(|details| {
-            format!(
-                "Redis {} · {} · {}",
-                details.redis_version.as_deref().unwrap_or("--"),
-                details.redis_mode.as_deref().unwrap_or("--"),
-                details
-                    .uptime_in_seconds
-                    .map(format_uptime)
-                    .unwrap_or_else(|| "uptime --".into())
-            )
-        })
-        .unwrap_or_else(|| "Redis · waiting for INFO".into());
+        .map(|details| observed_identity(details, configured_name))
+        .unwrap_or_else(|| format!("{configured_name} · waiting for INFO"));
     frame.render_widget(
         Paragraph::new(vec![
             Line::styled(identity, theme.title(true)),
@@ -138,10 +162,13 @@ pub(crate) fn render(
                 .collect::<Vec<_>>()
                 .join("\n")
         })
-        .unwrap_or_else(|| "Redis INFO is not available".into());
+        .unwrap_or_else(|| format!("{configured_name} INFO is not available"));
     state.hit_regions.push(HitRegion {
         area: rows[3],
-        target: HitTarget::OpenTextDetail(super::readonly_detail_request("Redis INFO", info)),
+        target: HitTarget::OpenTextDetail(super::readonly_detail_request(
+            format!("{configured_name} INFO"),
+            info,
+        )),
     });
 }
 
@@ -154,7 +181,8 @@ fn render_info(
 ) {
     let Some(details) = details else {
         frame.render_widget(
-            Paragraph::new("Waiting for Redis INFO…").style(Style::new().fg(theme.muted)),
+            Paragraph::new("Waiting for key-value server INFO…")
+                .style(Style::new().fg(theme.muted)),
             area,
         );
         return;
@@ -239,6 +267,7 @@ fn format_bytes(value: Option<f64>) -> String {
         },
     )
 }
+
 fn format_uptime(seconds: u64) -> String {
     format!(
         "uptime {}d {:02}:{:02}:{:02}",
@@ -247,4 +276,49 @@ fn format_uptime(seconds: u64) -> String {
         (seconds / 60) % 60,
         seconds % 60
     )
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{configured_name, observed_identity};
+    use crate::{app::App, db::redis::monitor::parse_info, profile::import_connection_url};
+
+    #[test]
+    fn dashboard_configuration_name_comes_from_its_bound_profile() {
+        let redis = import_connection_url("redis://localhost", Some("redis"))
+            .unwrap()
+            .profile;
+        let valkey = import_connection_url("valkey://localhost", Some("valkey"))
+            .unwrap()
+            .profile;
+        let redis_id = redis.id;
+        let valkey_id = valkey.id;
+        let app = App::new(vec![redis, valkey]);
+
+        assert_eq!(configured_name(&app, Some(redis_id)), "Redis");
+        assert_eq!(configured_name(&app, Some(valkey_id)), "Valkey");
+        assert_eq!(configured_name(&app, None), "Redis-compatible");
+        assert_eq!(
+            configured_name(&app, Some(uuid::Uuid::nil())),
+            "Redis-compatible"
+        );
+    }
+
+    #[test]
+    fn dashboard_summary_uses_observed_brand_and_actual_version() {
+        let (_, details) = parse_info(
+            "# Server\nredis_version:7.2.4\nserver_name:valkey\nvalkey_version:8.1.3\nredis_mode:standalone\nserver_mode:cluster\n# Server\nuptime_in_seconds:10\n",
+            1,
+        );
+        let summary = observed_identity(&details, "Valkey");
+        assert!(summary.starts_with("Valkey 8.1.3 · cluster ·"));
+        assert!(!summary.contains("7.2.4"));
+    }
+
+    #[test]
+    fn dashboard_summary_does_not_use_redis_compatibility_version_for_valkey() {
+        let (_, details) = parse_info("# Server\nredis_version:7.2.4\nserver_name:valkey\n", 1);
+        let summary = observed_identity(&details, "Valkey");
+        assert!(summary.starts_with("Valkey -- · -- ·"));
+    }
 }

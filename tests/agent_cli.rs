@@ -218,6 +218,7 @@ fn parses_duckdb_connection_and_lsp_dialect() {
     assert!(Cli::try_parse_from(["lazydb", "lsp", "--stdio", "--dialect", "duckdb"]).is_ok());
     let info = lazydb::cli::version_info();
     assert!(info.drivers.contains(&"duckdb"));
+    assert!(info.drivers.contains(&"valkey"));
 }
 
 #[test]

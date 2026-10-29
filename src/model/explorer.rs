@@ -486,6 +486,57 @@ impl CatalogTree {
         Ok(())
     }
 
+    pub fn reconcile_group_states(
+        &mut self,
+        schema: &CatalogId,
+        states: Vec<(ObjectGroup, CatalogGroupState)>,
+    ) -> Result<Vec<CatalogId>, CatalogTreeError> {
+        self.validate_profile(schema.profile_id())?;
+        let Some(entry) = self.entries.get(schema) else {
+            return Err(CatalogTreeError::MissingOwner { id: schema.clone() });
+        };
+        if entry.kind != CatalogKind::Schema {
+            return Err(CatalogTreeError::InvalidGroupParent {
+                parent: schema.clone(),
+            });
+        }
+        let mut seen = HashSet::with_capacity(states.len());
+        for (group, _) in &states {
+            if !seen.insert(*group) {
+                return Err(CatalogTreeError::DuplicateGroup {
+                    parent: schema.clone(),
+                    group: *group,
+                });
+            }
+        }
+        let removed_groups = self
+            .groups(schema)
+            .iter()
+            .filter(|group| !seen.contains(group))
+            .copied()
+            .collect::<Vec<_>>();
+        let removed_roots = removed_groups
+            .iter()
+            .flat_map(|group| self.group_children(schema, *group).iter().cloned())
+            .collect::<Vec<_>>();
+        let removed = self.collect_subtrees(&removed_roots);
+        let removed_set = removed.iter().cloned().collect::<HashSet<_>>();
+        self.remove_ids(&removed, &removed_set);
+
+        self.group_order.insert(
+            schema.clone(),
+            states.iter().map(|(group, _)| *group).collect(),
+        );
+        let retained_groups = seen;
+        self.group_children
+            .retain(|(parent, group), _| parent != schema || retained_groups.contains(group));
+        self.group_states.retain(|(parent, _), _| parent != schema);
+        for (group, state) in states {
+            self.group_states.insert((schema.clone(), group), state);
+        }
+        Ok(removed)
+    }
+
     pub fn append_group_states(
         &mut self,
         schema: &CatalogId,
@@ -621,6 +672,130 @@ impl CatalogTree {
             self.set_group_state(parent, *group, CatalogGroupState::default())?;
         }
         self.insert_validated(entries);
+        Ok(removed)
+    }
+
+    /// Reconcile a complete owner snapshot while retaining subtrees whose IDs
+    /// are unchanged. Background refreshes use this to keep stable catalog
+    /// entries and their loaded descendants available while pages are fetched.
+    pub fn reconcile_page(
+        &mut self,
+        owner: &ExplorerOwnerId,
+        entries: Vec<CatalogEntry>,
+    ) -> Result<Vec<CatalogId>, CatalogTreeError> {
+        self.validate_profile(owner.profile_id())?;
+        self.validate_owner(owner)?;
+        self.validate_replacement_scope(owner, &entries)?;
+
+        let mut incoming = HashSet::with_capacity(entries.len());
+        for entry in &entries {
+            self.validate_profile(entry.id.profile_id())?;
+            if entry.kind != entry.id.kind {
+                return Err(CatalogTreeError::KindMismatch {
+                    id: entry.id.clone(),
+                    entry_kind: entry.kind,
+                });
+            }
+            if !incoming.insert(entry.id.clone()) {
+                return Err(CatalogTreeError::DuplicateId {
+                    id: entry.id.clone(),
+                });
+            }
+            if let Some(existing) = self.entries.get(&entry.id)
+                && existing.parent_id != entry.parent_id
+            {
+                return Err(CatalogTreeError::EntryOutsideOwner {
+                    id: entry.id.clone(),
+                    owner: owner.clone(),
+                });
+            }
+        }
+
+        let current_children = match owner {
+            ExplorerOwnerId::Profile(_) => self.roots.clone(),
+            ExplorerOwnerId::Catalog(parent) => self
+                .children(parent)
+                .iter()
+                .filter(|id| {
+                    parent.kind != CatalogKind::Table
+                        || !self
+                            .entries
+                            .get(*id)
+                            .is_some_and(|entry| entry.kind == CatalogKind::Projection)
+                })
+                .cloned()
+                .collect(),
+            ExplorerOwnerId::Projections(parent) => self
+                .children(parent)
+                .iter()
+                .filter(|id| {
+                    self.entries
+                        .get(*id)
+                        .is_some_and(|entry| entry.kind == CatalogKind::Projection)
+                })
+                .cloned()
+                .collect(),
+            ExplorerOwnerId::Group { parent, group } => {
+                self.group_children(parent, *group).to_vec()
+            }
+        };
+        let removal_roots = current_children
+            .iter()
+            .filter(|id| !incoming.contains(*id))
+            .cloned()
+            .collect::<Vec<_>>();
+        let removed = self.collect_subtrees(&removal_roots);
+        let removed_set = removed.iter().cloned().collect::<HashSet<_>>();
+        let new_entries = entries
+            .iter()
+            .filter(|entry| !self.entries.contains_key(&entry.id))
+            .cloned()
+            .collect::<Vec<_>>();
+        self.validate_batch(&new_entries, &removed_set)?;
+
+        self.remove_ids(&removed, &removed_set);
+        for entry in &entries {
+            if self.entries.contains_key(&entry.id) {
+                self.entries.insert(entry.id.clone(), entry.clone());
+            }
+        }
+        self.insert_validated(new_entries);
+
+        let mut ordered_ids = entries
+            .into_iter()
+            .map(|entry| entry.id)
+            .collect::<Vec<_>>();
+        match owner {
+            ExplorerOwnerId::Profile(_) => self.roots = ordered_ids,
+            ExplorerOwnerId::Catalog(parent) => {
+                if parent.kind == CatalogKind::Table {
+                    ordered_ids.extend(
+                        self.children(parent)
+                            .iter()
+                            .filter(|id| {
+                                self.entries
+                                    .get(*id)
+                                    .is_some_and(|entry| entry.kind == CatalogKind::Projection)
+                            })
+                            .cloned(),
+                    );
+                }
+                self.children.insert(parent.clone(), ordered_ids);
+            }
+            ExplorerOwnerId::Projections(parent) => {
+                let children = self.children.entry(parent.clone()).or_default();
+                children.retain(|id| {
+                    self.entries
+                        .get(id)
+                        .is_some_and(|entry| entry.kind != CatalogKind::Projection)
+                });
+                children.extend(ordered_ids);
+            }
+            ExplorerOwnerId::Group { parent, group } => {
+                self.group_children
+                    .insert((parent.clone(), *group), ordered_ids);
+            }
+        }
         Ok(removed)
     }
 
@@ -935,6 +1110,9 @@ pub struct ExplorerProfileState {
     pub pending_requests: HashMap<ExplorerOwnerId, CatalogRequest>,
     pub pending_identity_requests: HashMap<u64, CatalogId>,
     pub previous_load_states: HashMap<ExplorerOwnerId, ExplorerLoadState>,
+    pub refresh_staged_entries: HashMap<ExplorerOwnerId, Vec<CatalogEntry>>,
+    pub refresh_staged_groups: HashMap<ExplorerOwnerId, Vec<(ObjectGroup, CatalogGroupState)>>,
+    pub refresh_shallow_owners: HashSet<ExplorerOwnerId>,
     pub load_errors: HashMap<ExplorerOwnerId, String>,
     pub last_error: Option<String>,
     pub expand_after_connect: bool,
@@ -983,6 +1161,9 @@ impl ExplorerProfileState {
             pending_requests: HashMap::new(),
             pending_identity_requests: HashMap::new(),
             previous_load_states: HashMap::new(),
+            refresh_staged_entries: HashMap::new(),
+            refresh_staged_groups: HashMap::new(),
+            refresh_shallow_owners: HashSet::new(),
             load_errors: HashMap::new(),
             last_error: None,
             expand_after_connect: false,
@@ -1040,13 +1221,21 @@ impl ExplorerProfileState {
 
     pub fn invalidate_catalog_target(&mut self, target: &CatalogTarget) {
         let owner = owner_for_target(self.catalog.profile_id(), target);
-        let next_cursor = match self.load_states.get(&owner) {
+        let previous = self
+            .previous_load_states
+            .get(&owner)
+            .or_else(|| self.load_states.get(&owner));
+        let next_cursor = match previous {
             Some(ExplorerLoadState::Loaded { next_cursor })
             | Some(ExplorerLoadState::Stale { next_cursor }) => next_cursor.clone(),
             _ => None,
         };
         self.pending_requests.remove(&owner);
         self.previous_load_states.remove(&owner);
+        self.refresh_staged_entries.remove(&owner);
+        self.refresh_staged_groups.remove(&owner);
+        self.refresh_shallow_owners.remove(&owner);
+        self.refresh_shallow_owners.remove(&owner);
         self.load_errors.remove(&owner);
         self.load_states
             .insert(owner, ExplorerLoadState::Stale { next_cursor });
@@ -1055,13 +1244,21 @@ impl ExplorerProfileState {
             && self.catalog.is_projection_table(relation)
         {
             let projection_owner = ExplorerOwnerId::Projections(relation.clone());
-            let projection_cursor = match self.load_states.get(&projection_owner) {
+            let projection_previous = self
+                .previous_load_states
+                .get(&projection_owner)
+                .or_else(|| self.load_states.get(&projection_owner));
+            let projection_cursor = match projection_previous {
                 Some(ExplorerLoadState::Loaded { next_cursor })
                 | Some(ExplorerLoadState::Stale { next_cursor }) => next_cursor.clone(),
                 _ => None,
             };
             self.pending_requests.remove(&projection_owner);
             self.previous_load_states.remove(&projection_owner);
+            self.refresh_staged_entries.remove(&projection_owner);
+            self.refresh_staged_groups.remove(&projection_owner);
+            self.refresh_shallow_owners.remove(&projection_owner);
+            self.refresh_shallow_owners.remove(&projection_owner);
             self.load_errors.remove(&projection_owner);
             self.load_states.insert(
                 projection_owner,
@@ -1070,6 +1267,85 @@ impl ExplorerProfileState {
                 },
             );
         }
+    }
+
+    pub fn has_catalog_snapshot(&self, owner: &ExplorerOwnerId) -> bool {
+        if matches!(
+            self.previous_load_states
+                .get(owner)
+                .or_else(|| self.load_states.get(owner)),
+            Some(ExplorerLoadState::Loaded { .. } | ExplorerLoadState::Stale { .. })
+        ) {
+            return true;
+        }
+        match owner {
+            ExplorerOwnerId::Profile(_) => !self.catalog.roots().is_empty(),
+            ExplorerOwnerId::Catalog(id) => {
+                !self.catalog.children(id).is_empty() || !self.catalog.groups(id).is_empty()
+            }
+            ExplorerOwnerId::Projections(id) => self.catalog.children(id).iter().any(|child| {
+                self.catalog
+                    .get(child)
+                    .is_some_and(|entry| entry.kind == CatalogKind::Projection)
+            }),
+            ExplorerOwnerId::Group { parent, group } => {
+                !self.catalog.group_children(parent, *group).is_empty()
+            }
+        }
+    }
+
+    pub fn remove_catalog_state_for(&mut self, removed: &HashSet<CatalogId>) {
+        let references_removed = |owner: &ExplorerOwnerId| match owner {
+            ExplorerOwnerId::Profile(_) => false,
+            ExplorerOwnerId::Catalog(id) | ExplorerOwnerId::Projections(id) => removed.contains(id),
+            ExplorerOwnerId::Group { parent, .. } => removed.contains(parent),
+        };
+        self.load_states
+            .retain(|owner, _| !references_removed(owner));
+        self.pending_requests
+            .retain(|owner, _| !references_removed(owner));
+        self.previous_load_states
+            .retain(|owner, _| !references_removed(owner));
+        self.refresh_staged_entries
+            .retain(|owner, _| !references_removed(owner));
+        self.refresh_staged_groups
+            .retain(|owner, _| !references_removed(owner));
+        self.refresh_shallow_owners
+            .retain(|owner| !references_removed(owner));
+        self.refresh_shallow_owners
+            .retain(|owner| !references_removed(owner));
+        self.load_errors
+            .retain(|owner, _| !references_removed(owner));
+        self.pending_identity_requests
+            .retain(|_, id| !removed.contains(id));
+    }
+
+    pub fn remove_catalog_group_state_for(
+        &mut self,
+        schema: &CatalogId,
+        removed: &HashSet<ObjectGroup>,
+    ) {
+        let removed_owner = |owner: &ExplorerOwnerId| {
+            matches!(
+                owner,
+                ExplorerOwnerId::Group { parent, group }
+                    if parent == schema && removed.contains(group)
+            )
+        };
+        self.load_states.retain(|owner, _| !removed_owner(owner));
+        self.pending_requests
+            .retain(|owner, _| !removed_owner(owner));
+        self.previous_load_states
+            .retain(|owner, _| !removed_owner(owner));
+        self.refresh_staged_entries
+            .retain(|owner, _| !removed_owner(owner));
+        self.refresh_staged_groups
+            .retain(|owner, _| !removed_owner(owner));
+        self.refresh_shallow_owners
+            .retain(|owner| !removed_owner(owner));
+        self.refresh_shallow_owners
+            .retain(|owner| !removed_owner(owner));
+        self.load_errors.retain(|owner, _| !removed_owner(owner));
     }
 
     pub fn invalidate_database_objects(&mut self, database: &str) {
@@ -1102,6 +1378,10 @@ impl ExplorerProfileState {
                 .previous_load_states
                 .remove(&owner)
                 .unwrap_or(ExplorerLoadState::NotLoaded);
+            self.refresh_staged_entries.remove(&owner);
+            self.refresh_staged_groups.remove(&owner);
+            self.refresh_shallow_owners.remove(&owner);
+            self.refresh_shallow_owners.remove(&owner);
             self.load_states.insert(owner, previous);
             targets.push(request.key.target);
         }
@@ -1645,7 +1925,7 @@ impl ExplorerTreeState {
     fn principal_group_is_visible(&self, profile_id: Uuid) -> bool {
         self.expanded.contains(&ExplorerNodeId::Profile(profile_id))
             && self.profiles.get(&profile_id).is_some_and(|profile| {
-                profile.kind != DatabaseKind::Redis
+                !profile.kind.is_redis_compatible()
                     && matches!(
                         profile.status,
                         ExplorerConnectionStatus::Online | ExplorerConnectionStatus::Syncing
@@ -1736,7 +2016,7 @@ impl ExplorerTreeState {
             return;
         }
         let child_depth = depth + 1;
-        if profile.kind == DatabaseKind::Redis {
+        if profile.kind.is_redis_compatible() {
             for database in &profile.redis_databases {
                 projection.push(
                     ExplorerNodeId::RedisDatabase {
@@ -2278,6 +2558,46 @@ impl ExplorerTreeState {
         Ok(removed)
     }
 
+    pub fn reconcile_catalog_page(
+        &mut self,
+        owner: ExplorerOwnerId,
+        entries: Vec<CatalogEntry>,
+    ) -> Result<Vec<CatalogId>, ExplorerTreeError> {
+        let fallback = self.selection_fallback_chain();
+        let profile_id = owner.profile_id();
+        let Some(profile) = self.profiles.get_mut(&profile_id) else {
+            return Err(ExplorerTreeError::ProfileNotFound { profile_id });
+        };
+        let new_namespace_ids = entries
+            .iter()
+            .filter(|entry| matches!(entry.kind, CatalogKind::Database | CatalogKind::Schema))
+            .filter(|entry| !profile.catalog.entries().contains_key(&entry.id))
+            .map(|entry| entry.id.clone())
+            .collect::<Vec<_>>();
+        let removed = profile.catalog.reconcile_page(&owner, entries)?;
+        for id in new_namespace_ids {
+            self.expanded.insert(ExplorerNodeId::Catalog(id));
+        }
+        self.reconcile_after_catalog_change(fallback);
+        Ok(removed)
+    }
+
+    pub fn reconcile_catalog_groups(
+        &mut self,
+        schema: &CatalogId,
+        states: Vec<(ObjectGroup, CatalogGroupState)>,
+    ) -> Result<Vec<CatalogId>, ExplorerTreeError> {
+        let fallback = self.selection_fallback_chain();
+        let Some(profile) = self.profiles.get_mut(&schema.profile_id()) else {
+            return Err(ExplorerTreeError::ProfileNotFound {
+                profile_id: schema.profile_id(),
+            });
+        };
+        let removed = profile.catalog.reconcile_group_states(schema, states)?;
+        self.reconcile_after_catalog_change(fallback);
+        Ok(removed)
+    }
+
     pub fn replace_subtree(
         &mut self,
         parent: &CatalogId,
@@ -2504,7 +2824,7 @@ impl ExplorerTreeState {
                 profile_id,
                 database,
             } => self.profiles.get(profile_id).is_some_and(|profile| {
-                profile.kind == DatabaseKind::Redis
+                profile.kind.is_redis_compatible()
                     && profile
                         .redis_databases
                         .iter()
@@ -2568,7 +2888,20 @@ impl ExplorerTreeState {
                 self.load_state(parent).and_then(load_state_cursor) == Some(cursor)
             }
             ExplorerNodeId::Empty { owner } => self.load_state(owner).is_some_and(|state| {
-                matches!(state, ExplorerLoadState::Loaded { next_cursor: None })
+                (matches!(state, ExplorerLoadState::Loaded { next_cursor: None })
+                    || matches!(
+                        state,
+                        ExplorerLoadState::Loading { .. }
+                            if self.profiles.get(&owner.profile_id()).is_some_and(|profile| {
+                                matches!(
+                                    profile.previous_load_states.get(owner),
+                                    Some(
+                                        ExplorerLoadState::Loaded { next_cursor: None }
+                                            | ExplorerLoadState::Stale { next_cursor: None }
+                                    )
+                                )
+                            })
+                    ))
                     && self.owner_child_count(owner) == Some(0)
             }),
         }
@@ -2965,7 +3298,10 @@ impl<'a> Projection<'a> {
         let Some(state) = profile.load_states.get(owner) else {
             return;
         };
-        if let Some(kind) = status_kind(state) {
+        let refreshing_snapshot = matches!(state, ExplorerLoadState::Loading { .. })
+            && (profile.refresh_staged_entries.contains_key(owner)
+                || profile.refresh_staged_groups.contains_key(owner));
+        if !refreshing_snapshot && let Some(kind) = status_kind(state) {
             self.push(
                 ExplorerNodeId::Status {
                     owner: owner.clone(),
@@ -2974,8 +3310,22 @@ impl<'a> Projection<'a> {
                 depth,
             );
         }
-        let cursor = load_state_cursor(state);
-        if matches!(state, ExplorerLoadState::Loaded { .. }) && child_count == 0 && cursor.is_none()
+        let cursor = if !refreshing_snapshot {
+            load_state_cursor(state)
+        } else {
+            None
+        };
+        let previous_empty_snapshot = refreshing_snapshot
+            && matches!(
+                profile.previous_load_states.get(owner),
+                Some(
+                    ExplorerLoadState::Loaded { next_cursor: None }
+                        | ExplorerLoadState::Stale { next_cursor: None }
+                )
+            );
+        if (matches!(state, ExplorerLoadState::Loaded { .. }) || previous_empty_snapshot)
+            && child_count == 0
+            && cursor.is_none()
         {
             self.push(
                 ExplorerNodeId::Empty {

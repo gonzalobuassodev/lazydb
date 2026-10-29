@@ -1,11 +1,23 @@
 #!/bin/sh
 set -eu
 
-SCRIPT_DIR=$(CDPATH= cd -- "$(dirname -- "$0")" && pwd)
-REPOSITORY=$(CDPATH= cd -- "$SCRIPT_DIR/../.." && pwd)
+SCRIPT_DIR=$(CDPATH='' cd -- "$(dirname -- "$0")" && pwd)
+REPOSITORY=$(CDPATH='' cd -- "$SCRIPT_DIR/../.." && pwd)
 
-[ "$#" -eq 1 ] || { printf 'Usage: build-linux.sh TARGET\n' >&2; exit 2; }
+[ "$#" -ge 1 ] || { printf 'Usage: build-linux.sh TARGET [--prepare | --exec COMMAND [ARG...]]\n' >&2; exit 2; }
 target=$1
+shift
+mode=build
+if [ "$#" -gt 0 ]; then
+    mode=$1
+    shift
+    case "$mode:$#" in
+        --prepare:0) mode=prepare ;;
+        --exec:0) printf '%s\n' '--exec requires a command' >&2; exit 2 ;;
+        --exec:*) mode='exec' ;;
+        *) printf 'Usage: build-linux.sh TARGET [--prepare | --exec COMMAND [ARG...]]\n' >&2; exit 2 ;;
+    esac
+fi
 case "$target" in
     x86_64-unknown-linux-gnu|aarch64-unknown-linux-gnu) ;;
     *) printf 'Unsupported Linux target: %s\n' "$target" >&2; exit 2 ;;
@@ -45,33 +57,49 @@ rustup_arch=x86_64
 
 repo=$(cd "$REPOSITORY" && pwd -P)
 cargo_home=${CARGO_HOME:-"$HOME/.cargo"}
-mkdir -p "$repo/target" "$repo/.cargo" "$cargo_home/registry" "$cargo_home/git"
+mkdir -p "$repo/target" "$cargo_home/registry" "$cargo_home/git"
+cargo_home=$(cd "$cargo_home" && pwd -P)
 image_tag="lazydb-linux-build:${host_arch}"
-docker build \
-    --platform "linux/$platform" \
-    --build-arg "BASE_IMAGE=$image" \
-    --build-arg "RUST_TARGET=$target" \
-    --build-arg "RUSTUP_ARCH=$rustup_arch" \
-    --file "$SCRIPT_DIR/Dockerfile.linux" \
-    --tag "$image_tag" \
-    "$SCRIPT_DIR"
+if [ "$mode" != exec ]; then
+    docker build \
+        --platform "linux/$platform" \
+        --build-arg "BASE_IMAGE=$image" \
+        --build-arg "RUST_TARGET=$target" \
+        --build-arg "RUSTUP_ARCH=$rustup_arch" \
+        --file "$SCRIPT_DIR/Dockerfile.linux" \
+        --tag "$image_tag" \
+        "$SCRIPT_DIR"
+fi
+[ "$mode" != prepare ] || exit 0
+
+if [ "$mode" = build ]; then
+    set -- python3 scripts/ci/run-with-timeout.py 3600 -- cargo +1.94.0 build --release --locked --target "$target" --timings
+elif [ "$mode" = exec ] && [ "${1:-}" = cargo ]; then
+    set -- python3 scripts/ci/run-with-timeout.py 3600 -- "$@"
+fi
+
+# Cache metadata and compilation must see the same absolute paths. Cargo also
+# needs a writable home for its cache locks; the image keeps Rust in /opt/rustup.
 set +e
 docker run --rm \
     --user "$(id -u):$(id -g)" \
-    --volume "$repo:/workspace" \
-    --volume "$cargo_home/registry:/opt/cargo/registry" \
-    --volume "$cargo_home/git:/opt/cargo/git" \
-    --workdir /workspace \
+    --volume "$repo:$repo" \
+    --volume "$cargo_home:$cargo_home" \
+    --workdir "$repo" \
     --platform "linux/$platform" \
+    --env "CARGO_HOME=$cargo_home" \
     --env CARGO_BUILD_JOBS="$jobs" \
     --env "CARGO_INCREMENTAL=$incremental" \
+    --env RUSTUP_TOOLCHAIN=1.94.0 \
     --env RUSTFLAGS= \
+    --entrypoint /bin/bash \
     "$image_tag" \
-    "rustc +1.94.0 --version && cargo +1.94.0 --version && readelf --version | head -n 1 && cargo +1.94.0 build --release --locked --target '$target'"
+    -euo pipefail -c 'exec "$@"' -- "$@"
 build_status=$?
 set -e
 
 [ "$build_status" -eq 0 ] || exit "$build_status"
+[ "$mode" != exec ] || exit 0
 
 binary="$repo/target/$target/release/lazydb"
 [ -f "$binary" ] || { printf 'build output not found: %s\n' "$binary" >&2; exit 1; }

@@ -13,18 +13,25 @@ use lazydb::{
     },
     identity::ConnectionIdentity,
     model::execution_target::ExecutionTarget,
-    profile::import_connection_url,
+    profile::{format_connection_url, import_connection_url},
 };
 use tempfile::TempDir;
+
+fn profile_for_duckdb_path(path: &std::path::Path) -> lazydb::profile::ConnectionProfile {
+    let profile = import_connection_url("duckdb::memory:", None)
+        .unwrap()
+        .profile;
+    let mut profile = profile;
+    profile.duckdb_path = Some(path.to_path_buf());
+    let url = format_connection_url(&profile, profile.url_format).unwrap();
+    import_connection_url(&url, Some("test")).unwrap().profile
+}
 
 #[tokio::test]
 async fn duckdb_executes_queries_and_reopens_a_file_database() {
     let directory = TempDir::new().unwrap();
     let path = directory.path().join("analytics.duckdb");
-    let url = format!("duckdb://{}", path.display());
-    let profile = import_connection_url(&url, Some("analytics"))
-        .unwrap()
-        .profile;
+    let profile = profile_for_duckdb_path(&path);
 
     let first = DatabaseConnection::connect(&profile, None).await.unwrap();
     let created = first
@@ -2176,9 +2183,7 @@ async fn duckdb_decodes_nested_values_with_stable_text() {
 async fn read_only_duckdb_reopens_existing_file_and_rejects_writes() {
     let directory = TempDir::new().unwrap();
     let path = directory.path().join("readonly.duckdb");
-    let profile = import_connection_url(&format!("duckdb://{}", path.display()), None)
-        .unwrap()
-        .profile;
+    let profile = profile_for_duckdb_path(&path);
     let writer = DatabaseConnection::connect(&profile, None).await.unwrap();
     writer.execute("CREATE TABLE t (id INTEGER)").await.unwrap();
     writer.close().await;
@@ -2211,9 +2216,7 @@ async fn read_only_duckdb_reopens_existing_file_and_rejects_writes() {
 async fn read_only_duckdb_does_not_create_a_missing_file() {
     let directory = TempDir::new().unwrap();
     let path = directory.path().join("missing.duckdb");
-    let mut profile = import_connection_url(&format!("duckdb://{}", path.display()), None)
-        .unwrap()
-        .profile;
+    let mut profile = profile_for_duckdb_path(&path);
     profile.read_only = true;
     assert!(DatabaseConnection::connect(&profile, None).await.is_err());
     assert!(!path.exists());
@@ -2225,13 +2228,8 @@ async fn duckdb_profiles_with_same_basename_remain_isolated() {
     let second_dir = TempDir::new().unwrap();
     let first_path = first_dir.path().join("same.duckdb");
     let second_path = second_dir.path().join("same.duckdb");
-    let first_profile = import_connection_url(&format!("duckdb://{}", first_path.display()), None)
-        .unwrap()
-        .profile;
-    let second_profile =
-        import_connection_url(&format!("duckdb://{}", second_path.display()), None)
-            .unwrap()
-            .profile;
+    let first_profile = profile_for_duckdb_path(&first_path);
+    let second_profile = profile_for_duckdb_path(&second_path);
     let first = DatabaseConnection::connect(&first_profile, None)
         .await
         .unwrap();
@@ -2251,9 +2249,7 @@ async fn duckdb_profiles_with_same_basename_remain_isolated() {
 async fn duckdb_catalog_lists_schema_relations_and_columns() {
     let directory = TempDir::new().unwrap();
     let path = directory.path().join("catalog.duckdb");
-    let profile = import_connection_url(&format!("duckdb://{}", path.display()), None)
-        .unwrap()
-        .profile;
+    let profile = profile_for_duckdb_path(&path);
     let database = DatabaseConnection::connect(&profile, None).await.unwrap();
     database
         .execute("CREATE TABLE events (id INTEGER PRIMARY KEY, payload VARCHAR); INSERT INTO events VALUES (1, 'one'), (2, 'two'), (3, 'three')")

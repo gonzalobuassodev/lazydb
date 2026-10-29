@@ -13,7 +13,11 @@ fn categories_partition_the_registry_without_changing_machine_names() {
         drivers_in(DatabaseCategory::NonRelational)
             .map(|d| d.kind)
             .collect::<Vec<_>>(),
-        vec![DatabaseKind::Redis, DatabaseKind::MongoDb]
+        vec![
+            DatabaseKind::Redis,
+            DatabaseKind::Valkey,
+            DatabaseKind::MongoDb
+        ]
     );
     assert_eq!(
         DRIVERS.iter().map(|d| d.name).collect::<Vec<_>>(),
@@ -26,6 +30,7 @@ fn categories_partition_the_registry_without_changing_machine_names() {
             "sqlite",
             "duckdb",
             "redis",
+            "valkey",
             "mongodb",
             "clickhouse"
         ]
@@ -49,6 +54,8 @@ fn category_round_trip_remembers_driver_and_automatic_ports_cross_sqlite() {
     manager.select_driver(DatabaseKind::Sqlite);
     manager.cycle(1);
     assert_eq!(manager.draft.as_ref().unwrap().port.value(), "6379");
+    manager.select_driver(DatabaseKind::Valkey);
+    assert_eq!(manager.draft.as_ref().unwrap().kind, DatabaseKind::Valkey);
 }
 
 #[test]
@@ -61,6 +68,8 @@ fn custom_port_survives_category_switch_and_single_driver_cycle_is_a_noop() {
     assert_eq!(manager.draft.as_ref().unwrap().port.value(), "6380");
     manager.select_driver(DatabaseKind::Redis);
     assert_eq!(manager.draft.as_ref().unwrap().kind, DatabaseKind::Redis);
+    manager.select_driver(DatabaseKind::Valkey);
+    assert_eq!(manager.draft.as_ref().unwrap().kind, DatabaseKind::Valkey);
     manager.select_driver(DatabaseKind::MongoDb);
     assert_eq!(manager.draft.as_ref().unwrap().kind, DatabaseKind::MongoDb);
     manager.select_driver(DatabaseKind::MongoDb);
@@ -77,5 +86,9 @@ fn category_action_updates_the_real_form_and_driver_list() {
     let manager = app.profile_manager.as_ref().unwrap();
     assert_eq!(manager.selected_field, ProfileField::DatabaseCategory);
     assert_eq!(manager.draft.as_ref().unwrap().kind, DatabaseKind::Redis);
+    assert!(!manager.visible_fields().contains(&ProfileField::Schema));
+    app.update(Action::ProfileSelectDriver(DatabaseKind::Valkey));
+    let manager = app.profile_manager.as_ref().unwrap();
+    assert_eq!(manager.draft.as_ref().unwrap().kind, DatabaseKind::Valkey);
     assert!(!manager.visible_fields().contains(&ProfileField::Schema));
 }

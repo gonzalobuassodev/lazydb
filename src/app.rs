@@ -334,6 +334,7 @@ enum CatalogRequestIntent {
     Continuation,
     Explicit,
     Refresh,
+    RefreshShallow,
     Completion,
 }
 
@@ -742,6 +743,7 @@ impl App {
             DatabaseKind::Sqlite
             | DatabaseKind::DuckDb
             | DatabaseKind::Redis
+            | DatabaseKind::Valkey
             | DatabaseKind::MongoDb => crate::db::principal::PrincipalCapability::Unsupported,
             DatabaseKind::ClickHouse => {
                 crate::db::clickhouse::ClickHouseAdapter::principal_capability()
@@ -1264,7 +1266,7 @@ impl App {
             } => self
                 .profiles
                 .iter()
-                .find(|profile| profile.id == *profile_id && profile.kind == DatabaseKind::Redis)
+                .find(|profile| profile.id == *profile_id && profile.kind.is_redis_compatible())
                 .map(|_| PendingDashboardTarget {
                     profile_id: *profile_id,
                     database: Some(*database),
@@ -2120,7 +2122,9 @@ impl App {
                 DatabaseKind::Sqlite => SqlDialect::Sqlite,
                 DatabaseKind::DuckDb => SqlDialect::DuckDb,
                 DatabaseKind::SqlServer => SqlDialect::SqlServer,
-                DatabaseKind::Redis | DatabaseKind::MongoDb => SqlDialect::Generic,
+                DatabaseKind::Redis | DatabaseKind::Valkey | DatabaseKind::MongoDb => {
+                    SqlDialect::Generic
+                }
                 DatabaseKind::ClickHouse => SqlDialect::ClickHouse,
             })
             .unwrap_or_else(|| self.sql_dialect());
@@ -2927,7 +2931,7 @@ impl App {
                     database,
                     pattern,
                 } if *profile_id == profile.profile_id
-                    && selected.is_some_and(|item| item.kind == DatabaseKind::Redis) =>
+                    && selected.is_some_and(|item| item.kind.is_redis_compatible()) =>
                 {
                     let mut tab = crate::model::redis_browser::RedisBrowserTab::new(
                         *tab_id,
@@ -10825,6 +10829,14 @@ impl App {
                     }
                 };
                 let removed_set = removed.into_iter().collect::<HashSet<_>>();
+                if let Some(state) = self
+                    .explorer
+                    .normalized
+                    .profiles
+                    .get_mut(&plan.request.connection.profile_id)
+                {
+                    state.remove_catalog_state_for(&removed_set);
+                }
                 for index in self.explorer.completion_indexes.values_mut() {
                     index.remove_ids(&removed_set);
                 }
@@ -10841,9 +10853,7 @@ impl App {
                     .rebuild_projection(plan.request.connection.profile_id);
                 self.explorer.refresh_frontend_search();
                 let mut refresh_commands = Vec::new();
-                if plan.kind == crate::db::catalog::CatalogKind::Schema
-                    && plan.behavior() == crate::db::catalog_drop::CatalogDropBehavior::Cascade
-                {
+                if plan.kind == crate::db::catalog::CatalogKind::Schema {
                     let database = plan
                         .request
                         .entry
@@ -10870,46 +10880,73 @@ impl App {
                             .and_then(|entry| entry.qualified_name.database.as_deref())
                             .unwrap_or_default()
                             .to_owned();
-                        let targets = self
-                            .explorer
-                            .normalized
-                            .profiles
-                            .get_mut(&plan.request.connection.profile_id)
-                            .map(|state| {
-                                let schemas = state.catalog.schemas_in_database(&database_name);
-                                let mut targets = Vec::new();
-                                for schema in &schemas {
-                                    if let Ok(groups) = CatalogTarget::groups(schema.clone()) {
-                                        targets.push(groups);
-                                    }
-                                    for group in state.catalog.groups(schema).to_vec() {
-                                        if let Ok(objects) =
+                        let mut targets = Vec::new();
+                        let cascade = plan.behavior()
+                            == crate::db::catalog_drop::CatalogDropBehavior::Cascade;
+                        if cascade
+                            && let Some(state) = self
+                                .explorer
+                                .normalized
+                                .profiles
+                                .get(&plan.request.connection.profile_id)
+                        {
+                            let schemas = state.catalog.schemas_in_database(&database_name);
+                            for schema in &schemas {
+                                let groups_owner = ExplorerOwnerId::Catalog(schema.clone());
+                                if state.has_catalog_snapshot(&groups_owner)
+                                    && let Ok(groups) = CatalogTarget::groups(schema.clone())
+                                {
+                                    targets.push(groups);
+                                }
+                                for group in state.catalog.groups(schema).to_vec() {
+                                    let objects_owner = ExplorerOwnerId::Group {
+                                        parent: schema.clone(),
+                                        group,
+                                    };
+                                    if state.has_catalog_snapshot(&objects_owner)
+                                        && let Ok(objects) =
                                             CatalogTarget::objects(schema.clone(), group)
+                                    {
+                                        targets.push(objects);
+                                    }
+                                    for relation in state
+                                        .catalog
+                                        .group_children(schema, group)
+                                        .iter()
+                                        .filter(|id| id.kind.is_relation())
+                                    {
+                                        let relation_owner =
+                                            ExplorerOwnerId::Catalog(relation.clone());
+                                        if state.has_catalog_snapshot(&relation_owner)
+                                            && let Ok(children) =
+                                                CatalogTarget::relation_children(relation.clone())
                                         {
-                                            targets.push(objects);
+                                            targets.push(children);
                                         }
                                     }
                                 }
-                                targets
-                            })
-                            .unwrap_or_default();
-                        refresh_commands = self.commands_for_catalog_targets(
+                            }
+                        }
+                        refresh_commands = self.commands_for_catalog_targets_with_intent(
                             plan.request.connection.profile_id,
                             &[target],
+                            CatalogRequestIntent::RefreshShallow,
                         );
                         refresh_commands.extend(self.commands_for_catalog_targets(
                             plan.request.connection.profile_id,
                             &targets,
                         ));
-                        for tab in &mut self.tabs {
-                            if let WorkspaceTab::Relation(tab) = tab
-                                && tab.descriptor.key.profile_id
-                                    == plan.request.connection.profile_id
-                                && tab.descriptor.qualified_name.database.as_deref()
-                                    == Some(database_name.as_str())
-                                && !removed_set.contains(&tab.descriptor.key.object_id)
-                            {
-                                tab.invalidate_catalog_mutation(true);
+                        if cascade {
+                            for tab in &mut self.tabs {
+                                if let WorkspaceTab::Relation(tab) = tab
+                                    && tab.descriptor.key.profile_id
+                                        == plan.request.connection.profile_id
+                                    && tab.descriptor.qualified_name.database.as_deref()
+                                        == Some(database_name.as_str())
+                                    && !removed_set.contains(&tab.descriptor.key.object_id)
+                                {
+                                    tab.invalidate_catalog_mutation(true);
+                                }
                             }
                         }
                     }
@@ -13782,7 +13819,7 @@ impl App {
                 if catalog_session.is_none() {
                     self.explorer.catalog_sessions.insert(profile_id, identity);
                 }
-                let commands_for_catalog = if profile_kind == DatabaseKind::Redis {
+                let commands_for_catalog = if profile_kind.is_redis_compatible() {
                     Vec::new()
                 } else if editor_target_switch.is_none() {
                     catalog_session
@@ -13812,7 +13849,7 @@ impl App {
                     commands
                 };
                 let mut commands_for_redis = Vec::new();
-                if profile_kind == DatabaseKind::Redis && editor_target_switch.is_none() {
+                if profile_kind.is_redis_compatible() && editor_target_switch.is_none() {
                     commands_for_redis.push(Command::DiscoverRedisDatabases {
                         profile_id,
                         generation,
@@ -13852,7 +13889,7 @@ impl App {
                 //  * if the `Users & Roles` group is expanded, reload its list
                 //  * rebind and reload any open principal DDL tab so late
                 //    responses from the previous connection cannot win
-                if profile_kind != DatabaseKind::Redis {
+                if !profile_kind.is_redis_compatible() {
                     let group =
                         crate::model::explorer::ExplorerNodeId::PrincipalGroup { profile_id };
                     if self.explorer.normalized.expanded.contains(&group) {
@@ -19019,7 +19056,7 @@ impl App {
                 DatabaseKind::SqlServer => {
                     crate::db::mssql::MsSqlAdapter::catalog_mutation_capabilities()
                 }
-                DatabaseKind::Redis => Default::default(),
+                DatabaseKind::Redis | DatabaseKind::Valkey => Default::default(),
                 DatabaseKind::MongoDb => Default::default(),
                 DatabaseKind::ClickHouse => {
                     crate::db::clickhouse::ClickHouseAdapter::catalog_mutation_capabilities()
@@ -20480,7 +20517,7 @@ impl App {
                 .profiles
                 .iter()
                 .find(|profile| profile.id == target.profile_id)
-                .is_some_and(|profile| profile.kind == DatabaseKind::Redis);
+                .is_some_and(|profile| profile.kind.is_redis_compatible());
             return if is_redis {
                 Vec::new()
             } else {
@@ -20873,6 +20910,10 @@ impl App {
             }
             state.load_states.clear();
             state.pending_requests.clear();
+            state.previous_load_states.clear();
+            state.refresh_staged_entries.clear();
+            state.refresh_staged_groups.clear();
+            state.refresh_shallow_owners.clear();
             state.load_errors.clear();
         }
         if let Some(existing) = self
@@ -21315,7 +21356,7 @@ impl App {
                     | DatabaseKind::SqlServer
                     | DatabaseKind::Sqlite
                     | DatabaseKind::DuckDb => entry.qualified_name.schema.clone(),
-                    DatabaseKind::Redis | DatabaseKind::MongoDb => None,
+                    DatabaseKind::Redis | DatabaseKind::Valkey | DatabaseKind::MongoDb => None,
                     DatabaseKind::ClickHouse => Some(database.clone()),
                 };
                 let candidate = ExecutionTarget {
@@ -21513,7 +21554,7 @@ impl App {
                     DatabaseKind::MySql | DatabaseKind::MariaDb => Some(database.clone()),
                     DatabaseKind::Sqlite | DatabaseKind::DuckDb => Some("main".to_owned()),
                     DatabaseKind::Postgres | DatabaseKind::SqlServer | DatabaseKind::Oracle => None,
-                    DatabaseKind::Redis | DatabaseKind::MongoDb => None,
+                    DatabaseKind::Redis | DatabaseKind::Valkey | DatabaseKind::MongoDb => None,
                     DatabaseKind::ClickHouse => Some(database.clone()),
                 },
                 database,
@@ -22469,7 +22510,9 @@ impl App {
             DatabaseKind::Sqlite => SqlDialect::Sqlite,
             DatabaseKind::DuckDb => SqlDialect::DuckDb,
             DatabaseKind::SqlServer => SqlDialect::SqlServer,
-            DatabaseKind::Redis | DatabaseKind::MongoDb => SqlDialect::Generic,
+            DatabaseKind::Redis | DatabaseKind::Valkey | DatabaseKind::MongoDb => {
+                SqlDialect::Generic
+            }
             DatabaseKind::ClickHouse => SqlDialect::ClickHouse,
         }
     }
@@ -22482,7 +22525,9 @@ impl App {
             Some(DatabaseKind::Sqlite) => SqlDialect::Sqlite,
             Some(DatabaseKind::DuckDb) => SqlDialect::DuckDb,
             Some(DatabaseKind::SqlServer) => SqlDialect::SqlServer,
-            Some(DatabaseKind::Redis | DatabaseKind::MongoDb) => SqlDialect::Generic,
+            Some(DatabaseKind::Redis | DatabaseKind::Valkey | DatabaseKind::MongoDb) => {
+                SqlDialect::Generic
+            }
             Some(DatabaseKind::ClickHouse) => SqlDialect::ClickHouse,
             None => SqlDialect::Generic,
         }
@@ -22504,7 +22549,9 @@ impl App {
             Some(DatabaseKind::Sqlite) => SqlDialect::Sqlite,
             Some(DatabaseKind::DuckDb) => SqlDialect::DuckDb,
             Some(DatabaseKind::SqlServer) => SqlDialect::SqlServer,
-            Some(DatabaseKind::Redis | DatabaseKind::MongoDb) | None => SqlDialect::Generic,
+            Some(DatabaseKind::Redis | DatabaseKind::Valkey | DatabaseKind::MongoDb) | None => {
+                SqlDialect::Generic
+            }
             Some(DatabaseKind::ClickHouse) => SqlDialect::ClickHouse,
         }
     }
@@ -23499,7 +23546,12 @@ impl App {
         else {
             return Vec::new();
         };
-        if state.pending_requests.contains_key(&owner) && intent != CatalogRequestIntent::Refresh {
+        if state.pending_requests.contains_key(&owner)
+            && !matches!(
+                intent,
+                CatalogRequestIntent::Refresh | CatalogRequestIntent::RefreshShallow
+            )
+        {
             return Vec::new();
         }
         let current = state
@@ -23507,6 +23559,11 @@ impl App {
             .get(&owner)
             .cloned()
             .unwrap_or(ExplorerLoadState::NotLoaded);
+        let current_snapshot = state
+            .previous_load_states
+            .get(&owner)
+            .cloned()
+            .unwrap_or_else(|| current.clone());
         if intent == CatalogRequestIntent::Automatic
             && !matches!(current, ExplorerLoadState::NotLoaded)
         {
@@ -23549,7 +23606,19 @@ impl App {
         state
             .previous_load_states
             .entry(owner.clone())
-            .or_insert(current);
+            .or_insert(current_snapshot);
+        let has_snapshot = state.has_catalog_snapshot(&owner);
+        if request.key.cursor.is_none() && has_snapshot {
+            state
+                .refresh_staged_entries
+                .insert(owner.clone(), Vec::new());
+            state
+                .refresh_staged_groups
+                .insert(owner.clone(), Vec::new());
+        }
+        if intent == CatalogRequestIntent::RefreshShallow {
+            state.refresh_shallow_owners.insert(owner.clone());
+        }
         state
             .load_states
             .insert(owner.clone(), ExplorerLoadState::Loading { request_id });
@@ -23562,7 +23631,7 @@ impl App {
         let Some(profile) = self.explorer.normalized.profiles.get(&profile_id) else {
             return Vec::new();
         };
-        if profile.kind == DatabaseKind::Redis {
+        if profile.kind.is_redis_compatible() {
             return Vec::new();
         }
         if profile.kind == DatabaseKind::Sqlite {
@@ -23912,17 +23981,34 @@ impl App {
         profile_id: Uuid,
         targets: &[CatalogTarget],
     ) -> Vec<Command> {
+        self.commands_for_catalog_targets_with_intent(
+            profile_id,
+            targets,
+            CatalogRequestIntent::Refresh,
+        )
+    }
+
+    fn commands_for_catalog_targets_with_intent(
+        &mut self,
+        profile_id: Uuid,
+        targets: &[CatalogTarget],
+        intent: CatalogRequestIntent,
+    ) -> Vec<Command> {
         let mut commands = Vec::new();
         let mut unique = HashSet::new();
         for target in targets {
             if unique.insert(target.clone()) {
+                let owner = owner_for_target(profile_id, target);
+                if let Some(state) = self.explorer.normalized.profiles.get_mut(&profile_id) {
+                    state.refresh_staged_entries.remove(&owner);
+                }
                 self.explorer.invalidate_catalog_target(profile_id, target);
                 if let Some(connection) = self.explorer.catalog_sessions.get(&profile_id).copied() {
                     commands.extend(self.start_catalog_request_for_connection(
                         connection,
                         target.clone(),
                         None,
-                        CatalogRequestIntent::Refresh,
+                        intent,
                     ));
                 }
             }
@@ -24093,7 +24179,23 @@ impl App {
         }
 
         let mut next_explorer = self.explorer.normalized.clone();
-        let apply_result: Result<Vec<crate::db::catalog::CatalogId>, String> =
+        let shallow_refresh = next_explorer
+            .profiles
+            .get(&profile_id)
+            .is_some_and(|state| state.refresh_shallow_owners.contains(&owner));
+        let preserve_snapshot = next_explorer
+            .profiles
+            .get(&profile_id)
+            .is_some_and(|state| state.refresh_staged_entries.contains_key(&owner));
+        let mut newly_discovered_namespaces = Vec::new();
+        let mut refreshed_databases = Vec::new();
+        let mut refreshed_schemas = Vec::new();
+        let mut refreshed_relations = Vec::new();
+        let mut newly_added_groups = HashSet::new();
+        let apply_result: Result<Vec<crate::db::catalog::CatalogId>, String> = if preserve_snapshot
+        {
+            Ok(Vec::new())
+        } else {
             match &request.key.target {
                 CatalogTarget::Groups { schema } => {
                     let states = page
@@ -24141,8 +24243,9 @@ impl App {
                 _ => next_explorer
                     .replace_page(owner.clone(), page.entries.clone())
                     .map_err(|error| error.to_string()),
-            };
-        let removed = match apply_result {
+            }
+        };
+        let mut removed = match apply_result {
             Ok(removed) => removed,
             Err(error) => {
                 self.fail_catalog_page(
@@ -24153,6 +24256,151 @@ impl App {
                 return Vec::new();
             }
         };
+
+        if preserve_snapshot {
+            let previous_groups = match &request.key.target {
+                CatalogTarget::Groups { schema } => next_explorer.profiles[&profile_id]
+                    .catalog
+                    .groups(schema)
+                    .iter()
+                    .copied()
+                    .collect::<HashSet<_>>(),
+                _ => HashSet::new(),
+            };
+            if matches!(request.key.target, CatalogTarget::Groups { .. }) {
+                next_explorer
+                    .profiles
+                    .get_mut(&profile_id)
+                    .unwrap()
+                    .refresh_staged_groups
+                    .entry(owner.clone())
+                    .or_default()
+                    .extend(page.group_summaries.iter().map(|summary| {
+                        (
+                            summary.group,
+                            CatalogGroupState {
+                                count: summary.object_count,
+                                completeness: page.completeness,
+                            },
+                        )
+                    }));
+            } else {
+                next_explorer
+                    .profiles
+                    .get_mut(&profile_id)
+                    .unwrap()
+                    .refresh_staged_entries
+                    .entry(owner.clone())
+                    .or_default()
+                    .extend(page.entries.iter().cloned());
+            }
+            if page.next_cursor.is_none() {
+                let state = next_explorer.profiles.get(&profile_id).unwrap();
+                let staged = state
+                    .refresh_staged_entries
+                    .get(&owner)
+                    .cloned()
+                    .unwrap_or_default();
+                let staged_groups = state
+                    .refresh_staged_groups
+                    .get(&owner)
+                    .cloned()
+                    .unwrap_or_default();
+                let mut seen_groups = HashSet::with_capacity(staged_groups.len());
+                if let Some((group, _)) = staged_groups
+                    .iter()
+                    .find(|(group, _)| !seen_groups.insert(*group))
+                {
+                    self.fail_catalog_page(
+                        &request.key,
+                        ErrorCategory::Internal,
+                        format!("duplicate catalog group across refresh pages: {group:?}"),
+                    );
+                    return Vec::new();
+                }
+                if matches!(
+                    request.key.target,
+                    CatalogTarget::Databases | CatalogTarget::Schemas { .. }
+                ) {
+                    if matches!(request.key.target, CatalogTarget::Databases) {
+                        refreshed_databases = staged
+                            .iter()
+                            .filter(|entry| entry.kind == crate::db::catalog::CatalogKind::Database)
+                            .map(|entry| entry.id.clone())
+                            .collect();
+                    } else if matches!(request.key.target, CatalogTarget::Schemas { .. }) {
+                        refreshed_schemas = staged
+                            .iter()
+                            .filter(|entry| entry.kind == crate::db::catalog::CatalogKind::Schema)
+                            .map(|entry| entry.id.clone())
+                            .collect();
+                    } else if matches!(request.key.target, CatalogTarget::Objects { .. }) {
+                        refreshed_relations = staged
+                            .iter()
+                            .filter(|entry| entry.kind.is_relation())
+                            .map(|entry| entry.id.clone())
+                            .collect();
+                    }
+                    newly_discovered_namespaces = staged
+                        .iter()
+                        .filter(|entry| {
+                            let kind = match &request.key.target {
+                                CatalogTarget::Databases => {
+                                    crate::db::catalog::CatalogKind::Database
+                                }
+                                CatalogTarget::Schemas { .. } => {
+                                    crate::db::catalog::CatalogKind::Schema
+                                }
+                                _ => unreachable!(),
+                            };
+                            entry.kind == kind && !state.catalog.entries().contains_key(&entry.id)
+                        })
+                        .map(|entry| entry.id.clone())
+                        .collect();
+                }
+                let reconcile_result = match &request.key.target {
+                    CatalogTarget::Groups { schema } => {
+                        next_explorer.reconcile_catalog_groups(schema, staged_groups.clone())
+                    }
+                    _ => next_explorer.reconcile_catalog_page(owner.clone(), staged),
+                };
+                removed = match reconcile_result {
+                    Ok(removed) => removed,
+                    Err(error) => {
+                        self.fail_catalog_page(
+                            &request.key,
+                            ErrorCategory::Internal,
+                            format!("invalid refreshed catalog tree mutation: {error}"),
+                        );
+                        return Vec::new();
+                    }
+                };
+                if let CatalogTarget::Groups { schema } = &request.key.target {
+                    let refreshed_groups = staged_groups
+                        .iter()
+                        .map(|(group, _)| *group)
+                        .collect::<HashSet<_>>();
+                    newly_added_groups = refreshed_groups
+                        .difference(&previous_groups)
+                        .copied()
+                        .collect();
+                    let removed_groups = previous_groups
+                        .difference(&refreshed_groups)
+                        .copied()
+                        .collect::<HashSet<_>>();
+                    if !removed_groups.is_empty() {
+                        next_explorer
+                            .profiles
+                            .get_mut(&profile_id)
+                            .unwrap()
+                            .remove_catalog_group_state_for(schema, &removed_groups);
+                    }
+                }
+                let state = next_explorer.profiles.get_mut(&profile_id).unwrap();
+                state.refresh_staged_entries.remove(&owner);
+                state.refresh_staged_groups.remove(&owner);
+            }
+        }
 
         let state = next_explorer.profiles.get_mut(&profile_id).unwrap();
         if let CatalogTarget::Objects { schema, group } = &request.key.target {
@@ -24185,6 +24433,9 @@ impl App {
                     state.load_states.remove(&projection_owner);
                     state.pending_requests.remove(&projection_owner);
                     state.previous_load_states.remove(&projection_owner);
+                    state.refresh_staged_entries.remove(&projection_owner);
+                    state.refresh_staged_groups.remove(&projection_owner);
+                    state.refresh_shallow_owners.remove(&projection_owner);
                     state.load_errors.remove(&projection_owner);
                 }
             }
@@ -24207,6 +24458,15 @@ impl App {
                 .previous_load_states
                 .retain(|candidate, _| !references_removed(candidate));
             state
+                .refresh_staged_entries
+                .retain(|candidate, _| !references_removed(candidate));
+            state
+                .refresh_staged_groups
+                .retain(|candidate, _| !references_removed(candidate));
+            state
+                .refresh_shallow_owners
+                .retain(|candidate| !references_removed(candidate));
+            state
                 .load_errors
                 .retain(|candidate, _| !references_removed(candidate));
             for removed_id in removed_tables {
@@ -24215,9 +24475,12 @@ impl App {
                     .expanded
                     .remove(&ExplorerNodeId::ProjectionGroup(removed_id));
             }
+            let removed_ids = removed.iter().cloned().collect::<HashSet<_>>();
+            state.remove_catalog_state_for(&removed_ids);
         }
         state.pending_requests.remove(&owner);
         state.previous_load_states.remove(&owner);
+        state.refresh_shallow_owners.remove(&owner);
         state.load_errors.remove(&owner);
         state.load_states.insert(
             owner,
@@ -24312,43 +24575,143 @@ impl App {
         match &request.key.target {
             CatalogTarget::Databases => {
                 if !database_selector_open {
-                    for entry in page.entries {
+                    let database_ids = if preserve_snapshot {
+                        refreshed_databases
+                    } else {
+                        page.entries.into_iter().map(|entry| entry.id).collect()
+                    };
+                    for id in database_ids {
+                        let schema_owner = ExplorerOwnerId::Catalog(id.clone());
+                        let intent = if self.explorer.normalized.profiles[&profile_id]
+                            .has_catalog_snapshot(&schema_owner)
+                        {
+                            CatalogRequestIntent::Refresh
+                        } else {
+                            CatalogRequestIntent::Automatic
+                        };
                         commands.extend(self.start_catalog_request_for_connection(
                             request.key.connection,
-                            CatalogTarget::schemas(entry.id).unwrap(),
+                            CatalogTarget::schemas(id).unwrap(),
                             None,
-                            CatalogRequestIntent::Automatic,
+                            intent,
                         ));
                     }
                 }
             }
             CatalogTarget::Schemas { .. } => {
-                for entry in page.entries {
+                let namespaces: Vec<(crate::db::catalog::CatalogId, bool)> = if preserve_snapshot {
+                    refreshed_schemas
+                        .into_iter()
+                        .map(|id| {
+                            let is_new = newly_discovered_namespaces.contains(&id);
+                            (id, is_new)
+                        })
+                        .collect()
+                } else {
+                    page.entries
+                        .into_iter()
+                        .map(|entry| (entry.id, true))
+                        .collect()
+                };
+                for (id, is_new) in namespaces {
+                    if shallow_refresh && !is_new {
+                        continue;
+                    }
+                    let owner = ExplorerOwnerId::Catalog(id.clone());
+                    let state = &self.explorer.normalized.profiles[&profile_id];
+                    let intent =
+                        if !is_new && !shallow_refresh && state.has_catalog_snapshot(&owner) {
+                            CatalogRequestIntent::Refresh
+                        } else if is_new {
+                            CatalogRequestIntent::Automatic
+                        } else {
+                            continue;
+                        };
                     commands.extend(self.start_catalog_request_for_connection(
                         request.key.connection,
-                        CatalogTarget::groups(entry.id).unwrap(),
+                        CatalogTarget::groups(id).unwrap(),
                         None,
-                        CatalogRequestIntent::Automatic,
+                        intent,
                     ));
                 }
             }
             CatalogTarget::Groups { schema } => {
-                for summary in page
-                    .group_summaries
-                    .into_iter()
-                    .filter(|summary| search_preload_group(summary.group))
-                {
+                let groups = if preserve_snapshot {
+                    self.explorer.normalized.profiles[&profile_id]
+                        .catalog
+                        .groups(schema)
+                        .iter()
+                        .copied()
+                        .filter(|group| search_preload_group(*group))
+                        .filter(|group| {
+                            newly_added_groups.contains(group)
+                                || (!shallow_refresh
+                                    && self.explorer.normalized.profiles[&profile_id]
+                                        .has_catalog_snapshot(&ExplorerOwnerId::Group {
+                                            parent: schema.clone(),
+                                            group: *group,
+                                        }))
+                                || self.explorer.normalized.profiles[&profile_id]
+                                    .catalog
+                                    .group_children(schema, *group)
+                                    .iter()
+                                    .any(|relation| refreshed_relations.contains(relation))
+                        })
+                        .collect::<Vec<_>>()
+                } else {
+                    page.group_summaries
+                        .into_iter()
+                        .filter(|summary| search_preload_group(summary.group))
+                        .map(|summary| summary.group)
+                        .collect()
+                };
+                for group in groups {
+                    let owner = ExplorerOwnerId::Group {
+                        parent: schema.clone(),
+                        group,
+                    };
+                    if self.explorer.normalized.profiles[&profile_id]
+                        .pending_requests
+                        .contains_key(&owner)
+                    {
+                        continue;
+                    }
+                    let state = &self.explorer.normalized.profiles[&profile_id];
+                    let intent = if newly_added_groups.contains(&group) {
+                        CatalogRequestIntent::Automatic
+                    } else if state.has_catalog_snapshot(&owner) {
+                        CatalogRequestIntent::Refresh
+                    } else {
+                        CatalogRequestIntent::Automatic
+                    };
                     commands.extend(self.start_catalog_request_for_connection(
                         request.key.connection,
-                        CatalogTarget::objects(schema.clone(), summary.group).unwrap(),
+                        CatalogTarget::objects(schema.clone(), group).unwrap(),
                         None,
-                        CatalogRequestIntent::Automatic,
+                        intent,
                     ));
                 }
             }
-            CatalogTarget::Objects { .. }
-            | CatalogTarget::ProjectionChildren { .. }
-            | CatalogTarget::RelationChildren { .. } => {}
+            CatalogTarget::Objects { .. } => {
+                if !shallow_refresh {
+                    for relation in refreshed_relations {
+                        let owner = ExplorerOwnerId::Catalog(relation.clone());
+                        let state = &self.explorer.normalized.profiles[&profile_id];
+                        if state.has_catalog_snapshot(&owner)
+                            && !state.pending_requests.contains_key(&owner)
+                            && let Ok(target) = CatalogTarget::relation_children(relation)
+                        {
+                            commands.extend(self.start_catalog_request_for_connection(
+                                request.key.connection,
+                                target,
+                                None,
+                                CatalogRequestIntent::Refresh,
+                            ));
+                        }
+                    }
+                }
+            }
+            CatalogTarget::ProjectionChildren { .. } | CatalogTarget::RelationChildren { .. } => {}
         }
         if self.active_console_opt().is_some()
             && self.completion_request_is_current()
@@ -24404,6 +24767,9 @@ impl App {
             .previous_load_states
             .remove(&owner)
             .unwrap_or(ExplorerLoadState::NotLoaded);
+        state.refresh_staged_entries.remove(&owner);
+        state.refresh_staged_groups.remove(&owner);
+        state.refresh_shallow_owners.remove(&owner);
         let has_snapshot = !matches!(
             previous,
             ExplorerLoadState::NotLoaded
@@ -26586,7 +26952,7 @@ impl App {
                 .profiles
                 .iter()
                 .find(|profile| profile.id == profile_id)
-                .is_some_and(|profile| profile.kind == DatabaseKind::Redis)
+                .is_some_and(|profile| profile.kind.is_redis_compatible())
         {
             let generation = self
                 .explorer
@@ -26843,6 +27209,9 @@ impl App {
             state.load_states.clear();
             state.pending_requests.clear();
             state.previous_load_states.clear();
+            state.refresh_staged_entries.clear();
+            state.refresh_staged_groups.clear();
+            state.refresh_shallow_owners.clear();
             state.load_errors.clear();
         }
     }
@@ -29742,7 +30111,7 @@ fn add_explorer_profile(
                 .port
                 .map_or_else(|| host.to_owned(), |port| format!("{host}:{port}"))
         }
-        DatabaseKind::Redis => {
+        DatabaseKind::Redis | DatabaseKind::Valkey => {
             let host = profile.host.as_deref().unwrap_or_default();
             profile
                 .port

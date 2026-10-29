@@ -520,6 +520,142 @@ fn targeted_refresh_invalidates_one_owner_and_preserves_stale_rows() {
 }
 
 #[test]
+fn refreshing_schema_list_preserves_loaded_sibling_subtrees() {
+    let (mut app, profile) = connected_app();
+    let database = install_database(&mut app, &profile);
+    let public = install_schema(&mut app, &profile, &database);
+    let users = install_table(&mut app, &profile, &public, "users");
+    let reporting = schema(profile.id, &database.id, "reporting");
+    let schemas_target = CatalogTarget::schemas(database.id.clone()).unwrap();
+    let schemas_request = refresh(&mut app, ExplorerNodeId::Catalog(database.id.clone()));
+    assert_eq!(schemas_request.key.target, schemas_target);
+
+    let commands = app.update(Action::CatalogPageLoaded(page(
+        &schemas_request,
+        vec![public.clone(), reporting.clone()],
+        None,
+    )));
+
+    assert_eq!(catalog(&app, profile.id).get(&users.id), Some(&users));
+    assert!(matches!(
+        load_state(
+            &app,
+            ExplorerOwnerId::Group {
+                parent: public.id.clone(),
+                group: ObjectGroup::Tables,
+            }
+        ),
+        ExplorerLoadState::Loaded { .. }
+    ));
+    assert!(commands.iter().any(|command| matches!(
+        command,
+        Command::LoadCatalogPage(request)
+            if request.key.target == CatalogTarget::groups(reporting.id.clone()).unwrap()
+    )));
+    assert!(commands.iter().any(|command| matches!(
+        command,
+        Command::LoadCatalogPage(request)
+            if request.key.target == CatalogTarget::groups(public.id.clone()).unwrap()
+    )));
+}
+
+#[test]
+fn schema_drop_refreshes_parent_without_reloading_sibling_schemas() {
+    let (mut app, profile) = connected_app();
+    let database = install_database(&mut app, &profile);
+    let dropped = install_schema(&mut app, &profile, &database);
+    let sibling = schema(profile.id, &database.id, "reporting");
+    app.explorer
+        .normalized
+        .profiles
+        .get_mut(&profile.id)
+        .unwrap()
+        .catalog
+        .insert(sibling.clone())
+        .unwrap();
+    let sibling_table = CatalogEntry::relation(
+        id(
+            profile.id,
+            CatalogKind::Table,
+            &["app", "reporting", "events"],
+        ),
+        sibling.id.clone(),
+        QualifiedName {
+            database: Some("app".into()),
+            schema: Some("reporting".into()),
+            object: "events".into(),
+        },
+        "table",
+        OptionalMetadata::Supported(None),
+        true,
+    )
+    .unwrap();
+    let sibling_group = CatalogTarget::groups(sibling.id.clone()).unwrap();
+    let sibling_groups_request = load(&mut app, sibling_group.clone());
+    app.update(Action::CatalogPageLoaded(
+        CatalogPage::groups(
+            &sibling_groups_request,
+            vec![CatalogGroupSummary {
+                group: ObjectGroup::Tables,
+                object_count: CatalogCount::Exact(1),
+            }],
+            CatalogCount::Exact(1),
+            None,
+        )
+        .unwrap(),
+    ));
+    let sibling_objects = CatalogTarget::objects(sibling.id.clone(), ObjectGroup::Tables).unwrap();
+    let sibling_objects_request = pending_request(&app, profile.id, &sibling_objects);
+    app.update(Action::CatalogPageLoaded(page(
+        &sibling_objects_request,
+        vec![sibling_table.clone()],
+        None,
+    )));
+
+    let connection = app.connection.active_identity().unwrap();
+    let mut request =
+        CatalogDropRequest::new(connection, dropped.id.clone(), 211).with_entry(dropped.clone());
+    request.catalog_epoch = app.explorer.normalized.profiles[&profile.id].catalog_epoch;
+    let plan = CatalogDropPlan::new(request, &dropped, "DROP SCHEMA public RESTRICT").unwrap();
+    app.overlay = Some(Overlay::CatalogDropConfirm {
+        plan: Box::new(plan.clone()),
+        maintenance_database: None,
+        delete_selected: true,
+        busy: true,
+        error: None,
+    });
+
+    let commands = app.update(Action::CatalogDropSucceeded {
+        plan,
+        outcome: QueryOutcome {
+            result_sets: Vec::new(),
+            stats: QueryStats::new(std::time::Duration::ZERO, std::time::Duration::ZERO, 0),
+        },
+    });
+
+    assert!(catalog(&app, profile.id).get(&dropped.id).is_none());
+    assert_eq!(
+        catalog(&app, profile.id).get(&sibling_table.id),
+        Some(&sibling_table)
+    );
+    assert!(commands.iter().any(|command| matches!(
+        command,
+        Command::LoadCatalogPage(request)
+            if request.key.target == CatalogTarget::schemas(database.id.clone()).unwrap()
+    )));
+    assert!(!commands.iter().any(|command| matches!(
+        command,
+        Command::LoadCatalogPage(request)
+            if request.key.target == sibling_group
+    )));
+    assert!(
+        app.explorer.normalized.profiles[&profile.id]
+            .refresh_shallow_owners
+            .contains(&ExplorerOwnerId::Catalog(database.id))
+    );
+}
+
+#[test]
 fn stale_relation_resolution_is_ignored_after_catalog_epoch_changes() {
     let (mut app, profile) = connected_app();
     let database = install_database(&mut app, &profile);
@@ -1667,7 +1803,17 @@ fn group_continuations_append_in_order_and_reject_cross_page_duplicates_atomical
         &[ObjectGroup::Tables, ObjectGroup::Views]
     );
 
-    let refresh_request = refresh(&mut app, ExplorerNodeId::Catalog(schema.id.clone()));
+    let refresh_commands =
+        app.commands_for_catalog_targets(profile.id, std::slice::from_ref(&target));
+    let refresh_request = refresh_commands
+        .iter()
+        .find_map(|command| match command {
+            Command::LoadCatalogPage(request) if request.key.target == target => {
+                Some(request.clone())
+            }
+            _ => None,
+        })
+        .unwrap();
     let duplicate_cursor = CatalogCursor::from_keyset("tables", "tables-2").unwrap();
     let mut refresh_request = refresh_request;
     set_pending_page_size(&mut app, &mut refresh_request, 1);
@@ -1698,7 +1844,7 @@ fn group_continuations_append_in_order_and_reject_cross_page_duplicates_atomical
     app.update(Action::CatalogPageLoaded(duplicate));
     assert_eq!(
         catalog(&app, profile.id).groups(&schema.id),
-        &[ObjectGroup::Tables]
+        &[ObjectGroup::Tables, ObjectGroup::Views]
     );
     assert!(matches!(
         load_state(&app, ExplorerOwnerId::Catalog(schema.id.clone())),
@@ -1724,7 +1870,7 @@ fn group_continuations_append_in_order_and_reject_cross_page_duplicates_atomical
     assert!(duplicate_same_page.is_err());
     assert_eq!(
         catalog(&app, profile.id).groups(&schema.id),
-        &[ObjectGroup::Tables]
+        &[ObjectGroup::Tables, ObjectGroup::Views]
     );
 }
 

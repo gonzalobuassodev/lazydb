@@ -1508,6 +1508,7 @@ impl DuckDbAdapter {
         if profile.kind != DatabaseKind::DuckDb {
             return Err(DatabaseError::configuration("profile is not DuckDB"));
         }
+        crate::db::duckdb_runtime::ensure_loaded()?;
         let path = profile.duckdb_path.clone();
         let read_only = profile.read_only;
         let connection = task::spawn_blocking(move || {

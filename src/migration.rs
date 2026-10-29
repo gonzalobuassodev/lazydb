@@ -1,7 +1,7 @@
-use std::{
-    fs,
-    path::{Path, PathBuf},
-};
+use std::path::{Path, PathBuf};
+
+#[cfg(unix)]
+use std::fs;
 
 use serde::Serialize;
 

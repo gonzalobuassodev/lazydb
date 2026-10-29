@@ -46,3 +46,11 @@ fn clickhouse_catalog_capability_is_enabled_with_the_native_adapter() {
         }
     );
 }
+
+#[test]
+fn valkey_has_the_same_non_relational_static_capabilities_as_redis() {
+    assert_eq!(
+        DatabaseCapabilities::for_kind(DatabaseKind::Valkey),
+        DatabaseCapabilities::for_kind(DatabaseKind::Redis)
+    );
+}

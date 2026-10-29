@@ -91,8 +91,7 @@ fn keyboard_reference_is_dedicated_and_complete() {
         );
     }
 
-    assert!(readme.contains("Ctrl-Shift-s"));
-    assert!(readme.contains("drag alone\n  never writes to the clipboard"));
+    assert!(readme.contains("docs/configuration.md"));
 
     let architecture = include_str!("../docs/architecture.md");
     for term in [
@@ -122,10 +121,23 @@ fn keyboard_reference_is_dedicated_and_complete() {
         "temporary objects",
         "MANUAL",
         "TIME_NS",
+        "DuckDB 1.5.6",
+        "LAZYDB_DUCKDB_LIB_DIR",
+        "does not download or install the engine automatically",
+        "only attempts to open a DuckDB connection fail",
     ] {
         assert!(
             duckdb.contains(term),
             "missing DuckDB documentation term {term}"
         );
     }
+}
+
+#[test]
+fn prune_preview_cli_contract_is_documented() {
+    let update = include_str!("../docs/configuration.md");
+    assert!(update.contains("lazydb update --prune"));
+    assert!(update.contains("--yes"));
+    assert!(update.contains("ownership marker and file hashes"));
+    assert!(update.contains("It is not run automatically after an update"));
 }

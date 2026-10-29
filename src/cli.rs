@@ -235,17 +235,26 @@ impl From<crate::profile::DatabaseKind> for LspDialect {
 #[derive(Debug, Args)]
 pub struct UpdateArgs {
     /// Check for an update without applying one.
-    #[arg(long)]
+    #[arg(long, conflicts_with_all = ["prune", "dry_run", "yes"])]
     pub check: bool,
     /// Select the release channel.
-    #[arg(long, value_enum)]
+    #[arg(long, value_enum, conflicts_with = "prune")]
     pub channel: Option<crate::update::UpdateChannel>,
     /// Permit a future updater to select an older version.
-    #[arg(long, conflicts_with = "check")]
+    #[arg(long, conflicts_with_all = ["check", "prune", "dry_run", "yes"])]
     pub allow_downgrade: bool,
     /// Emit the stable machine-readable report contract.
     #[arg(long)]
     pub json: bool,
+    /// Preview or explicitly prune old native LazyDB releases.
+    #[arg(long, conflicts_with_all = ["check", "channel", "allow_downgrade"])]
+    pub prune: bool,
+    /// Preview prune actions without modifying releases (the default for --prune).
+    #[arg(long, requires = "prune", conflicts_with = "yes")]
+    pub dry_run: bool,
+    /// Confirm deletion of eligible old releases when used with --prune.
+    #[arg(long, requires = "prune")]
+    pub yes: bool,
 }
 
 #[derive(Debug, Args)]
@@ -460,7 +469,7 @@ pub struct DoctorReport<'a> {
     pub version: &'a str,
     pub cli_api: u16,
     pub profile: Option<&'a str>,
-    pub checks: [DoctorCheck<'a>; 3],
+    pub checks: [DoctorCheck<'a>; 4],
     pub credential_store: CredentialStoreReport,
 }
 
@@ -546,6 +555,19 @@ pub fn doctor_report(profile: Option<&str>) -> DoctorReport<'_> {
                 status: secret_store.status,
                 detail: secret_store.detail,
             },
+            DoctorCheck {
+                name: "duckdb_runtime",
+                status: if crate::db::duckdb_runtime::loaded_path().is_some() {
+                    "loaded"
+                } else {
+                    "optional"
+                },
+                detail: if crate::db::duckdb_runtime::loaded_path().is_some() {
+                    "DuckDB C API runtime has been loaded for this process"
+                } else {
+                    "DuckDB 1.5.6 C API is loaded on demand when a DuckDB connection is opened"
+                },
+            },
         ],
     }
 }
@@ -572,12 +594,14 @@ pub fn render_command(command: &Command) -> Result<String, serde_json::Error> {
             let report = doctor_report(profile.as_deref());
             let status = if report.ok { "ok" } else { "warning" };
             Ok(format!(
-                "LazyDB doctor: {status}\nlocale: {}\ndrivers: {}\ncredential_store: {} {} ({})",
+                "LazyDB doctor: {status}\nlocale: {}\ndrivers: {}\ncredential_store: {} {} ({})\nduckdb_runtime: {} ({})",
                 report.checks[0].status,
                 crate::db::descriptor::DRIVER_LIST,
                 report.credential_store.provider,
                 report.credential_store.status,
                 report.credential_store.detail,
+                report.checks[3].status,
+                report.checks[3].detail,
             ))
         }
         Command::Agent { .. } | Command::Connections { .. } | Command::Mcp { .. } => {
@@ -736,6 +760,7 @@ mod tests {
                 "sqlite",
                 "duckdb",
                 "redis",
+                "valkey",
                 "mongodb",
                 "clickhouse"
             ])
@@ -778,6 +803,9 @@ mod tests {
                 channel: None,
                 allow_downgrade: false,
                 json: false,
+                prune: false,
+                dry_run: false,
+                yes: false,
             }))
         ));
         assert!(matches!(
@@ -818,5 +846,36 @@ mod tests {
         ));
         assert!(Cli::try_parse_from(["lazydb", "update", "--check", "--allow-downgrade"]).is_err());
         assert!(Cli::try_parse_from(["lazydb", "update", "--channel", "nightly"]).is_err());
+        assert!(matches!(
+            Cli::try_parse_from(["lazydb", "update", "--prune", "--json"])
+                .unwrap()
+                .command,
+            Some(Command::Update(UpdateArgs { prune: true, .. }))
+        ));
+        assert!(matches!(
+            Cli::try_parse_from(["lazydb", "update", "--prune", "--dry-run"])
+                .unwrap()
+                .command,
+            Some(Command::Update(UpdateArgs {
+                prune: true,
+                dry_run: true,
+                yes: false,
+                ..
+            }))
+        ));
+        assert!(matches!(
+            Cli::try_parse_from(["lazydb", "update", "--prune", "--yes"])
+                .unwrap()
+                .command,
+            Some(Command::Update(UpdateArgs {
+                prune: true,
+                yes: true,
+                ..
+            }))
+        ));
+        assert!(
+            Cli::try_parse_from(["lazydb", "update", "--prune", "--yes", "--dry-run"]).is_err()
+        );
+        assert!(Cli::try_parse_from(["lazydb", "update", "--prune", "--check"]).is_err());
     }
 }

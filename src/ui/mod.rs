@@ -1258,12 +1258,15 @@ fn render_with_state_at(
                 .tabs
                 .get(app.active_tab)
                 .and_then(|tab| match tab {
-                    WorkspaceTab::Dashboard(tab) => tab.profile_id,
+                    WorkspaceTab::Dashboard(tab) => tab
+                        .connection
+                        .map(|connection| connection.profile_id)
+                        .or(tab.profile_id),
                     WorkspaceTab::MongoDashboard(tab) => Some(tab.profile_id),
                     _ => None,
                 })
                 .and_then(|profile_id| app.profiles.iter().find(|profile| profile.id == profile_id))
-                .is_some_and(|profile| profile.kind == DatabaseKind::Redis);
+                .is_some_and(|profile| profile.kind.is_redis_compatible());
             if redis_dashboard {
                 redis_dashboard::render(frame, area, app, theme, state);
             } else {
@@ -2368,7 +2371,13 @@ fn tab_database_kind(app: &App, tab: &WorkspaceTab) -> Option<DatabaseKind> {
             .connection
             .map(|connection| connection.profile_id)
             .or(tab.profile_id)?,
-        WorkspaceTab::RedisBrowser(_) => return Some(DatabaseKind::Redis),
+        WorkspaceTab::RedisBrowser(tab) => {
+            return app
+                .profiles
+                .iter()
+                .find(|profile| profile.id == tab.target.profile_id)
+                .map(|profile| profile.kind);
+        }
         WorkspaceTab::MongoBrowser(_) => return Some(DatabaseKind::MongoDb),
         WorkspaceTab::MongoConsole(_) => return Some(DatabaseKind::MongoDb),
         WorkspaceTab::MongoDashboard(_) => return Some(DatabaseKind::MongoDb),
@@ -3011,11 +3020,13 @@ fn explorer_list_item(
     } else if !is_others {
         let icon_color = if let Some(principal) = visible.principal {
             principal_node_color(principal, theme)
-        } else if matches!(
-            &visible.id,
-            crate::model::explorer::ExplorerNodeId::RedisDatabase { .. }
-        ) {
-            icons.database_color(DatabaseKind::Redis)
+        } else if let crate::model::explorer::ExplorerNodeId::RedisDatabase { profile_id, .. } =
+            &visible.id
+        {
+            app.profiles
+                .iter()
+                .find(|profile| profile.id == *profile_id)
+                .map_or(theme.muted, |profile| icons.database_color(profile.kind))
         } else {
             visible
                 .kind

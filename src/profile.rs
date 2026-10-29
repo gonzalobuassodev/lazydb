@@ -20,11 +20,16 @@ pub enum DatabaseKind {
     Sqlite,
     DuckDb,
     Redis,
+    Valkey,
     MongoDb,
     ClickHouse,
 }
 
 impl DatabaseKind {
+    pub const fn is_redis_compatible(self) -> bool {
+        matches!(self, Self::Redis | Self::Valkey)
+    }
+
     pub fn is_relational(self) -> bool {
         matches!(
             self,
@@ -60,6 +65,8 @@ pub enum ConnectionUrlFormat {
     DuckDb,
     Redis,
     RedisTls,
+    Valkey,
+    ValkeyTls,
     MongoDb,
     MongoDbSrv,
     ClickHouse,
@@ -77,6 +84,7 @@ impl ConnectionUrlFormat {
             DatabaseKind::Sqlite => Self::Sqlite,
             DatabaseKind::DuckDb => Self::DuckDb,
             DatabaseKind::Redis => Self::Redis,
+            DatabaseKind::Valkey => Self::Valkey,
             DatabaseKind::MongoDb => Self::MongoDb,
             DatabaseKind::ClickHouse => Self::ClickHouse,
         }
@@ -100,6 +108,7 @@ impl ConnectionUrlFormat {
                     DatabaseKind::Sqlite
                 )
                 | (Self::Redis | Self::RedisTls, DatabaseKind::Redis)
+                | (Self::Valkey | Self::ValkeyTls, DatabaseKind::Valkey)
                 | (Self::MongoDb | Self::MongoDbSrv, DatabaseKind::MongoDb)
                 | (
                     Self::ClickHouse | Self::ClickHouseTls,
@@ -119,6 +128,7 @@ impl ConnectionUrlFormat {
             DatabaseKind::Sqlite => &[Self::Sqlite, Self::FileUri, Self::JdbcSqlite],
             DatabaseKind::DuckDb => &[Self::DuckDb],
             DatabaseKind::Redis => &[Self::Redis, Self::RedisTls],
+            DatabaseKind::Valkey => &[Self::Valkey, Self::ValkeyTls],
             DatabaseKind::MongoDb => &[Self::MongoDb, Self::MongoDbSrv],
             DatabaseKind::ClickHouse => &[Self::ClickHouse, Self::ClickHouseTls],
         }
@@ -163,7 +173,7 @@ pub enum CatalogScopeValidationError {
 
 impl CatalogScope {
     pub fn for_profile(kind: DatabaseKind, database: &str, default_schema: Option<&str>) -> Self {
-        if kind == DatabaseKind::Redis {
+        if kind.is_redis_compatible() {
             return Self {
                 databases: CatalogSelection::All,
             };
@@ -576,14 +586,20 @@ fn parse_duckdb_url(input: &str) -> Result<Option<ParsedConnectionUrl>, ProfileE
         path_and_authority
             .strip_prefix("//")
             .map_or(path_and_authority, |value| {
-                if value.starts_with('/') {
+                if value.starts_with('/') || is_windows_filesystem_path(value) {
                     value
                 } else {
                     path_and_authority
                 }
             });
+    let decoded_windows_path = percent_decode_str(path_and_authority).decode_utf8().ok();
+    let windows_path = decoded_windows_path
+        .as_deref()
+        .is_some_and(is_windows_filesystem_path);
     let path = if path_and_authority == ":memory:" {
         path_and_authority
+    } else if windows_path {
+        decoded_windows_path.as_deref().unwrap()
     } else if let Some(path) = path_and_authority.strip_prefix("//") {
         if path.starts_with('/') {
             path
@@ -640,9 +656,13 @@ fn parse_duckdb_url(input: &str) -> Result<Option<ParsedConnectionUrl>, ProfileE
         return Err(ProfileError::InvalidQueryParameter("read_only".into()));
     }
 
-    let decoded_path = percent_decode_str(path)
-        .decode_utf8()
-        .map_err(|_| ProfileError::InvalidQueryParameter("path".into()))?;
+    let decoded_path = if windows_path {
+        std::borrow::Cow::Owned(path.to_owned())
+    } else {
+        percent_decode_str(path)
+            .decode_utf8()
+            .map_err(|_| ProfileError::InvalidQueryParameter("path".into()))?
+    };
     let duckdb_path = (!memory).then(|| PathBuf::from(decoded_path.into_owned()));
     let database = duckdb_path
         .as_ref()
@@ -668,6 +688,18 @@ fn parse_duckdb_url(input: &str) -> Result<Option<ParsedConnectionUrl>, ProfileE
         read_only_explicit: read_only_seen,
         mongodb_options: None,
     }))
+}
+
+fn is_windows_filesystem_path(value: &str) -> bool {
+    let value = value.strip_prefix("\\\\?\\").unwrap_or(value);
+    if value.starts_with("\\\\") || value.starts_with("UNC\\") {
+        return true;
+    }
+    let bytes = value.as_bytes();
+    bytes.len() >= 3
+        && bytes[0].is_ascii_alphabetic()
+        && bytes[1] == b':'
+        && matches!(bytes[2], b'/' | b'\\')
 }
 
 #[derive(Debug)]
@@ -786,6 +818,8 @@ pub fn parse_connection_url(input: &str) -> Result<ParsedConnectionUrl, ProfileE
         ("mssql", false) => (DatabaseKind::SqlServer, ConnectionUrlFormat::MsSql),
         ("redis", false) => (DatabaseKind::Redis, ConnectionUrlFormat::Redis),
         ("rediss", false) => (DatabaseKind::Redis, ConnectionUrlFormat::RedisTls),
+        ("valkey", false) => (DatabaseKind::Valkey, ConnectionUrlFormat::Valkey),
+        ("valkeys", false) => (DatabaseKind::Valkey, ConnectionUrlFormat::ValkeyTls),
         ("clickhouse", false) => (DatabaseKind::ClickHouse, ConnectionUrlFormat::ClickHouse),
         ("clickhouses", false) => (DatabaseKind::ClickHouse, ConnectionUrlFormat::ClickHouseTls),
         (scheme, _) => return Err(ProfileError::UnsupportedScheme(scheme.to_owned())),
@@ -1100,7 +1134,7 @@ fn parse_server_url(
 ) -> Result<ParsedConnectionUrl, ProfileError> {
     let host = url.host_str().ok_or(ProfileError::MissingHost)?.to_owned();
     let database = decode(url.path().trim_start_matches('/'));
-    let database = if kind == DatabaseKind::Redis {
+    let database = if kind.is_redis_compatible() {
         let database = if database.is_empty() { "0" } else { &database };
         let number = database
             .parse::<u32>()
@@ -1137,8 +1171,11 @@ fn parse_server_url(
         } else {
             SslMode::Disable
         }
-    } else if kind == DatabaseKind::Redis {
-        if format == ConnectionUrlFormat::RedisTls {
+    } else if kind.is_redis_compatible() {
+        if matches!(
+            format,
+            ConnectionUrlFormat::RedisTls | ConnectionUrlFormat::ValkeyTls
+        ) {
             SslMode::Require
         } else {
             SslMode::Disable
@@ -1221,7 +1258,7 @@ fn parse_server_url(
         DatabaseKind::Sqlite | DatabaseKind::DuckDb => {
             unreachable!("file database URL cannot be a server URL")
         }
-        DatabaseKind::Redis => 6379,
+        DatabaseKind::Redis | DatabaseKind::Valkey => 6379,
         DatabaseKind::MongoDb => unreachable!("MongoDB has its own multi-seed URL parser"),
         DatabaseKind::ClickHouse => match format {
             ConnectionUrlFormat::ClickHouseTls if url.port().is_none() => 8443,
@@ -1549,6 +1586,8 @@ pub fn format_connection_url(
         ConnectionUrlFormat::MsSql => "mssql",
         ConnectionUrlFormat::Redis => "redis",
         ConnectionUrlFormat::RedisTls => "rediss",
+        ConnectionUrlFormat::Valkey => "valkey",
+        ConnectionUrlFormat::ValkeyTls => "valkeys",
         ConnectionUrlFormat::ClickHouse => "clickhouse",
         ConnectionUrlFormat::ClickHouseTls => "clickhouses",
         _ => return Err(ProfileError::IncompatibleFormat),
@@ -1607,8 +1646,8 @@ pub fn format_connection_url(
         query.push(format!("sslmode={}", ssl_mode_value(profile.ssl_mode)));
     } else if matches!(profile.kind, DatabaseKind::MySql | DatabaseKind::MariaDb) {
         query.push(format!("sslMode={}", ssl_mode_value(profile.ssl_mode)));
-    } else if profile.kind == DatabaseKind::Redis {
-        // The redis/rediss scheme is the TLS source of truth.
+    } else if profile.kind.is_redis_compatible() {
+        // The redis/rediss and valkey/valkeys schemes are the TLS source of truth.
     } else if profile.kind == DatabaseKind::ClickHouse {
         if (format == ConnectionUrlFormat::ClickHouseTls) == (profile.ssl_mode == SslMode::Disable)
         {
@@ -1868,8 +1907,11 @@ fn ssl_mode_value(value: SslMode) -> &'static str {
 #[cfg(test)]
 mod tests {
     use super::{
-        CatalogScope, DatabaseKind, SslMode, format_connection_url, import_connection_url,
+        CatalogScope, DatabaseKind, SQLITE_PATH, SslMode, format_connection_url,
+        import_connection_url,
     };
+    use percent_encoding::utf8_percent_encode;
+    use std::path::Path;
 
     #[test]
     fn imports_postgres_jdbc_url_and_current_schema() {
@@ -2036,6 +2078,19 @@ mod tests {
             assert_eq!(
                 format_connection_url(&profile, profile.url_format).unwrap(),
                 canonical
+            );
+        }
+
+        for path in [
+            r"C:\Users\runner\AppData\Local\Temp\duckdb file.duckdb",
+            r"\\?\C:\Users\runner\AppData\Local\Temp\duckdb file.duckdb",
+            r"\\?\UNC\server\share\duckdb file.duckdb",
+        ] {
+            let encoded: String = utf8_percent_encode(path, SQLITE_PATH).to_string();
+            let imported = import_connection_url(&format!("duckdb:{encoded}"), None).unwrap();
+            assert_eq!(
+                imported.profile.duckdb_path.as_deref(),
+                Some(Path::new(path))
             );
         }
     }

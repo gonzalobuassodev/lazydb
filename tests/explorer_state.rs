@@ -336,6 +336,93 @@ fn page_replacement_and_subtree_removal_keep_indexes_consistent() {
 }
 
 #[test]
+fn page_reconciliation_preserves_unchanged_schema_subtrees_and_removes_missing_schemas() {
+    let profile = profile_id(701);
+    let fixture = fixture(profile);
+    let sibling = schema_entry(profile, &fixture.database.id, "reporting");
+    let sibling_table = relation_entry(profile, &sibling.id, CatalogKind::Table, "events");
+    let sibling_column = CatalogEntry::relation_child(
+        id(profile, CatalogKind::Column, "events.id"),
+        sibling_table.id.clone(),
+        qualified("id"),
+        "column",
+        OptionalMetadata::Unsupported,
+        CatalogMetadata::Column(ColumnMetadata::new(1, "bigint", false)),
+    )
+    .unwrap();
+    let mut tree = fixture.tree();
+    tree.insert_subtree(vec![
+        sibling.clone(),
+        sibling_table.clone(),
+        sibling_column.clone(),
+    ])
+    .unwrap();
+    tree.set_group_state(&sibling.id, ObjectGroup::Tables, complete_group(1))
+        .unwrap();
+
+    let schemas_owner = ExplorerOwnerId::Catalog(fixture.database.id.clone());
+    assert!(
+        tree.reconcile_page(
+            &schemas_owner,
+            vec![fixture.schema.clone(), sibling.clone()]
+        )
+        .unwrap()
+        .is_empty()
+    );
+    assert_eq!(tree.get(&sibling_table.id), Some(&sibling_table));
+    assert_eq!(tree.get(&sibling_column.id), Some(&sibling_column));
+    assert_eq!(
+        tree.group_children(&sibling.id, ObjectGroup::Tables),
+        std::slice::from_ref(&sibling_table.id)
+    );
+
+    let removed = tree
+        .reconcile_page(&schemas_owner, vec![fixture.schema.clone()])
+        .unwrap();
+    assert!(removed.contains(&sibling.id));
+    assert!(removed.contains(&sibling_table.id));
+    assert!(removed.contains(&sibling_column.id));
+    assert!(tree.get(&sibling_table.id).is_none());
+}
+
+#[test]
+fn refreshing_loaded_group_keeps_cached_rows_without_loading_placeholder() {
+    let profile = profile_id(702);
+    let fixture = fixture(profile);
+    let mut explorer = explorer_with_fixture(&fixture);
+    let owner = ExplorerOwnerId::Group {
+        parent: fixture.schema.id.clone(),
+        group: ObjectGroup::Tables,
+    };
+    let state = explorer.profiles.get_mut(&profile).unwrap();
+    state
+        .load_states
+        .insert(owner.clone(), ExplorerLoadState::Loading { request_id: 2 });
+    state.previous_load_states.insert(
+        owner.clone(),
+        ExplorerLoadState::Loaded { next_cursor: None },
+    );
+    state
+        .refresh_staged_entries
+        .insert(owner.clone(), Vec::new());
+    explorer.expanded.extend([
+        ExplorerNodeId::Profile(profile),
+        ExplorerNodeId::Catalog(fixture.database.id.clone()),
+        ExplorerNodeId::Catalog(fixture.schema.id.clone()),
+        owner.node_id(),
+        ExplorerNodeId::Catalog(fixture.table.id.clone()),
+    ]);
+
+    let rows = visible_ids(&explorer);
+    assert!(rows.contains(&ExplorerNodeId::Catalog(fixture.table.id.clone())));
+    assert!(rows.contains(&ExplorerNodeId::Catalog(fixture.column.id.clone())));
+    assert!(!rows.contains(&ExplorerNodeId::Status {
+        owner,
+        kind: StatusRowKind::Loading,
+    }));
+}
+
+#[test]
 fn refresh_preserves_stable_selection_and_expansion() {
     let profile = profile_id(1);
     let fixture = fixture(profile);

@@ -68,14 +68,26 @@ trap cleanup EXIT HUP INT TERM
 
 mkdir -p "$DATA_HOME"
 LOCK="$DATA_HOME/.install.lock"
+LOCK_OWNER="lazydb-install-$$-$PPID"
 acquire_lock() {
-    if mkdir "$LOCK" 2>/dev/null; then printf '%s\n' "$$" > "$LOCK/pid"; return; fi
+    if mkdir "$LOCK" 2>/dev/null; then
+        printf '%s\n' "$$" > "$LOCK/pid"
+        printf '%s\n' "$LOCK_OWNER" > "$LOCK/owner"
+        return
+    fi
     pid=$(cat "$LOCK/pid" 2>/dev/null || true)
-    case "$pid" in ''|*[!0-9]*) rm -rf "$LOCK" ;; *) kill -0 "$pid" 2>/dev/null && die "another installation is running (pid $pid)"; rm -rf "$LOCK" ;; esac
-    mkdir "$LOCK" || die 'could not acquire install lock'
-    printf '%s\n' "$$" > "$LOCK/pid"
+    case "$pid" in
+        ''|*[!0-9]*) die 'another installation may be running (lock owner is unknown)' ;;
+        *) kill -0 "$pid" 2>/dev/null && die "another installation is running (pid $pid)"; die "stale installer lock found (pid $pid); remove $LOCK manually after verifying no installer is running" ;;
+    esac
 }
-release_lock() { rm -rf "$LOCK"; }
+release_lock() {
+    owner=$(cat "$LOCK/owner" 2>/dev/null || true)
+    [ "$owner" = "$LOCK_OWNER" ] || return 0
+    [ "$(cat "$LOCK/pid" 2>/dev/null || true)" = "$$" ] || return 0
+    rm -f "$LOCK/owner" "$LOCK/pid"
+    rmdir "$LOCK" 2>/dev/null || true
+}
 trap 'release_lock; cleanup' EXIT HUP INT TERM
 acquire_lock
 
@@ -112,12 +124,12 @@ try:
             if libc.get('family') != 'glibc' or not re.fullmatch(r'[0-9]+\.[0-9]+', libc.get('min_version', '')):
                 raise ValueError('invalid Linux libc requirement')
             import subprocess
-            version = subprocess.check_output(['getconf', 'GNU_LIBC_VERSION'], text=True).split()[-1]
+            glibc_version = subprocess.check_output(['getconf', 'GNU_LIBC_VERSION'], text=True).split()[-1]
             try:
-                have = tuple(int(part) for part in version.split('.'))
+                have = tuple(int(part) for part in glibc_version.split('.'))
                 need = tuple(int(part) for part in libc['min_version'].split('.'))
             except ValueError as error: raise ValueError('invalid glibc version returned by getconf') from error
-            if have < need: raise ValueError('Linux runtime requires glibc %s, this system has %s' % (libc['min_version'], version))
+            if have < need: raise ValueError('Linux runtime requires glibc %s, this system has %s' % (libc['min_version'], glibc_version))
         elif 'requirements' in asset:
             raise ValueError('unexpected asset requirements')
     elif 'requirements' in asset:
@@ -167,7 +179,34 @@ FIRST_INSTALL=1
 if [ -e "$DATA_HOME/install.json" ] || [ -e "$DATA_HOME/current" ] || [ -e "$INSTALL_DIR/lazydb" ]; then
     FIRST_INSTALL=0
 fi
-if [ ! -e "$DEST" ]; then mkdir -p "$RELEASES"; mv "$STAGED" "$DEST"; fi
+if [ ! -e "$DEST" ]; then
+    mkdir -p "$RELEASES"
+    python3 - "$STAGED" "$RELEASE_VERSION" "$TARGET" "$DATA_HOME/current" <<'PY'
+import hashlib, json, os, stat, sys, tempfile
+root, version, target, current = sys.argv[1:]
+entries = []
+for name in sorted(os.listdir(root)):
+    path = os.path.join(root, name)
+    mode = os.lstat(path).st_mode
+    if stat.S_ISLNK(mode) or not stat.S_ISREG(mode): raise SystemExit('staged release contains an unexpected file')
+    with open(path, 'rb') as stream: digest = hashlib.sha256(stream.read()).hexdigest()
+    entries.append({'path': name, 'sha256': digest, 'size': os.path.getsize(path)})
+binary = next((item for item in entries if item['path'] == 'lazydb'), None)
+if binary is None: raise SystemExit('staged release binary is missing')
+previous = None
+if os.path.islink(current):
+    resolved = os.path.realpath(current)
+    releases = os.path.realpath(os.path.join(os.path.dirname(current), 'releases'))
+    if os.path.dirname(resolved) == releases: previous = os.path.basename(resolved)
+marker = {'schema': 1, 'product': 'lazydb', 'version': version, 'target': target,
+          'binary_sha256': binary['sha256'], 'previous_version': previous, 'files': entries}
+fd, path = tempfile.mkstemp(prefix='.release.json.', dir=root)
+with os.fdopen(fd, 'w', encoding='utf-8') as stream:
+    json.dump(marker, stream, sort_keys=True, indent=2); stream.write('\n'); stream.flush(); os.fsync(stream.fileno())
+os.replace(path, os.path.join(root, '.release.json'))
+PY
+    mv "$STAGED" "$DEST"
+fi
 python3 - "$DEST" "$DATA_HOME/current" <<'PY'
 import os, sys
 temporary = sys.argv[2] + '.new.' + str(os.getpid())
