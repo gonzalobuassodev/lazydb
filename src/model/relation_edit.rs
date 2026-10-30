@@ -73,8 +73,12 @@ pub enum DocumentFieldKind {
     Null,
     String,
     ObjectId,
-    /// Documents, arrays and every other BSON type are edited as Canonical
-    /// Extended JSON, so a nested document keeps its types when it round-trips.
+    /// A BSON date reads and edits as ISO-8601 UTC: the canonical EJSON form is
+    /// unreadable and easy to get wrong by hand.
+    DateTime,
+    /// Documents, arrays and every other BSON type (timestamps, regexes,
+    /// decimals) are edited as Canonical Extended JSON, so they keep their
+    /// types when they round-trip.
     Ejson,
 }
 
@@ -88,6 +92,7 @@ impl DocumentFieldKind {
             Bson::Null => Self::Null,
             Bson::String(_) => Self::String,
             Bson::ObjectId(_) => Self::ObjectId,
+            Bson::DateTime(_) => Self::DateTime,
             _ => Self::Ejson,
         }
     }
@@ -124,6 +129,7 @@ impl DocumentFieldKind {
             Self::ObjectId => mongodb::bson::oid::ObjectId::parse_str(trimmed)
                 .map(Bson::ObjectId)
                 .map_err(|_| format!("expected a 24-character objectId, got {trimmed:?}")),
+            Self::DateTime => parse_bson_date(trimmed),
             Self::Ejson => {
                 let value: serde_json::Value = serde_json::from_str(trimmed)
                     .map_err(|error| format!("invalid Canonical EJSON: {error}"))?;
@@ -329,8 +335,71 @@ fn compact_bson_value(value: &Bson) -> String {
         Bson::Int64(number) => number.to_string(),
         Bson::Double(number) => number.to_string(),
         Bson::Null => "null".to_owned(),
+        Bson::DateTime(date) => iso_utc_date(date),
         other => other.clone().into_canonical_extjson().to_string(),
     }
+}
+
+/// One BSON date as ISO-8601 UTC, with milliseconds only when it has them.
+///
+/// The canonical EJSON form (`{"$date":{"$numberLong":"…"}}`) is what the write
+/// path stores, but it is not what a person can read or safely edit, so the
+/// document editor shows and accepts this instead.
+fn iso_utc_date(value: &mongodb::bson::DateTime) -> String {
+    let Some(timestamp) = chrono::DateTime::from_timestamp_millis(value.timestamp_millis()) else {
+        // Outside chrono's range: keep the canonical form instead of inventing
+        // a date the value does not hold.
+        return Bson::DateTime(*value).into_canonical_extjson().to_string();
+    };
+    if timestamp.timestamp_subsec_millis() == 0 {
+        timestamp.format("%Y-%m-%dT%H:%M:%SZ").to_string()
+    } else {
+        timestamp.format("%Y-%m-%dT%H:%M:%S%.3fZ").to_string()
+    }
+}
+
+/// Reads a date the way a person writes one.
+///
+/// `2026-11-08T00:00:00Z`, `2026-11-08 15:30`, `2026-11-08 15:30:15.250` and
+/// `2026-11-08` are all accepted, the forms without an offset as UTC, and so is
+/// canonical or relaxed EJSON, so a value copied from the EJSON view still
+/// round-trips.
+fn parse_bson_date(text: &str) -> Result<Bson, String> {
+    let invalid =
+        || format!("expected an ISO-8601 timestamp like 2026-11-08T00:00:00Z, got {text:?}");
+    if let Ok(timestamp) = chrono::DateTime::parse_from_rfc3339(text) {
+        return Ok(Bson::DateTime(mongodb::bson::DateTime::from_millis(
+            timestamp.timestamp_millis(),
+        )));
+    }
+    for format in [
+        "%Y-%m-%d %H:%M:%S%.f",
+        "%Y-%m-%d %H:%M",
+        "%Y-%m-%d %H:%M:%S",
+    ] {
+        if let Ok(naive) = chrono::NaiveDateTime::parse_from_str(text, format) {
+            return Ok(Bson::DateTime(mongodb::bson::DateTime::from_millis(
+                naive.and_utc().timestamp_millis(),
+            )));
+        }
+    }
+    if let Ok(date) = chrono::NaiveDate::parse_from_str(text, "%Y-%m-%d")
+        && let Some(naive) = date.and_hms_opt(0, 0, 0)
+    {
+        return Ok(Bson::DateTime(mongodb::bson::DateTime::from_millis(
+            naive.and_utc().timestamp_millis(),
+        )));
+    }
+    if text.starts_with('{') {
+        let value: serde_json::Value = serde_json::from_str(text)
+            .map_err(|error| format!("invalid Canonical EJSON: {error}"))?;
+        return match Bson::try_from(value) {
+            Ok(Bson::DateTime(date)) => Ok(Bson::DateTime(date)),
+            Ok(other) => Err(format!("expected a date, got {}", bson_type_name(&other))),
+            Err(error) => Err(format!("invalid Canonical EJSON: {error}")),
+        };
+    }
+    Err(invalid())
 }
 
 /// The state of the modal that edits one MongoDB document as a whole.

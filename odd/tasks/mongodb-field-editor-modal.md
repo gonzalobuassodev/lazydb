@@ -22,6 +22,8 @@ S8. Constraint (replaces part of S4): the field list no longer renders an inline
 
 S9. "Quiero que siempre el modal tenga margenes por arriba y por abajo del texto que contiene, para que no quede todo amontonado" The field modal keeps one blank row between its document header and the value, and one blank row between the value and its footer, for every field kind and whether or not a refusal is showing.
 
+S10. "Ahora en campo date no lo formatea correctamente." A BSON `date` reads and edits as ISO-8601 UTC (`2026-11-08T00:00:00Z`, with milliseconds only when it has them) in the field list and in the field modal, never as canonical EJSON. Applying accepts that form, `2026-11-08 15:30[:15[.250]]`, `2026-11-08` and canonical or relaxed EJSON, the forms without an offset as UTC; the document text keeps the canonical EJSON the write path stores.
+
 ## Tasks
 
 - T1 (S2, S3) — Field edit holds either a single-line or a multi-line input, containers open on indented EJSON, and applying parses with the field's BSON type. Route: inline. Commit: `feat(mongodb): edit every document field in its own modal`.
@@ -32,6 +34,7 @@ S9. "Quiero que siempre el modal tenga margenes por arriba y por abajo del texto
 - T6 (S7, S8) — Open scalar fields in the same modal and drop the inline editor row. Route: inline. Commit: `feat(mongodb): edit every document field in its own modal`.
 - T7 (S6, S7, S8) — Cover both with tests and update `docs/keybindings.md`. Route: inline. Commit: `feat(mongodb): edit every document field in its own modal`.
 - T8 (S9) — Blank margin row above and below the value inside the field modal. Route: inline.
+- T9 (S10) — A BSON date shows and edits as ISO-8601 UTC. Route: inline.
 
 ## Log
 
@@ -45,7 +48,7 @@ L4. Decision (where the modal draws, superseded by L8): the field editor is its 
 
 L5. Decision (list rows): a container row shows `[n items]` / `{n fields}` instead of clipped canonical EJSON, matching the shape marker the data grid already uses for the same values. `DocumentField::value` keeps the compact EJSON, because it is the text a single-line editor starts from and the tests pin it.
 
-L6. Compromise (review workload): the behavior landed in one commit of about 800 authored lines plus a docs commit, above the ~400-line work-unit target. The modal spans model, keymap, app, UI and tests as one unit, so a per-file split would have produced intermediate states that do not compile; the repository already recorded that trade-off as the lesser evil (see `odd/tasks/mongodb-relation-tab.md` L15). The commits of this branch hold the whole feature and its tests; `docs/keybindings.md` lands in a follow-up docs PR.
+L6. Compromise (review workload): the behavior is about 800 authored lines, above the ~400-line work-unit target. The modal spans model, keymap, app, UI and tests as one unit, so a per-file split would have produced intermediate states that do not compile; the repository already recorded that trade-off as the lesser evil (see `odd/tasks/mongodb-relation-tab.md` L15). It reaches upstream as three chained pull requests — the modal with its margins, the date slice, and the keybindings docs — so each one stays reviewable on its own.
 
 L7. "ahora esta bien... dos cosas... el modal es demasiado grande, me gustaria mas pequeño. Y el resto de los campos tambien quiero que se abran en un modal."
 
@@ -60,3 +63,7 @@ L11. Evidence (flaky, not this change): two full-suite runs aborted on `tests/up
 L12. "Quiero que siempre el modal tenga margenes por arriba y por abajo del texto que contiene, para que no quede todo amontonado"
 
 L13. Decision (answers L12): the field modal layout is border, document header, blank margin, value, optional refusal, blank margin, footer, border — six chrome rows around the value. `render_json_editor` now takes `Option<&str>` for its footer, so the field modal draws its own footer under the bottom margin while the document EJSON view and the SQL JSON editor keep theirs. `DocumentFieldInput::modal_body_height` became `modal_value_rows`, which counts the value and its refusal only; the chrome lives in `FIELD_MODAL_CHROME_ROWS`.
+
+L14. "Ahora en campo date no lo formatea correctamente."
+
+L15. Decision (answers L14, user chose between three representations): a BSON date shows as ISO-8601 UTC with an explicit `Z` in the field list and the modal, because it is the instant BSON stores and leaves no timezone doubt. `DocumentFieldKind::DateTime` parses RFC 3339, `YYYY-MM-DD HH:MM[:SS[.fff]]` and `YYYY-MM-DD` (all without an offset read as UTC) and still accepts canonical EJSON, so a value pasted from the EJSON view round-trips. `compact_bson_value` formats the date, so the list row and the modal share one text. The document text keeps canonical EJSON, so the write path and the EJSON view are unchanged.

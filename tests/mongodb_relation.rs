@@ -2267,6 +2267,101 @@ fn field_modal_layout(output: &str) -> FieldModalLayout {
     }
 }
 
+/// The BSON date of the issue screenshot: 2026-11-08T00:00:00Z.
+const DATE_MILLIS: i64 = 1_794_096_000_000;
+const DATE_ISO: &str = "2026-11-08T00:00:00Z";
+
+/// A document with one BSON date field.
+fn dated_documents() -> Vec<MongoDocument> {
+    vec![document(mongodb::bson::doc! {
+        "_id": object_id(RUEDAS_ID),
+        "name": "Carrera 42",
+        "date": mongodb::bson::DateTime::from_millis(DATE_MILLIS),
+    })]
+}
+
+#[test]
+fn a_date_field_shows_an_iso_timestamp_in_the_list_and_the_modal() {
+    let (mut app, _request) = mongo_app_with_page(dated_documents());
+    open_fields_view(&mut app);
+
+    assert_eq!(
+        field_value(&app, "date").as_deref(),
+        Some(DATE_ISO),
+        "the field list row shows the readable date instead of canonical EJSON"
+    );
+    let text = open_field_editor(&mut app, "date");
+    assert_eq!(
+        text, DATE_ISO,
+        "the field modal opens on the ISO-8601 UTC form"
+    );
+    let output = render_app(&app, 200, 40);
+    assert!(
+        output.lines().any(|line| line.contains(DATE_ISO)),
+        "the modal renders the readable date, got:\n{output}"
+    );
+    assert!(
+        !output.contains("$date"),
+        "neither the list nor the modal shows the raw canonical EJSON, got:\n{output}"
+    );
+}
+
+#[test]
+fn a_date_field_applies_every_accepted_form_and_refuses_text_that_is_not_a_date() {
+    let (mut app, _request) = mongo_app_with_page(dated_documents());
+    open_fields_view(&mut app);
+
+    for (typed, expected) in [
+        (DATE_ISO, DATE_ISO),
+        ("2026-11-08 15:30", "2026-11-08T15:30:00Z"),
+        ("2026-11-08", "2026-11-08T00:00:00Z"),
+        ("2026-11-08T00:00:00.250Z", "2026-11-08T00:00:00.250Z"),
+        (
+            r#"{"$date":{"$numberLong":"1794096000000"}}"#,
+            "2026-11-08T00:00:00Z",
+        ),
+    ] {
+        open_field_editor(&mut app, "date");
+        retype_field_editor(&mut app, typed);
+        app.update(Action::RelationEditDocumentFieldApply);
+        assert_eq!(
+            document_state(&app).field_error,
+            None,
+            "applying {typed:?} must be accepted"
+        );
+        assert_eq!(
+            field_value(&app, "date").as_deref(),
+            Some(expected),
+            "after applying {typed:?}"
+        );
+    }
+
+    // The document text stays canonical, so the write path and the EJSON view
+    // keep seeing the same value they always did.
+    let text = document_state(&app).input.value().to_owned();
+    assert!(
+        text.contains("\"$date\"") && text.contains("1794096000000"),
+        "the document text keeps the canonical EJSON the write path stores, got {text:?}"
+    );
+
+    open_field_editor(&mut app, "date");
+    retype_field_editor(&mut app, "not a date");
+    app.update(Action::RelationEditDocumentFieldApply);
+    assert!(
+        document_state(&app).field_error.is_some(),
+        "text that is not a date is refused"
+    );
+    assert!(
+        document_state(&app).field_edit.is_some(),
+        "the refused field keeps its modal open"
+    );
+    assert_eq!(
+        field_value(&app, "date").as_deref(),
+        Some("2026-11-08T00:00:00Z"),
+        "a refused date leaves the document untouched"
+    );
+}
+
 #[test]
 fn the_field_modal_keeps_a_blank_row_around_the_value() {
     let (mut app, _request) = mongo_app_with_page(typed_documents());
