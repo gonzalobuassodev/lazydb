@@ -809,7 +809,7 @@ mod grid_column_tests {
             "the identifier must give up width on a tight pane: {widths:?}"
         );
         assert_eq!(widths[1], 10);
-        let occupied: u16 = widths.iter().map(|width| *width).sum::<u16>() + ROW_NUMBER_CELLS + 1;
+        let occupied: u16 = widths.iter().copied().sum::<u16>() + ROW_NUMBER_CELLS + 1;
         assert!(occupied <= 34, "{occupied} must fit in 34");
     }
 
