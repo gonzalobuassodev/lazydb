@@ -133,6 +133,16 @@ impl DocumentFieldKind {
     }
 }
 
+/// How a container field is summarized in the field list.
+///
+/// A container is edited in its own multi-line modal, so the row shows how much
+/// the field holds instead of a canonical EJSON line clipped at the pane edge.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum DocumentFieldShape {
+    Array(usize),
+    Document(usize),
+}
+
 /// One top-level field of the document, as the field list shows it.
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct DocumentField {
@@ -140,26 +150,142 @@ pub struct DocumentField {
     pub kind: DocumentFieldKind,
     /// The observed BSON type of the value the field holds right now.
     pub type_name: &'static str,
-    /// The compact value the row shows and the field editor starts from.
+    /// The compact value the field editor starts from.
     pub value: String,
+    /// `Some` for the BSON containers, which are edited in the multi-line modal.
+    pub shape: Option<DocumentFieldShape>,
 }
 
 impl DocumentField {
     fn new(name: &str, value: &Bson) -> Self {
+        let shape = match value {
+            Bson::Array(items) => Some(DocumentFieldShape::Array(items.len())),
+            Bson::Document(fields) => Some(DocumentFieldShape::Document(fields.len())),
+            _ => None,
+        };
         Self {
             name: name.to_owned(),
             kind: DocumentFieldKind::of(value),
             type_name: bson_type_name(value),
             value: compact_bson_value(value),
+            shape,
+        }
+    }
+
+    /// True for an array or an embedded document.
+    pub fn is_container(&self) -> bool {
+        self.shape.is_some()
+    }
+
+    /// What the field row shows: the compact value of a scalar, or a shape
+    /// marker for a container (the same shape the data grid shows for them).
+    pub fn list_value(&self) -> String {
+        match self.shape {
+            Some(DocumentFieldShape::Array(entries)) => format!("[{entries} items]"),
+            Some(DocumentFieldShape::Document(entries)) => format!("{{{entries} fields}}"),
+            None => self.value.clone(),
         }
     }
 }
 
-/// The single field being edited, with the single-line input it edits.
+/// The text one field is being edited as.
+///
+/// Every field opens in the modal, so both kinds are modal values: a scalar is
+/// edited on one line, and a container gets a multi-line JSON buffer, because a
+/// canonical EJSON array on one line is unreadable and wider than the pane.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub enum DocumentFieldInput {
+    Line(TextInput),
+    Block(JsonBuffer),
+}
+
+impl DocumentFieldInput {
+    pub fn value(&self) -> &str {
+        match self {
+            Self::Line(input) => input.value(),
+            Self::Block(buffer) => buffer.value(),
+        }
+    }
+
+    /// True for the multi-line editor, which owns `Enter` and the cursor keys.
+    pub fn is_multiline(&self) -> bool {
+        matches!(self, Self::Block(_))
+    }
+
+    /// How many lines the value spans, which is one half of the modal size.
+    pub fn line_count(&self) -> usize {
+        self.value().split('\n').count()
+    }
+
+    /// The columns of the widest line, the other half of the modal size.
+    ///
+    /// Wide characters count once: this is a bound for the popup, and the
+    /// editor still scrolls a line that does not fit.
+    pub fn longest_line_columns(&self) -> usize {
+        self.value()
+            .split('\n')
+            .map(|line| line.chars().count())
+            .max()
+            .unwrap_or_default()
+    }
+
+    /// The lines the value itself takes in the field modal: its own lines, plus
+    /// one for the refusal when the last apply was rejected. The modal adds the
+    /// chrome around it, including the margins above and below.
+    pub fn modal_value_rows(&self, error: bool) -> usize {
+        self.line_count() + usize::from(error)
+    }
+
+    fn apply(&mut self, edit: TextInputEdit) -> bool {
+        match self {
+            Self::Line(input) => input.apply(edit),
+            Self::Block(buffer) => buffer.apply(edit),
+        }
+    }
+
+    fn paste(&mut self, text: &str) {
+        match self {
+            Self::Line(input) => input.paste(text),
+            Self::Block(buffer) => buffer.paste(text),
+        }
+    }
+
+    fn move_line(&mut self, delta: isize) -> bool {
+        match self {
+            Self::Line(_) => false,
+            Self::Block(buffer) => {
+                if delta < 0 {
+                    buffer.move_up();
+                } else {
+                    buffer.move_down();
+                }
+                true
+            }
+        }
+    }
+
+    /// Re-indents a multi-line field, and reports why a single-line field has
+    /// nothing to format.
+    fn format(&mut self) -> Result<(), String> {
+        match self {
+            Self::Line(_) => Err("this field is edited on one line".to_owned()),
+            Self::Block(buffer) => {
+                let formatted = buffer.format().map_err(|error| {
+                    format!("{} at {}:{}", error.message, error.line, error.column)
+                })?;
+                buffer.replace_value(formatted);
+                Ok(())
+            }
+        }
+    }
+}
+
+/// The single field being edited, with the input it edits.
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct DocumentFieldEdit {
     pub name: String,
-    pub input: TextInput,
+    pub type_name: &'static str,
+    pub input: DocumentFieldInput,
 }
 
 fn bson_type_name(value: &Bson) -> &'static str {
@@ -277,16 +403,30 @@ impl DocumentEditorState {
     /// The list is derived from the text instead of being stored beside it, so
     /// the field view can never drift from the document that saving writes.
     pub fn fields(&self) -> Result<Vec<DocumentField>, String> {
+        self.document_and_fields().map(|(_, fields)| fields)
+    }
+
+    /// The parsed document and its field rows, from one parse of the text.
+    fn document_and_fields(&self) -> Result<(Document, Vec<DocumentField>), String> {
         let document = parse_document_ejson(self.input.value())?;
-        Ok(document
+        let fields = document
             .iter()
             .map(|(name, value)| DocumentField::new(name, value))
-            .collect())
+            .collect();
+        Ok((document, fields))
     }
 
     /// The row the field list highlights, clamped to the fields that exist.
     pub fn selected_field_index(&self, field_count: usize) -> usize {
         self.selected_field.min(field_count.saturating_sub(1))
+    }
+
+    /// Leaves the open field editor without touching the document text.
+    ///
+    /// A one-line field uses this when the list cursor walks on to the next
+    /// field: the modal closes and the cursor moves with the same key press.
+    pub fn leave_field_edit(&mut self) {
+        self.field_edit = None;
     }
 
     /// Moves the field selection by `delta` rows, stopping at both ends.
@@ -310,13 +450,15 @@ impl DocumentEditorState {
         }
     }
 
-    /// Opens the single-line editor on the selected field.
+    /// Opens the modal on the selected field.
     ///
-    /// `_id` reports why it never opens: the identifier is immutable and the
-    /// list must not offer an edit the write path would refuse.
+    /// A container opens it multi-line, so its value is shown indented instead
+    /// of as one canonical EJSON line. `_id` reports why it never opens: the
+    /// identifier is immutable and the list must not offer an edit the write
+    /// path would refuse.
     pub fn begin_field_edit(&mut self) {
-        let fields = match self.fields() {
-            Ok(fields) => fields,
+        let (document, fields) = match self.document_and_fields() {
+            Ok(parsed) => parsed,
             Err(message) => {
                 self.field_edit = None;
                 self.field_error = Some(message);
@@ -333,10 +475,17 @@ impl DocumentEditorState {
             self.field_error = Some(DOCUMENT_ID_IMMUTABLE_MESSAGE.to_owned());
             return;
         }
+        let input = match (field.is_container(), document.get(&field.name)) {
+            (true, Some(value)) => {
+                DocumentFieldInput::Block(JsonBuffer::new(indented_bson_value(value)))
+            }
+            _ => DocumentFieldInput::Line(TextInput::from(field.value.clone())),
+        };
         self.field_error = None;
         self.field_edit = Some(DocumentFieldEdit {
             name: field.name.clone(),
-            input: TextInput::from(field.value.clone()),
+            type_name: field.type_name,
+            input,
         });
     }
 
@@ -380,6 +529,30 @@ impl DocumentEditorState {
         true
     }
 
+    /// Moves the multi-line field cursor by `delta` lines.
+    pub fn move_field_edit_line(&mut self, delta: isize) -> bool {
+        let Some(field) = self.field_edit.as_mut() else {
+            return false;
+        };
+        field.input.move_line(delta)
+    }
+
+    /// Re-indents the open multi-line field value.
+    pub fn format_field_edit(&mut self) -> Result<(), String> {
+        let Some(field) = self.field_edit.as_mut() else {
+            return Err("no field editor is open".to_owned());
+        };
+        field.input.format()
+    }
+
+    /// True while the open field editor is the multi-line one, which owns
+    /// `Enter` and the cursor keys instead of applying on `Enter`.
+    pub fn field_edit_is_multiline(&self) -> bool {
+        self.field_edit
+            .as_ref()
+            .is_some_and(|field| field.input.is_multiline())
+    }
+
     /// The document to write, or the reason it cannot be written.
     ///
     /// The editor text is parsed back into BSON and must still carry the
@@ -395,9 +568,16 @@ impl DocumentEditorState {
 
 /// Renders one document as Canonical Extended JSON.
 pub fn canonical_document_ejson(document: &Document) -> String {
-    let value = Bson::Document(document.clone()).into_canonical_extjson();
-    // The modal is a text editor: one compact line is unreadable and gets
-    // clipped at the pane edge, so the document is rendered with indentation.
+    indented_bson_value(&Bson::Document(document.clone()))
+}
+
+/// Renders one BSON value as Canonical Extended JSON across lines.
+///
+/// An array or a nested document on one compact line is unreadable and gets
+/// clipped at the pane edge, so every value the editors show is indented.
+/// Scalars render as the same single token canonical EJSON would produce.
+pub fn indented_bson_value(value: &Bson) -> String {
+    let value = value.clone().into_canonical_extjson();
     serde_json::to_string_pretty(&value).unwrap_or_else(|_| value.to_string())
 }
 
