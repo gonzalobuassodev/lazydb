@@ -207,7 +207,7 @@ def main() -> int:
     parser.add_argument("--compose-file", required=True)
     parser.add_argument("--project", default=None)
     parser.add_argument("--service", default="mongodb-standalone")
-    parser.add_argument("--uri", default="mongodb://127.0.0.1:27018")
+    parser.add_argument("--uri", default="mongodb://127.0.0.1:27018/lazydb_exit")
     args = parser.parse_args()
 
     running = run(compose(args, "ps", "--status", "running", "--quiet", args.service))
