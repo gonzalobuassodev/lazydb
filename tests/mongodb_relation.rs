@@ -614,10 +614,14 @@ fn structure_request(commands: &[Command]) -> RelationRequest {
 fn opening_the_ddl_view_on_a_mongodb_relation_requests_the_structure() {
     let (mut app, profile_id, _generation) = mongo_app();
     loaded_mongo_relation(&mut app, profile_id);
-    let page_size = match app.tabs.last() {
-        Some(WorkspaceTab::Relation(tab)) => tab.pagination.page_size,
-        _ => panic!("expected a relation tab"),
-    };
+    let expected_documents = vec![document(mongodb::bson::doc! {
+        "_id": 1_i32,
+        "raceId": "race-1",
+        "position": 3_i64,
+    })];
+    if let Some(WorkspaceTab::Relation(tab)) = app.tabs.last_mut() {
+        tab.mongodb_documents = Some(expected_documents.clone());
+    }
 
     let commands = app.update(Action::SetRelationView(RelationView::Ddl));
 
@@ -635,11 +639,11 @@ fn opening_the_ddl_view_on_a_mongodb_relation_requests_the_structure() {
     assert!(
         commands.iter().any(|command| matches!(
             command,
-            Command::LoadMongoRelationStructure { request, from_page: Some(page) }
+            Command::LoadMongoRelationStructure { request, documents: Some(documents) }
                 if request.tab_id == tab_id
                     && request.kind == RelationRequestKind::Ddl
                     && request.relation == key
-                    && *page == PageRequest::first(page_size)
+                    && *documents == expected_documents
         )),
         "the structure must be requested for the page the grid shows, got {commands:?}"
     );
@@ -664,7 +668,7 @@ fn opening_the_ddl_view_without_a_loaded_page_asks_for_metadata_only() {
         commands.iter().any(|command| matches!(
             command,
             Command::LoadMongoRelationStructure {
-                from_page: None,
+                documents: None,
                 ..
             }
         )),
@@ -761,7 +765,7 @@ use lazydb::{
     },
     model::{
         cell_editor::JsonBuffer,
-        relation::{RelationDescriptor, RelationTab},
+        relation::RelationTab,
         relation_edit::{
             DOCUMENT_ID_IMMUTABLE_MESSAGE, DocumentEditorState, DocumentEditorView,
             MONGODB_READ_ONLY_MESSAGE, RelationGridMode,
@@ -898,6 +902,7 @@ struct ReplaceCommand {
     tab_generation: u64,
     namespace: MongoNamespace,
     id: mongodb::bson::Bson,
+    expected: mongodb::bson::Document,
     replacement: mongodb::bson::Document,
 }
 
@@ -913,6 +918,7 @@ fn one_replace_command(commands: &[Command]) -> ReplaceCommand {
         tab_generation,
         namespace,
         id,
+        expected,
         replacement,
         ..
     } = replaces[0]
@@ -924,12 +930,9 @@ fn one_replace_command(commands: &[Command]) -> ReplaceCommand {
         tab_generation: *tab_generation,
         namespace: namespace.clone(),
         id: id.clone(),
+        expected: expected.clone(),
         replacement: replacement.clone(),
     }
-}
-
-fn canonical_ejson(document: &MongoDocument) -> String {
-    document.canonical_ejson().expect("canonical ejson")
 }
 
 fn row_values(app: &App) -> Vec<Vec<CellValue>> {
@@ -1010,6 +1013,11 @@ fn saving_emits_one_replacement_bounded_to_the_original_id() {
         "the filter carries the original _id value exactly"
     );
     assert_eq!(
+        replace.expected,
+        bike_documents()[0].bson,
+        "the write carries the exact BSON document loaded when the editor opened"
+    );
+    assert_eq!(
         replace.replacement.get("_id"),
         Some(&object_id(RUEDAS_ID)),
         "the replacement keeps the original _id"
@@ -1037,6 +1045,23 @@ fn saving_emits_one_replacement_bounded_to_the_original_id() {
     assert!(
         app.update(Action::RelationEditConfirm).is_empty(),
         "one save emits one write"
+    );
+}
+
+#[test]
+fn saving_an_unchanged_document_closes_locally_without_a_write() {
+    let (mut app, _request) = mongo_app_with_page(bike_documents());
+    app.update(Action::RelationEditCell);
+    app.update(Action::RelationEditDocumentToggleView);
+
+    let commands = app.update(Action::RelationEditConfirm);
+
+    assert!(commands.is_empty(), "an unchanged document writes nothing");
+    assert_eq!(document_mode(&app), Some(RelationGridMode::Browse));
+    assert!(
+        app.notifications
+            .history()
+            .any(|notification| notification.body.contains("No document changes"))
     );
 }
 
@@ -1247,6 +1272,44 @@ fn a_failed_replacement_surfaces_the_error_and_keeps_the_page() {
         row_values(&app),
         before,
         "the grid keeps the values it had before the failed write"
+    );
+}
+
+#[test]
+fn a_compare_and_replace_conflict_keeps_the_document_draft_open() {
+    let (mut app, _request) = mongo_app_with_page(bike_documents());
+    let before = row_values(&app);
+    app.update(Action::RelationEditCell);
+    set_document_text(
+        &mut app,
+        &format!(r#"{{"_id": {{"$oid": "{RUEDAS_ID}"}}, "name": "Ruedas Pro X"}}"#),
+    );
+    let replace = one_replace_command(&app.update(Action::RelationEditConfirm));
+    assert_eq!(replace.expected.get_str("name"), Ok("Ruedas Pro"));
+
+    let commands = app.update(Action::MongoRelationDocumentReplaceFailed {
+        tab_id: replace.tab_id,
+        tab_generation: replace.tab_generation,
+        id: replace.id,
+        message: "the document changed or was deleted since it was loaded; reload before saving"
+            .into(),
+    });
+
+    assert!(
+        commands.is_empty(),
+        "a conflict must not reload over the draft"
+    );
+    let state = document_state(&app);
+    assert_eq!(
+        state.error.as_deref(),
+        Some("the document changed or was deleted since it was loaded; reload before saving")
+    );
+    assert!(!state.saving);
+    assert!(state.input.value().contains("Ruedas Pro X"));
+    assert_eq!(
+        row_values(&app),
+        before,
+        "the loaded grid remains untouched"
     );
 }
 
@@ -1968,7 +2031,6 @@ fn the_id_field_cannot_be_edited_from_the_field_list() {
     for character in "ffffffffffff".chars() {
         app.update(Action::RelationEditInsert(character));
     }
-    app.update(Action::RelationEditConfirm);
     let state = document_state(&app);
     assert_eq!(
         state.input.value(),
@@ -1983,9 +2045,9 @@ fn the_id_field_cannot_be_edited_from_the_field_list() {
         Some(&object_id(RUEDAS_ID)),
         "the document keeps its original _id"
     );
-
     // Any other field of the same list is editable, so the refusal is about
     // _id and not about the view.
+    app.update(Action::RelationEditCell);
     select_field(&mut app, "name");
     app.update(Action::RelationEditDocumentFieldEdit);
     assert!(
@@ -1995,245 +2057,193 @@ fn the_id_field_cannot_be_edited_from_the_field_list() {
 }
 
 // ---------------------------------------------------------------------------
-// Integration: one real replacement against a local MongoDB
+// Integration: isolated compare-and-replace against a local MongoDB
 // ---------------------------------------------------------------------------
+
+fn mongo_url_with_database(url: &str, database: &str) -> String {
+    let (address, query) = url.split_once('?').unwrap_or((url, ""));
+    let address = address.trim_end_matches('/');
+    if query.is_empty() {
+        format!("{address}/{database}")
+    } else {
+        format!("{address}/{database}?{query}")
+    }
+}
 
 async fn load_documents(
     adapter: &lazydb::db::mongodb::MongoAdapter,
     namespace: &MongoNamespace,
-) -> Vec<MongoDocument> {
+) -> Result<Vec<MongoDocument>, String> {
     adapter
         .find_page(&FindSpec::new(namespace.clone()))
         .await
-        .expect("read the demo collection")
-        .documents
-}
-
-fn by_id(documents: &[MongoDocument]) -> Vec<(mongodb::bson::Bson, String)> {
-    let mut entries = documents
-        .iter()
-        .map(|document| {
-            (
-                document.bson.get("_id").cloned().expect("_id"),
-                canonical_ejson(document),
-            )
-        })
-        .collect::<Vec<_>>();
-    entries.sort_by_key(|(id, _)| format!("{id:?}"));
-    entries
+        .map(|page| page.documents)
+        .map_err(|error| error.to_string())
 }
 
 #[tokio::test]
-async fn replacing_one_document_changes_only_that_document() {
-    let Some(url) = support::mongodb_standalone_url() else {
+async fn relation_document_compare_and_replace_preserves_concurrent_updates() {
+    let Some(server_url) = support::mongodb_standalone_url() else {
         return;
     };
-    // The relation needs a database on the profile, exactly like a profile the
-    // app builds from a URL the user typed.
-    let url = format!("{}/lazydb_demo", url.trim_end_matches('/'));
-    let imported = import_connection_url(&url, Some("mongodb-relation-edit")).expect("test url");
+    let database = format!("lazydb_relation_{}", Uuid::new_v4().simple());
+    let collection = format!("documents_{}", Uuid::new_v4().simple());
+    let connection_url = mongo_url_with_database(&server_url, &database);
+    let imported = import_connection_url(&connection_url, Some("mongodb-relation-cas"))
+        .expect("test MongoDB URL");
     let profile = imported.profile.clone();
     let connection = DatabaseConnection::connect(&profile, imported.transient_password.as_ref())
         .await
-        .expect("connect to the local test server");
+        .expect("connect to the standalone fixture");
     let DatabaseConnection::MongoDb(adapter) = connection else {
         panic!("expected a MongoDB adapter");
     };
-    let namespace = MongoNamespace::collection("lazydb_demo", "bikes");
-
-    let before = load_documents(&adapter, &namespace).await;
-    // The write target is the first document in `_id` order, which is also the
-    // first grid row because the relation page sorts by `_id`.
-    let mut ordered = before.clone();
-    ordered.sort_by_key(|document| format!("{:?}", document.bson.get("_id")));
-    let original = ordered
-        .first()
-        .cloned()
-        .expect("the collection is not empty");
-    let original_id = original.bson.get("_id").cloned().expect("_id");
-    let original_name = original
-        .bson
-        .get_str("name")
-        .expect("the demo documents are named")
-        .to_owned();
-    let edited_name = format!("{original_name} (editada)");
-    let untouched = by_id(&before)
-        .into_iter()
-        .filter(|(id, _)| *id != original_id)
+    let fixture_client = mongodb::Client::with_uri_str(&server_url)
+        .await
+        .expect("fixture client");
+    let namespace = MongoNamespace::collection(&database, &collection);
+    let fixture_collection = fixture_client
+        .database(&database)
+        .collection::<mongodb::bson::Document>(&collection);
+    let ids = (0..3)
+        .map(|_| mongodb::bson::oid::ObjectId::new())
+        .collect::<Vec<_>>();
+    let seed = ids
+        .iter()
+        .enumerate()
+        .map(|(index, id)| {
+            mongodb::bson::doc! {
+                "_id": id,
+                "name": format!("fixture-{index}"),
+                "stock": index as i32,
+                "nested": { "stable": true },
+            }
+        })
         .collect::<Vec<_>>();
 
-    // The reducer plans the write from the loaded page.
-    let mut app = App::new(vec![profile.clone()]);
-    let profile_id = profile.id;
-    let generation = match app.update(Action::RequestConnect(profile_id)).as_slice() {
-        [Command::Connect { generation, .. }] => *generation,
-        commands => panic!("unexpected commands: {commands:?}"),
-    };
-    let identity = ConnectionIdentity {
-        profile_id,
-        generation,
-    };
-    app.sessions
-        .register_attempt(ExecutionTarget::from_profile(&profile), identity);
-    let mut tab = RelationTab::with_descriptor(
-        RelationDescriptor::mongodb_collection(profile_id, &namespace).expect("descriptor"),
-        RelationView::Data,
-    );
-    let request = RelationRequest {
-        tab_id: tab.id,
-        console_id: tab.id,
-        tab_generation: tab.generation,
-        request_id: tab.next_request_id,
-        connection: identity,
-        relation: tab.descriptor.key.clone(),
-        kind: RelationRequestKind::Preview,
-        scope: profile.catalog_scope.clone(),
-        options: Default::default(),
-        page: PageRequest::first(PageSize::Ten),
-    };
-    tab.next_request_id += 1;
-    tab.data = RelationLoad::Loading {
-        request: request.clone(),
-        previous: None,
-    };
-    app.tabs.push(WorkspaceTab::Relation(tab));
-    app.active_tab = app.tabs.len() - 1;
-    app.focus = Focus::Results;
-    app.connection.profile_id = Some(profile_id);
-    app.connection.generation = generation;
-    app.connection.status = lazydb::model::workspace::ConnectionStatus::Connected;
+    let result = async {
+        fixture_collection
+            .insert_many(seed)
+            .await
+            .map_err(|error| error.to_string())?;
+        let before = load_documents(&adapter, &namespace).await?;
+        let original = before
+            .first()
+            .cloned()
+            .ok_or_else(|| "fixture collection is empty".to_owned())?;
+        let id = original
+            .bson
+            .get("_id")
+            .cloned()
+            .ok_or_else(|| "fixture document is missing _id".to_owned())?;
+        let expected = original.bson.clone();
+        let mut stale_replacement = expected.clone();
+        stale_replacement.insert("name", "stale-editor-value");
 
-    let loaded = adapter
-        .relation_page(&namespace, request.page)
-        .await
-        .expect("load the page through the relation preview path");
-    let target_row = loaded
-        .documents
-        .iter()
-        .position(|document| document.bson.get("_id") == Some(&original_id))
-        .expect("the grid page holds the target document");
-    let page_documents = loaded.documents.len();
-    let commands = app.update(Action::MongoRelationPreviewLoaded {
-        request,
-        preview: Box::new(loaded.preview),
-        documents: loaded.documents,
-    });
-    assert!(commands.is_empty(), "loading a page writes nothing");
-    active_relation_tab_mut(&mut app).grid.selected_row = target_row;
+        fixture_collection
+            .update_one(
+                mongodb::bson::doc! { "_id": id.clone() },
+                mongodb::bson::doc! { "$set": { "stock": 99_i32, "remote": true } },
+            )
+            .await
+            .map_err(|error| error.to_string())?;
+        let stale_outcome = adapter
+            .compare_and_replace_document_detailed(
+                &namespace,
+                id.clone(),
+                &expected,
+                stale_replacement,
+            )
+            .await
+            .map_err(|error| error.to_string())?;
+        if stale_outcome != (MongoMutationOutcome::Confirmed { affected: 0 }) {
+            return Err(format!(
+                "stale replacement was not rejected: {stale_outcome:?}"
+            ));
+        }
 
-    app.update(Action::RelationEditCell);
-    let mut edited = original.bson.clone();
-    edited.insert("name", edited_name.clone());
-    let edited_ejson = mongodb::bson::to_bson(&edited)
-        .expect("encode")
-        .into_canonical_extjson()
-        .to_string();
-    set_document_text(&mut app, &edited_ejson);
-    let commands = app.update(Action::RelationEditConfirm);
-    let replace = one_replace_command(&commands);
+        let after_conflict = load_documents(&adapter, &namespace).await?;
+        let current = after_conflict
+            .iter()
+            .find(|document| document.bson.get("_id") == Some(&id))
+            .ok_or_else(|| "concurrently updated fixture disappeared".to_owned())?;
+        if current.bson.get_i32("stock").ok() != Some(99)
+            || current.bson.get_bool("remote").ok() != Some(true)
+            || current.bson.get_str("name").ok() != expected.get_str("name").ok()
+        {
+            return Err(format!(
+                "concurrent values were overwritten: {:?}",
+                current.bson
+            ));
+        }
+        let current_document = current.bson.clone();
+        let mut replacement = current_document.clone();
+        replacement.insert("name", "edited-by-relation");
+        let saved = adapter
+            .compare_and_replace_document_detailed(
+                &namespace,
+                id.clone(),
+                &current_document,
+                replacement,
+            )
+            .await
+            .map_err(|error| error.to_string())?;
+        if saved != (MongoMutationOutcome::Confirmed { affected: 1 }) {
+            return Err(format!("unchanged document replacement failed: {saved:?}"));
+        }
 
-    // The runtime executes exactly that command against the adapter.
-    let outcome = adapter
-        .replace_document_by_id_detailed(
-            &replace.namespace,
-            replace.id.clone(),
-            replace.replacement,
-        )
-        .await
-        .expect("replace one document");
+        let after = load_documents(&adapter, &namespace).await?;
+        if after.len() != before.len() {
+            return Err(format!(
+                "unexpected document count after replacement: {}",
+                after.len()
+            ));
+        }
+        let edited = after
+            .iter()
+            .find(|document| document.bson.get("_id") == Some(&id))
+            .ok_or_else(|| "edited fixture disappeared".to_owned())?;
+        if edited.bson.get_str("name").ok() != Some("edited-by-relation")
+            || edited.bson.get_i32("stock").ok() != Some(99)
+            || edited.bson.get_bool("remote").ok() != Some(true)
+        {
+            return Err(format!(
+                "replacement lost expected values: {:?}",
+                edited.bson
+            ));
+        }
+        let before_untouched = before
+            .iter()
+            .filter(|document| document.bson.get("_id") != Some(&id))
+            .map(|document| {
+                (
+                    document.bson.get("_id").cloned().expect("fixture _id"),
+                    document.raw.as_bytes().to_vec(),
+                )
+            })
+            .collect::<Vec<_>>();
+        let after_untouched = after
+            .iter()
+            .filter(|document| document.bson.get("_id") != Some(&id))
+            .map(|document| {
+                (
+                    document.bson.get("_id").cloned().expect("fixture _id"),
+                    document.raw.as_bytes().to_vec(),
+                )
+            })
+            .collect::<Vec<_>>();
+        if before_untouched != after_untouched {
+            return Err("unrelated documents changed during replacement".to_owned());
+        }
+        Ok::<(), String>(())
+    }
+    .await;
 
-    // Re-read: only the edited document differs from the load.
-    let after = load_documents(&adapter, &namespace).await;
-    let edited_after = after
-        .iter()
-        .find(|document| document.bson.get("_id") == Some(&original_id))
-        .cloned();
-    let untouched_after = by_id(&after)
-        .into_iter()
-        .filter(|(id, _)| *id != original_id)
-        .collect::<Vec<_>>();
-
-    // The reload the reducer asks for shows the new values in the grid.
-    let commands = app.update(Action::MongoRelationDocumentReplaced {
-        tab_id: replace.tab_id,
-        tab_generation: replace.tab_generation,
-        id: replace.id.clone(),
-    });
-    let reload = mongo_preview_request(&commands);
-    let reloaded = adapter
-        .relation_page(&namespace, reload.page)
-        .await
-        .expect("reload the edited page");
-    app.update(Action::MongoRelationPreviewLoaded {
-        request: reload,
-        preview: Box::new(reloaded.preview),
-        documents: reloaded.documents,
-    });
-    let rows = row_values(&app);
-
-    // Restore the demo document before asserting, so a failed assertion can
-    // never leave the shared local collection modified.
-    let restored = adapter
-        .replace_document_by_id_detailed(&namespace, original_id.clone(), original.bson.clone())
-        .await
-        .expect("restore the demo document");
-    let final_state = load_documents(&adapter, &namespace).await;
-
-    assert_eq!(
-        restored,
-        MongoMutationOutcome::Confirmed { affected: 1 },
-        "the restore matched one document"
-    );
-    assert_eq!(before.len(), 3, "the demo collection holds three documents");
-    assert_eq!(page_documents, 3);
-    assert!(
-        original_name.contains("Ruedas"),
-        "the first document in _id order is the demo's Ruedas Pro, got {original_name:?}"
-    );
-    assert_eq!(
-        replace.id, original_id,
-        "the write is bounded to the original _id value"
-    );
-    assert_eq!(
-        outcome,
-        MongoMutationOutcome::Confirmed { affected: 1 },
-        "exactly one document matched the _id filter"
-    );
-    assert_eq!(after.len(), 3, "no document was inserted or deleted");
-    let edited_after = edited_after.expect("the edited document still exists");
-    let expected = MongoDocument {
-        bson: edited.clone(),
-        raw: mongodb::bson::raw::RawDocumentBuf::from_bytes(
-            mongodb::bson::to_vec(&edited).expect("encode"),
-        )
-        .expect("raw"),
-        editable: true,
-    };
-    assert_eq!(
-        canonical_ejson(&edited_after),
-        canonical_ejson(&expected),
-        "the edited document holds the saved values"
-    );
-    assert_ne!(
-        canonical_ejson(&edited_after),
-        canonical_ejson(&original),
-        "the replacement really changed the stored document"
-    );
-    assert_eq!(
-        untouched_after, untouched,
-        "the other two documents are byte-identical after the replace"
-    );
-    assert_eq!(
-        rows[target_row][1],
-        CellValue::Text(edited_name.clone()),
-        "the reloaded grid shows the saved value"
-    );
-    assert_eq!(
-        by_id(&final_state),
-        by_id(&before),
-        "the demo collection is restored to its original documents"
-    );
+    let cleanup = fixture_client.database(&database).drop().await;
     adapter.close().await;
+    fixture_client.shutdown().await;
+    cleanup.expect("drop the isolated MongoDB relation fixture");
+    result.unwrap_or_else(|error| panic!("MongoDB relation CAS fixture failed: {error}"));
 }
 
 // ---------------------------------------------------------------------------

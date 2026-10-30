@@ -221,6 +221,9 @@ pub struct DocumentEditorState {
     pub collection: String,
     /// The original BSON `_id` value, kept typed and never re-serialized.
     pub id: Bson,
+    /// The exact BSON document loaded when the modal opened, used for
+    /// compare-and-replace so edits from another client cannot be overwritten.
+    pub expected: Document,
     /// The whole document as Canonical Extended JSON.
     ///
     /// This text is the single source of truth of the modal: the field list is
@@ -253,6 +256,7 @@ impl DocumentEditorState {
             row,
             collection: namespace.full_name(),
             id,
+            expected: document.bson.clone(),
             input: JsonBuffer::new(ejson),
             error: None,
             saving: false,

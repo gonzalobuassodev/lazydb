@@ -66,8 +66,17 @@ pub struct MongoStructureSnapshot {
 /// Only top-level fields are reported: a nested document is described as a
 /// nested shape, so its keys never become top-level fields of the report.
 pub fn infer_schema(page: &MongoDocumentPage) -> MongoSchemaInference {
+    infer_schema_documents(&page.documents)
+}
+
+/// Infers the schema from the exact MongoDB documents retained by a loaded DATA
+/// page. This lets the DDL report share that snapshot without issuing another
+/// database read.
+pub fn infer_schema_documents(
+    documents: &[crate::db::mongodb::types::MongoDocument],
+) -> MongoSchemaInference {
     let mut fields: Vec<MongoFieldShape> = Vec::new();
-    for document in &page.documents {
+    for document in documents {
         for (name, value) in document.bson.iter() {
             let label = type_label(value);
             match fields.iter_mut().find(|field| &field.name == name) {
@@ -86,7 +95,7 @@ pub fn infer_schema(page: &MongoDocumentPage) -> MongoSchemaInference {
         }
     }
     MongoSchemaInference {
-        documents: page.documents.len(),
+        documents: documents.len(),
         fields,
     }
 }
