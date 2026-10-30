@@ -4484,6 +4484,8 @@ impl App {
                         | Action::RelationEditDocumentFieldEdit
                         | Action::RelationEditDocumentFieldApply
                         | Action::RelationEditDocumentFieldCancel
+                        | Action::RelationEditDocumentFieldFormat
+                        | Action::RelationEditDocumentFieldMoveLine(_)
                         | Action::RelationEditConfirm
                         | Action::RelationEditCancel
                         | Action::RelationVisualLine
@@ -18630,6 +18632,14 @@ impl App {
                 self.relation_document_field_cancel();
                 Vec::new()
             }
+            Action::RelationEditDocumentFieldFormat => {
+                self.relation_document_field_format();
+                Vec::new()
+            }
+            Action::RelationEditDocumentFieldMoveLine(delta) => {
+                self.relation_document_field_move_line(delta);
+                Vec::new()
+            }
             Action::RelationEditBackspace => {
                 self.relation_edit_apply_text_edit(
                     crate::model::text_input::TextInputEdit::Backspace,
@@ -28628,17 +28638,23 @@ impl App {
     }
 
     /// Moves the field-list cursor, clamped to the fields the document has.
+    ///
+    /// From a one-line field modal this leaves the field first, so `Up`/`Down`
+    /// walk the list instead of being swallowed by the editor.
     fn relation_document_field_move(&mut self, delta: isize) {
         if let Some(edit) = self.relation_session_mut()
             && let RelationGridMode::EditDocument(state) = &mut edit.mode
-            && state.field_edit.is_none()
         {
+            if state.field_edit_is_multiline() {
+                return;
+            }
+            state.leave_field_edit();
             state.move_field(delta);
         }
     }
 
-    /// Opens the single-line editor on the selected field, or reports why that
-    /// field cannot be edited (`_id` is immutable).
+    /// Opens the selected field in its own modal, or reports why that field
+    /// cannot be edited (`_id` is immutable).
     fn relation_document_field_begin_edit(&mut self) {
         if let Some(edit) = self.relation_session_mut()
             && let RelationGridMode::EditDocument(state) = &mut edit.mode
@@ -28651,7 +28667,9 @@ impl App {
     /// Applies the open field editor back into the document text.
     ///
     /// Only the EJSON text changes; the write still happens through the same
-    /// bounded replacement the whole-document save uses.
+    /// bounded replacement the whole-document save uses. The multi-line field
+    /// editor goes through this same path, so an array is parsed with the
+    /// field's own BSON type before it reaches the document text.
     fn relation_document_field_apply(&mut self) {
         if let Some(edit) = self.relation_session_mut()
             && let RelationGridMode::EditDocument(state) = &mut edit.mode
@@ -28674,6 +28692,28 @@ impl App {
         {
             state.field_edit = None;
             state.field_error = None;
+        }
+    }
+
+    /// Re-indents the open multi-line field value, reporting a refusal next to
+    /// the field so the editor stays open.
+    fn relation_document_field_format(&mut self) {
+        if let Some(edit) = self.relation_session_mut()
+            && let RelationGridMode::EditDocument(state) = &mut edit.mode
+        {
+            match state.format_field_edit() {
+                Ok(()) => state.field_error = None,
+                Err(message) => state.field_error = Some(message),
+            }
+        }
+    }
+
+    /// Moves the multi-line field cursor by whole lines.
+    fn relation_document_field_move_line(&mut self, delta: isize) {
+        if let Some(edit) = self.relation_session_mut()
+            && let RelationGridMode::EditDocument(state) = &mut edit.mode
+        {
+            state.move_field_edit_line(delta);
         }
     }
 
