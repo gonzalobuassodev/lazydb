@@ -650,6 +650,51 @@ mapper and are not documented as actions.
 Cell paste is one undoable edit and does not confirm the cell. The terminal must
 send a paste event; this is separate from forwarding Cmd as a keyboard modifier.
 
+### MongoDB document modal
+
+`e` on a MongoDB collection opens the modal on the document under the cursor. It
+opens on the `FIELDS` view; `Tab` switches to the whole document as Canonical
+Extended JSON and back.
+
+| FIELDS view | Behavior |
+| --- | --- |
+| `j/k`, arrows | Move between top-level fields |
+| `Enter` | Edit the selected field in its own modal |
+| `Ctrl-s` | Apply the document (one replacement bounded to `_id`) |
+| `Tab` | Switch to the whole document as EJSON |
+| `Esc` | Close the modal |
+
+`_id` is listed but never editable. The field list shows `[n items]` and
+`{n fields}` for the containers, the same shape the data grid uses for them.
+Every other field is edited in its own modal, which is sized to the value it
+holds, keeps a blank row above and below that value, and never covers the
+document modal.
+
+| Field modal, scalar | Behavior |
+| --- | --- |
+| `Enter`, `Ctrl-s` | Apply the field into the document |
+| `Up/Down` | Leave it for the previous or next field |
+| `Esc` | Back to the field list |
+
+A `date` field shows and edits as ISO-8601 UTC (`2026-11-08T00:00:00Z`), in the
+list and in the modal. Applying accepts that form, `2026-11-08 15:30`,
+`2026-11-08` and canonical EJSON, the ones without an offset as UTC; the document
+text keeps the canonical form the write path stores.
+
+An array or an embedded document opens the same modal as indented Canonical
+Extended JSON, one entry per line:
+
+| Field modal, array or document | Behavior |
+| --- | --- |
+| `Enter` | Insert a newline |
+| `Ctrl-s` | Apply the field into the document |
+| `Ctrl-f` | Re-indent the field text |
+| `Up/Down` | Move the cursor between lines |
+| `Esc` | Back to the field list |
+
+The EJSON view edits the whole document as text: `Enter` inserts a newline,
+`Ctrl-s` saves, `Ctrl-f` formats, `Up/Down` move the cursor and `Esc` cancels.
+
 ### Visual Line
 
 | Keys | Behavior |
