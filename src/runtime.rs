@@ -961,8 +961,8 @@ impl Runtime {
                 spec,
             } => self.load_mongo_page(tab_id, profile_id, generation, connection_generation, spec),
             Command::LoadMongoRelationPreview(request) => self.load_mongo_relation_preview(request),
-            Command::LoadMongoRelationStructure { request, from_page } => {
-                self.load_mongo_relation_structure(request, from_page)
+            Command::LoadMongoRelationStructure { request, documents } => {
+                self.load_mongo_relation_structure(request, documents)
             }
             Command::RunMongoConsole {
                 tab_id,
@@ -1134,6 +1134,7 @@ impl Runtime {
                 connection,
                 namespace,
                 id,
+                expected,
                 replacement,
             } => self.replace_mongo_relation_document(
                 tab_id,
@@ -1141,6 +1142,7 @@ impl Runtime {
                 connection,
                 namespace,
                 id,
+                expected,
                 replacement,
             ),
             Command::InsertMongoDocuments {
@@ -2077,6 +2079,7 @@ impl Runtime {
     /// The result carries the tab generation the save was planned under, so the
     /// reducer can drop a result that belongs to a page or connection that has
     /// already been replaced.
+    #[allow(clippy::too_many_arguments)]
     fn replace_mongo_relation_document(
         &mut self,
         tab_id: Uuid,
@@ -2084,6 +2087,7 @@ impl Runtime {
         connection: ConnectionIdentity,
         namespace: crate::db::mongodb::types::MongoNamespace,
         id: mongodb::bson::Bson,
+        expected: mongodb::bson::Document,
         replacement: mongodb::bson::Document,
     ) {
         let active = Arc::clone(&self.connection);
@@ -2093,7 +2097,12 @@ impl Runtime {
             let result = match database {
                 Some(DatabaseConnection::MongoDb(adapter)) => {
                     adapter
-                        .replace_document_by_id_detailed(&namespace, id.clone(), replacement)
+                        .compare_and_replace_document_detailed(
+                            &namespace,
+                            id.clone(),
+                            &expected,
+                            replacement,
+                        )
                         .await
                 }
                 _ => Err(DatabaseError::configuration(
@@ -2101,21 +2110,19 @@ impl Runtime {
                 )),
             };
             let action = match result {
-                Ok(outcome) => {
-                    match crate::db::mongodb::mutation::replace_outcome_message(&outcome) {
-                        None => Action::MongoRelationDocumentReplaced {
-                            tab_id,
-                            tab_generation,
-                            id,
-                        },
-                        Some(message) => Action::MongoRelationDocumentReplaceFailed {
-                            tab_id,
-                            tab_generation,
-                            id,
-                            message: message.to_owned(),
-                        },
-                    }
-                }
+                Ok(outcome) => match relation_replace_outcome_message(&outcome) {
+                    None => Action::MongoRelationDocumentReplaced {
+                        tab_id,
+                        tab_generation,
+                        id,
+                    },
+                    Some(message) => Action::MongoRelationDocumentReplaceFailed {
+                        tab_id,
+                        tab_generation,
+                        id,
+                        message: message.to_owned(),
+                    },
+                },
                 Err(error) => Action::MongoRelationDocumentReplaceFailed {
                     tab_id,
                     tab_generation,
@@ -2176,13 +2183,12 @@ impl Runtime {
     ///
     /// MongoDB has no DDL, so the report combines the metadata the server
     /// really reports with a schema inferred from the documents the DATA grid
-    /// loaded. The page is read again with the same `find` spec the grid used,
-    /// because the relation snapshot keeps the mapped grid rows, not the BSON
-    /// values whose types the inference needs.
+    /// loaded. The exact page documents travel with the command, so opening the
+    /// structure view does not issue another find or infer from a newer page.
     fn load_mongo_relation_structure(
         &mut self,
         request: crate::model::relation::RelationRequest,
-        from_page: Option<crate::model::pagination::PageRequest>,
+        documents: Option<Vec<crate::db::mongodb::types::MongoDocument>>,
     ) {
         let Some(namespace) = crate::db::mongodb::types::MongoNamespace::from_native_path(
             &request.relation.object_id.native_path,
@@ -2203,27 +2209,9 @@ impl Runtime {
                 Some(DatabaseConnection::MongoDb(adapter)) => {
                     match adapter.collection_structure(&namespace).await {
                         Ok(metadata) => {
-                            let schema = match from_page {
-                                Some(page) => {
-                                    let spec = crate::db::mongodb::read::relation_find_spec(
-                                        &namespace, page,
-                                    );
-                                    match adapter.find_page(&spec).await {
-                                        Ok(loaded) => Some(
-                                            crate::model::mongodb_structure::infer_schema(&loaded),
-                                        ),
-                                        Err(error) => {
-                                            let _ =
-                                                sender.send(Action::MongoRelationStructureLoaded {
-                                                    request,
-                                                    result: Err(error.to_string()),
-                                                });
-                                            return;
-                                        }
-                                    }
-                                }
-                                None => None,
-                            };
+                            let schema = documents
+                                .as_deref()
+                                .map(crate::model::mongodb_structure::infer_schema_documents);
                             Ok(Box::new(
                                 crate::model::mongodb_structure::MongoStructureSnapshot {
                                     metadata,
@@ -8542,6 +8530,22 @@ fn connection_attempt_is_current(
 ) -> bool {
     let attempts = attempts.lock().expect("connection attempt mutex poisoned");
     attempts.is_current(expected)
+}
+
+fn relation_replace_outcome_message(
+    outcome: &crate::db::mongodb::mutation::MongoMutationOutcome,
+) -> Option<&'static str> {
+    use crate::db::mongodb::mutation::MongoMutationOutcome;
+
+    match outcome {
+        MongoMutationOutcome::Confirmed { affected: 1 } => None,
+        MongoMutationOutcome::Confirmed { .. } => {
+            Some("the document changed or was deleted since it was loaded; reload before saving")
+        }
+        MongoMutationOutcome::Partial { .. } | MongoMutationOutcome::Unknown { .. } => {
+            Some("MongoDB replacement outcome is unknown; reload the page before retrying")
+        }
+    }
 }
 
 async fn active_database_for_target(

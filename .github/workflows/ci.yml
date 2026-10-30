@@ -343,14 +343,14 @@ jobs:
             sleep 2
           done
       - name: Build MongoDB integration tests
-        run: python3 scripts/ci/run-with-timeout.py 600 -- cargo +1.94.0 test --locked --test mongodb_connection --test mongodb_catalog --test mongodb_cursor --test mongodb_console --test mongodb_transactions --test mongodb_cancellation --test mongodb_mutation --test mongodb_management --test mongodb_monitoring --test mongodb_principals --no-run
+        run: python3 scripts/ci/run-with-timeout.py 600 -- cargo +1.94.0 test --locked --test mongodb_relation --test mongodb_explorer --test mongodb_conflicts --test mongodb_shutdown --test mongodb_connection --test mongodb_catalog --test mongodb_cursor --test mongodb_console --test mongodb_transactions --test mongodb_cancellation --test mongodb_mutation --test mongodb_management --test mongodb_monitoring --test mongodb_principals --no-run
       - name: MongoDB integration tests
         env:
           LAZYDB_REQUIRE_DATABASE_TESTS: "1"
           LAZYDB_TEST_MONGODB_URL: mongodb://127.0.0.1:27017/?replicaSet=lazydb-rs&directConnection=true
           LAZYDB_TEST_MONGODB_STANDALONE_URL: mongodb://127.0.0.1:27018
           LAZYDB_TEST_MONGODB_PRINCIPALS_URL: mongodb://127.0.0.1:27019
-        run: python3 scripts/ci/run-with-timeout.py 600 -- cargo +1.94.0 test --locked --test mongodb_connection --test mongodb_catalog --test mongodb_cursor --test mongodb_console --test mongodb_transactions --test mongodb_cancellation --test mongodb_mutation --test mongodb_management --test mongodb_monitoring --test mongodb_principals -- --test-threads=1
+        run: python3 scripts/ci/run-with-timeout.py 600 -- cargo +1.94.0 test --locked --test mongodb_relation --test mongodb_explorer --test mongodb_conflicts --test mongodb_shutdown --test mongodb_connection --test mongodb_catalog --test mongodb_cursor --test mongodb_console --test mongodb_transactions --test mongodb_cancellation --test mongodb_mutation --test mongodb_management --test mongodb_monitoring --test mongodb_principals -- --test-threads=1
       - name: MongoDB service diagnostics
         if: failure()
         run: |
