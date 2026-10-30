@@ -168,6 +168,9 @@ jobs:
           cache-on-failure: true
           save-if: ${{ github.ref == 'refs/heads/main' }}
       - run: python3 scripts/ci/run-with-timeout.py 600 -- cargo +1.94.0 clippy --locked --all-targets --all-features --timings -- -D warnings
+      - name: Build test binaries (macOS)
+        if: runner.os == 'macOS'
+        run: python3 scripts/ci/run-with-timeout.py 1800 -- cargo +1.94.0 test --locked --all-targets --all-features --timings --no-run
       - run: python3 scripts/ci/run-with-timeout.py 600 -- cargo +1.94.0 test --locked --all-targets --all-features --timings
       - name: Check macOS binary dependencies
         if: runner.os == 'macOS'
