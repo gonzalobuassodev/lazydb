@@ -1872,11 +1872,11 @@ pub enum Command {
     /// Loads one page of documents for a MongoDB relation tab.
     LoadMongoRelationPreview(crate::model::relation::RelationRequest),
     /// Loads the structure report of a MongoDB relation tab: the collection
-    /// metadata plus, when `from_page` is set, the schema inferred from the
-    /// page the DATA grid is showing.
+    /// metadata plus, when `documents` is set, the schema inferred from the
+    /// exact BSON page the DATA grid is showing.
     LoadMongoRelationStructure {
         request: crate::model::relation::RelationRequest,
-        from_page: Option<crate::model::pagination::PageRequest>,
+        documents: Option<Vec<crate::db::mongodb::types::MongoDocument>>,
     },
     /// Replaces the one document edited in a MongoDB relation tab, bounded to
     /// the original `_id` value the modal was opened with.
@@ -1886,6 +1886,7 @@ pub enum Command {
         connection: ConnectionIdentity,
         namespace: crate::db::mongodb::types::MongoNamespace,
         id: mongodb::bson::Bson,
+        expected: mongodb::bson::Document,
         replacement: mongodb::bson::Document,
     },
     RunMongoConsole {

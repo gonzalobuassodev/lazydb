@@ -28475,6 +28475,9 @@ impl App {
             return Err("the document changed since the modal opened; reload the page".to_owned());
         }
         let replacement = state.replacement_document()?;
+        if replacement.get("_id") != Some(&state.id) {
+            return Err("the replacement document must keep the original _id".to_owned());
+        }
         let connection = match &tab.data {
             RelationLoad::Ready(snapshot) => Some(snapshot.attribution.connection),
             _ => None,
@@ -28491,6 +28494,7 @@ impl App {
             connection,
             namespace,
             id: state.id.clone(),
+            expected: state.expected.clone(),
             replacement,
         })
     }
@@ -28504,6 +28508,29 @@ impl App {
                 return Vec::new();
             }
         };
+        let unchanged_ejson = self
+            .tabs
+            .get(self.active_tab)
+            .and_then(|tab| match tab {
+                WorkspaceTab::Relation(tab) => tab.edit.as_ref(),
+                _ => None,
+            })
+            .is_some_and(|edit| {
+                matches!(
+                    &edit.mode,
+                    RelationGridMode::EditDocument(state)
+                        if state.view == DocumentEditorView::Ejson
+                )
+            });
+        if unchanged_ejson && replacement.expected == replacement.replacement {
+            if let Some(WorkspaceTab::Relation(tab)) = self.tabs.get_mut(self.active_tab)
+                && let Some(edit) = tab.edit.as_mut()
+            {
+                edit.mode = RelationGridMode::Browse;
+            }
+            self.notify_info("Relation", "No document changes to save");
+            return Vec::new();
+        }
         if let Some(WorkspaceTab::Relation(tab)) = self.tabs.get_mut(self.active_tab)
             && let Some(edit) = tab.edit.as_mut()
             && let RelationGridMode::EditDocument(state) = &mut edit.mode
@@ -28517,6 +28544,7 @@ impl App {
             connection: replacement.connection,
             namespace: replacement.namespace,
             id: replacement.id,
+            expected: replacement.expected,
             replacement: replacement.replacement,
         }]
     }
@@ -30376,6 +30404,7 @@ impl App {
             return Vec::new();
         };
         let should_load = refresh
+            || tab.ddl_refresh_needed
             || matches!(
                 tab.ddl,
                 RelationLoad::Empty | RelationLoad::Cancelled { .. }
@@ -30387,9 +30416,11 @@ impl App {
             tab.pagination.page_size,
             tab.pagination.offset,
         );
-        // The schema is inferred from the page the grid shows; with no loaded
-        // page the report carries metadata only instead of guessing.
-        let from_page = matches!(tab.data, RelationLoad::Ready(_)).then_some(page);
+        // Keep the exact BSON source for the DATA grid's schema report. The
+        // metadata request must not fetch a newer page in the background.
+        let documents = matches!(tab.data, RelationLoad::Ready(_))
+            .then(|| tab.mongodb_documents.clone())
+            .flatten();
         let previous_request = pending_relation_request(&tab.ddl);
         let previous = match std::mem::replace(&mut tab.ddl, RelationLoad::Empty) {
             RelationLoad::Ready(snapshot) => Some(snapshot),
@@ -30418,7 +30449,7 @@ impl App {
         previous_request
             .map(Command::CancelRelationRequest)
             .into_iter()
-            .chain([Command::LoadMongoRelationStructure { request, from_page }])
+            .chain([Command::LoadMongoRelationStructure { request, documents }])
             .collect()
     }
 
@@ -30450,6 +30481,7 @@ impl App {
                 && matches!(tab.data, RelationLoad::Ready(_))
             {
                 tab.mongodb_documents = Some(documents);
+                tab.ddl_refresh_needed = true;
             }
         }
         if self.active_tab_id() == Some(tab_id) {
@@ -30500,6 +30532,7 @@ impl App {
                                 scope: request.scope.clone(),
                             },
                         });
+                        tab.ddl_refresh_needed = false;
                         let _ = self
                             .editor
                             .set_read_only_text(tab.ddl_editor_id, &text, false);
@@ -30633,6 +30666,7 @@ impl App {
                             scope: request.scope.clone(),
                         },
                     });
+                    tab.ddl_refresh_needed = false;
                     let _ = self
                         .editor
                         .set_read_only_text(tab.ddl_editor_id, &ddl_text, false);
@@ -30844,6 +30878,7 @@ struct MongoDocumentReplacement {
     connection: ConnectionIdentity,
     namespace: crate::db::mongodb::types::MongoNamespace,
     id: mongodb::bson::Bson,
+    expected: mongodb::bson::Document,
     replacement: mongodb::bson::Document,
 }
 
