@@ -361,7 +361,7 @@ jobs:
           CARGO_INCREMENTAL: '0'
           CARGO_BUILD_JOBS: '2'
         run: |
-          python3 scripts/ci/test-mongodb-tui-exit.py --binary target/debug/lazydb --compose-file docker-compose.mongodb.yml --service mongodb-standalone --uri mongodb://127.0.0.1:27018
+          python3 scripts/ci/test-mongodb-tui-exit.py --binary target/debug/lazydb --compose-file docker-compose.mongodb.yml --service mongodb-standalone --uri mongodb://127.0.0.1:27018/lazydb_exit
       - name: MongoDB service diagnostics
         if: failure()
         run: |
