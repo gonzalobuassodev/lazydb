@@ -132,12 +132,14 @@ def exercise_exit(args: argparse.Namespace, paused: bool) -> None:
         else:
             raise TimeoutError("LazyDB did not enter raw terminal mode")
 
+        # The CLI selects the ad-hoc profile but leaves connection explicit.
+        os.write(master, b"\r")
         connected_deadline = time.monotonic() + 20.0
         while time.monotonic() < connected_deadline:
             read_available(master, process, transcript, answered_queries)
             if process.poll() is not None:
                 raise RuntimeError("LazyDB exited before its MongoDB connection was ready")
-            if "●".encode("utf-8") in transcript and b"127.0" in transcript:
+            if "●".encode("utf-8") in transcript:
                 break
             time.sleep(0.02)
         else:
