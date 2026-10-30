@@ -2057,6 +2057,448 @@ fn the_id_field_cannot_be_edited_from_the_field_list() {
 }
 
 // ---------------------------------------------------------------------------
+// T6 (issue #6): a container field is edited in its own multi-line modal
+// ---------------------------------------------------------------------------
+
+/// Opens the field editor on `name` and returns the text it starts with.
+fn open_field_editor(app: &mut App, name: &str) -> String {
+    select_field(app, name);
+    app.update(Action::RelationEditDocumentFieldEdit);
+    let state = document_state(app);
+    let field = state
+        .field_edit
+        .clone()
+        .unwrap_or_else(|| panic!("the {name} field editor must open"));
+    assert_eq!(field.name, name);
+    field.input.value().to_owned()
+}
+
+/// Replaces the open field editor's text the way typing does.
+fn retype_field_editor(app: &mut App, text: &str) {
+    app.update(Action::RelationEditDeleteToStart);
+    for character in text.chars() {
+        app.update(Action::RelationEditInsert(character));
+    }
+}
+
+fn document_field_text(app: &App) -> String {
+    document_state(app)
+        .field_edit
+        .as_ref()
+        .map(|field| field.input.value().to_owned())
+        .unwrap_or_default()
+}
+
+#[test]
+fn a_container_field_opens_on_indented_ejson_in_its_own_modal() {
+    let (mut app, _request) = mongo_app_with_page(typed_documents());
+    open_fields_view(&mut app);
+
+    let text = open_field_editor(&mut app, "geometry");
+
+    assert_eq!(
+        document_state(&app).view,
+        DocumentEditorView::Fields,
+        "the field list stays the surface underneath"
+    );
+    assert!(
+        document_state(&app)
+            .field_edit
+            .as_ref()
+            .is_some_and(|field| field.input.is_multiline()),
+        "a document field opens the multi-line editor"
+    );
+    assert!(
+        text.lines().count() > 1,
+        "the value must be indented across lines, got {text:?}"
+    );
+    for expected in [
+        "\n",
+        "  \"wheels\": {",
+        "    \"$numberInt\": \"2\"",
+        "  \"frame\": \"carbon\"",
+        "\n}",
+    ] {
+        assert!(
+            text.contains(expected),
+            "the indented EJSON must contain {expected:?}, got {text:?}"
+        );
+    }
+
+    let output = render_app(&app, 200, 40);
+    assert!(
+        output.contains("EDIT FIELD geometry") && output.contains("document"),
+        "the field modal names the field and its BSON type, got:\n{output}"
+    );
+    assert!(
+        output.contains(RUEDAS_ID),
+        "the document header naming the _id stays visible, got:\n{output}"
+    );
+    assert!(
+        output.contains("Ctrl-F format") && output.contains("Ctrl-S apply"),
+        "the field modal shows its own keys, got:\n{output}"
+    );
+    assert!(
+        output
+            .lines()
+            .any(|line| line.contains("\"frame\": \"carbon\"")),
+        "a nested document renders one property per line, got:\n{output}"
+    );
+
+    // The same modal renders an array with one element per line.
+    app.update(Action::RelationEditDocumentFieldCancel);
+    open_field_editor(&mut app, "tags");
+    let output = render_app(&app, 200, 40);
+    assert!(
+        output.contains("EDIT FIELD tags · array"),
+        "the field modal names the array type, got:\n{output}"
+    );
+    for element in ["\"road\",", "\"fast\""] {
+        assert!(
+            output.lines().any(|line| line.contains(element)),
+            "every array element must render on its own line, missing {element}, got:\n{output}"
+        );
+    }
+}
+
+/// A document whose `tags` array is long enough that the field modal has to cap
+/// its own height instead of growing over the document modal.
+fn document_with_long_array() -> String {
+    let items = (0..40)
+        .map(|index| format!("\"item-{index:02}\""))
+        .collect::<Vec<_>>()
+        .join(",\n    ");
+    format!("{{\n  \"_id\": {{\"$oid\": \"{RUEDAS_ID}\"}},\n  \"tags\": [\n    {items}\n  ]\n}}")
+}
+
+#[test]
+fn every_field_opens_in_its_own_modal() {
+    let (mut app, _request) = mongo_app_with_page(typed_documents());
+    open_fields_view(&mut app);
+
+    let text = open_field_editor(&mut app, "name");
+    assert_eq!(
+        text, "Ruedas Pro",
+        "a scalar opens on the value the field list already shows"
+    );
+    assert!(
+        !document_state(&app)
+            .field_edit
+            .as_ref()
+            .is_some_and(|field| field.input.is_multiline()),
+        "a scalar stays a one-line value inside the modal"
+    );
+    let output = render_app(&app, 200, 40);
+    assert!(
+        output.contains("EDIT FIELD name · string"),
+        "the scalar field opens its own modal, got:\n{output}"
+    );
+    assert!(
+        output
+            .lines()
+            .any(|line| line.contains("Enter apply field  Esc back to fields")),
+        "the one-line field modal shows its own keys uncut, got:\n{output}"
+    );
+
+    // Up walks out of the modal and moves the list cursor by one field.
+    let index = field_names(&app)
+        .iter()
+        .position(|field| field == "name")
+        .expect("name is a field");
+    app.update(Action::RelationEditDocumentFieldMove(1));
+    let state = document_state(&app);
+    assert!(
+        state.field_edit.is_none(),
+        "moving leaves the one-line field modal"
+    );
+    assert_eq!(
+        state.selected_field_index(field_names(&app).len()),
+        index + 1,
+        "the same key press moves the list cursor"
+    );
+}
+
+/// The rows the field modal keeps blank around its value: the margin under the
+/// document header and the margin over the footer. It also reports the value
+/// rows, which must sit between the two margins.
+#[derive(Debug)]
+struct FieldModalLayout {
+    above: String,
+    below: String,
+    value_rows: usize,
+}
+
+fn field_modal_layout(output: &str) -> FieldModalLayout {
+    let lines = output.lines().collect::<Vec<_>>();
+    let title_row = lines
+        .iter()
+        .position(|line| line.contains("EDIT FIELD "))
+        .expect("the field modal is rendered");
+    let title = lines[title_row].chars().collect::<Vec<_>>();
+    let left = title
+        .iter()
+        .position(|cell| *cell == '╭')
+        .expect("the field modal has a left border");
+    let right = title
+        .iter()
+        .rposition(|cell| *cell == '╮')
+        .expect("the field modal has a right border");
+    let inside = |row: usize| {
+        lines[row]
+            .chars()
+            .skip(left + 1)
+            .take(right - left - 1)
+            .collect::<String>()
+    };
+    let bottom_row = (title_row + 1..lines.len())
+        .find(|row| lines[*row].chars().nth(left) == Some('╰'))
+        .expect("the field modal has a bottom border");
+    let rows = (title_row + 1..bottom_row)
+        .filter(|row| !inside(*row).trim().is_empty())
+        .collect::<Vec<_>>();
+    assert!(
+        rows.len() >= 3,
+        "the modal holds a header, the value and a footer, got {rows:?}"
+    );
+    FieldModalLayout {
+        above: inside(rows[0] + 1),
+        below: inside(rows[rows.len() - 1] - 1),
+        value_rows: rows.len() - 2,
+    }
+}
+
+#[test]
+fn the_field_modal_keeps_a_blank_row_around_the_value() {
+    let (mut app, _request) = mongo_app_with_page(typed_documents());
+    open_fields_view(&mut app);
+
+    open_field_editor(&mut app, "name");
+    let output = render_app(&app, 200, 40);
+    let layout = field_modal_layout(&output);
+    assert!(
+        layout.value_rows >= 1,
+        "the one-line value sits between both margins, got {layout:?}"
+    );
+    assert_eq!(
+        layout.above.trim(),
+        "",
+        "a one-line field keeps a blank row above its value, got {:?}",
+        layout.above
+    );
+    assert_eq!(
+        layout.below.trim(),
+        "",
+        "a one-line field keeps a blank row below its value, got {:?}",
+        layout.below
+    );
+
+    app.update(Action::RelationEditDocumentFieldCancel);
+    open_field_editor(&mut app, "tags");
+    let output = render_app(&app, 200, 40);
+    let layout = field_modal_layout(&output);
+    assert_eq!(
+        layout.value_rows, 4,
+        "the whole four-line array sits between both margins"
+    );
+    assert_eq!(
+        layout.above.trim(),
+        "",
+        "a multi-line field keeps a blank row above its value, got {:?}",
+        layout.above
+    );
+    assert_eq!(
+        layout.below.trim(),
+        "",
+        "a multi-line field keeps a blank row below its value, got {:?}",
+        layout.below
+    );
+}
+
+#[test]
+fn the_field_modal_stays_smaller_than_the_document_modal() {
+    let (mut app, _request) = mongo_app_with_page(typed_documents());
+    open_fields_view(&mut app);
+    set_document_text(&mut app, &document_with_long_array());
+
+    let text = open_field_editor(&mut app, "tags");
+    assert_eq!(
+        text.lines().count(),
+        42,
+        "the whole array is in the editor, one element per line"
+    );
+    let output = render_app(&app, 200, 40);
+    assert!(
+        output.contains("EDIT FIELD tags · array"),
+        "the field modal names the field, got:\n{output}"
+    );
+    assert!(
+        output.contains("EDIT DOCUMENT"),
+        "the document modal keeps its own title, so the field modal never covers it, got:\n{output}"
+    );
+    assert!(
+        output
+            .lines()
+            .any(|line| line.contains("Ctrl-F format") && line.contains("Esc back to fields")),
+        "the field modal keeps its keys on one line, got:\n{output}"
+    );
+}
+
+#[test]
+fn applying_a_multiline_container_field_writes_the_whole_field() {
+    let (mut app, _request) = mongo_app_with_page(typed_documents());
+    open_fields_view(&mut app);
+    let ejson = document_state(&app).input.value().to_owned();
+    open_field_editor(&mut app, "tags");
+
+    retype_field_editor(&mut app, "[\n  \"road\",\n  \"gravel\"\n]");
+    let commands = app.update(Action::RelationEditDocumentFieldApply);
+
+    assert!(
+        commands.is_empty(),
+        "applying a field writes nothing by itself, got {commands:?}"
+    );
+    let state = document_state(&app);
+    assert!(
+        state.field_edit.is_none(),
+        "applying closes the field modal"
+    );
+    assert_eq!(state.field_error, None);
+    assert_ne!(
+        state.input.value(),
+        ejson,
+        "the document text was rewritten"
+    );
+    let document = state
+        .replacement_document()
+        .expect("the document is still valid");
+    assert_eq!(
+        document.get("tags"),
+        Some(&mongodb::bson::Bson::Array(vec![
+            mongodb::bson::Bson::String("road".into()),
+            mongodb::bson::Bson::String("gravel".into()),
+        ])),
+        "the newline-separated array is parsed as one array value"
+    );
+    assert_eq!(
+        document.get("_id"),
+        Some(&object_id(RUEDAS_ID)),
+        "editing a container keeps the same _id"
+    );
+    assert_eq!(
+        field_value(&app, "geometry").as_deref(),
+        Some(r#"{"wheels":{"$numberInt":"2"},"frame":"carbon"}"#),
+        "the other container is untouched by this edit"
+    );
+}
+
+#[test]
+fn an_invalid_multiline_field_value_is_refused_and_keeps_the_modal_open() {
+    let (mut app, _request) = mongo_app_with_page(typed_documents());
+    open_fields_view(&mut app);
+    let ejson = document_state(&app).input.value().to_owned();
+    open_field_editor(&mut app, "tags");
+
+    retype_field_editor(&mut app, "[\n  \"road\",\n");
+    let commands = app.update(Action::RelationEditDocumentFieldApply);
+
+    assert!(
+        commands.is_empty(),
+        "an invalid field value must never reach the database, got {commands:?}"
+    );
+    let state = document_state(&app);
+    let error = state.field_error.clone().unwrap_or_default();
+    assert!(
+        error.contains("invalid Canonical EJSON"),
+        "the refusal names the problem, got {error:?}"
+    );
+    assert!(
+        state
+            .field_edit
+            .as_ref()
+            .is_some_and(|field| field.input.is_multiline()),
+        "a refused value keeps the multi-line editor open so it can be corrected"
+    );
+    assert_eq!(
+        state.input.value(),
+        ejson,
+        "a refused value leaves the document text unchanged"
+    );
+}
+
+#[test]
+fn the_multiline_field_editor_formats_its_text_on_demand() {
+    let (mut app, _request) = mongo_app_with_page(typed_documents());
+    open_fields_view(&mut app);
+    open_field_editor(&mut app, "tags");
+    retype_field_editor(&mut app, r#"["road","gravel"]"#);
+
+    let commands = app.update(Action::RelationEditDocumentFieldFormat);
+
+    assert!(
+        commands.is_empty(),
+        "formatting writes nothing, got {commands:?}"
+    );
+    let state = document_state(&app);
+    assert_eq!(state.field_error, None);
+    assert_eq!(
+        document_field_text(&app),
+        "[\n  \"road\",\n  \"gravel\"\n]",
+        "Ctrl-F re-indents the value in the field modal"
+    );
+}
+
+#[test]
+fn leaving_the_multiline_field_editor_with_escape_keeps_the_document_text() {
+    let (mut app, _request) = mongo_app_with_page(typed_documents());
+    open_fields_view(&mut app);
+    let ejson = document_state(&app).input.value().to_owned();
+    open_field_editor(&mut app, "tags");
+    retype_field_editor(&mut app, "[\n  \"discarded\"\n]");
+
+    let commands = app.update(Action::RelationEditDocumentFieldCancel);
+
+    assert!(
+        commands.is_empty(),
+        "leaving the field modal writes nothing, got {commands:?}"
+    );
+    let state = document_state(&app);
+    assert!(state.field_edit.is_none());
+    assert_eq!(state.field_error, None);
+    assert_eq!(
+        state.view,
+        DocumentEditorView::Fields,
+        "the field list is the surface left behind"
+    );
+    assert_eq!(
+        state.input.value(),
+        ejson,
+        "an abandoned field edit never touches the document text"
+    );
+}
+
+#[test]
+fn the_field_list_shows_a_shape_marker_for_container_fields() {
+    let (mut app, _request) = mongo_app_with_page(typed_documents());
+    open_fields_view(&mut app);
+
+    let output = render_app(&app, 200, 40);
+
+    assert!(
+        output.contains("[2 items]") && output.contains("{2 fields}"),
+        "containers collapse to a shape marker instead of clipped JSON, got:\n{output}"
+    );
+    assert!(
+        !output.contains(r#"["road","fast"]"#),
+        "the raw compact array is not shown in the list, got:\n{output}"
+    );
+    assert_eq!(
+        field_value(&app, "tags").as_deref(),
+        Some(r#"["road","fast"]"#),
+        "the value the editors start from is still the compact EJSON"
+    );
+}
+
+// ---------------------------------------------------------------------------
 // Integration: isolated compare-and-replace against a local MongoDB
 // ---------------------------------------------------------------------------
 
