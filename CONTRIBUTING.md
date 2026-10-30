@@ -3,6 +3,22 @@
 LazyDB is in an early architecture-sensitive phase. Small, tested changes are
 preferred over broad abstractions or controls for unfinished features.
 
+## Branches and Pull Requests
+
+- One branch carries one pull request, and merging deletes the branch. The
+  repository deletes the head branch automatically, so never keep a second
+  branch holding the same work: a squash or a cherry-pick leaves the original
+  commits permanently unmerged and they turn into conflicts later.
+- When `develop` moves, merge `develop` into your branch. Never cut a new branch
+  for a change that already has one; a stale branch is a conflict nobody asked
+  for.
+- Rebase is the only merge method enabled. Squash and merge commits are off, so
+  the commits a pull request advertises are the commits that land.
+- File the issue first. A branch without an issue and without a pull request is
+  work that disappears with the branch.
+- Land small. A feature that arrives as a single commit of several thousand
+  lines cannot be reviewed, and it is the change most likely to be re-cut.
+
 ## Local Checks
 
 ```bash
