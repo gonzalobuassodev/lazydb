@@ -7492,6 +7492,12 @@ impl Runtime {
             task.abort();
             let _ = task.await;
         }
+        if let Ok(mut workers) = self.mongo_transaction_workers.lock() {
+            // The user has already chosen Abandon in the quit review. Dropping
+            // these senders releases local session handles without claiming a
+            // confirmed server-side abort or sending a commit.
+            workers.clear();
+        }
         if let Some(queue) = self.workspace_save.as_mut()
             && let Some(task) = queue.active.take()
         {
@@ -7523,15 +7529,37 @@ impl Runtime {
                 .send(crate::db::transaction::TransactionRequest::Shutdown);
             let _ = entry.worker_handle.await;
         }
-        for connection in self
+        let databases = self
             .connection
             .lock()
             .await
             .drain()
-            .map(|(_, connection)| connection)
-        {
-            connection.database.close().await;
-        }
+            .map(|(_, connection)| connection.database)
+            .collect::<Vec<_>>();
+        let mongo_adapters = databases
+            .iter()
+            .filter_map(|database| match database {
+                DatabaseConnection::MongoDb(adapter) => Some(adapter.clone()),
+                _ => None,
+            })
+            .collect::<Vec<_>>();
+        let deadline = tokio::time::Instant::now() + Duration::from_secs(1);
+        let close_mongo = async move {
+            futures_util::future::join_all(
+                mongo_adapters
+                    .into_iter()
+                    .map(|adapter| adapter.close_until(deadline)),
+            )
+            .await;
+        };
+        let close_other = async move {
+            for database in databases {
+                if !matches!(database, DatabaseConnection::MongoDb(_)) {
+                    database.close().await;
+                }
+            }
+        };
+        tokio::join!(close_mongo, close_other);
         for database in self.duckdb_sessions.lock().await.remove_all() {
             database.close().await;
         }
@@ -9065,12 +9093,12 @@ pub async fn run_tui(cli: Cli) -> Result<RunOutcome> {
     }
     .await;
 
-    runtime.shutdown().await;
+    drop(terminal);
     if let Some(theme_task) = theme_task.take() {
         theme_task.abort();
         let _ = theme_task.await;
     }
-    drop(terminal);
+    runtime.shutdown().await;
     result.map(|restart_path| match restart_path {
         Some(executable) => RunOutcome::Restart { executable },
         None => RunOutcome::Exit,
