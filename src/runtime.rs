@@ -1143,6 +1143,19 @@ impl Runtime {
                 id,
                 replacement,
             ),
+            Command::DeleteMongoRelationDocument {
+                tab_id,
+                tab_generation,
+                connection,
+                namespace,
+                id,
+            } => self.delete_mongo_relation_document(
+                tab_id,
+                tab_generation,
+                connection,
+                namespace,
+                id,
+            ),
             Command::InsertMongoDocuments {
                 tab_id,
                 profile_id,
@@ -2117,6 +2130,61 @@ impl Runtime {
                     }
                 }
                 Err(error) => Action::MongoRelationDocumentReplaceFailed {
+                    tab_id,
+                    tab_generation,
+                    id,
+                    message: error.message,
+                },
+            };
+            let _ = sender.send(action);
+        }));
+    }
+
+    /// Deletes the one document a MongoDB relation tab's cursor is on, bounded
+    /// to the `_id` its grid row was loaded with.
+    ///
+    /// The result carries the tab generation the delete was planned under, so
+    /// the reducer can drop a result that belongs to a page or connection that
+    /// has already been replaced.
+    fn delete_mongo_relation_document(
+        &mut self,
+        tab_id: Uuid,
+        tab_generation: u64,
+        connection: ConnectionIdentity,
+        namespace: crate::db::mongodb::types::MongoNamespace,
+        id: mongodb::bson::Bson,
+    ) {
+        let active = Arc::clone(&self.connection);
+        let sender = self.event_sender.clone();
+        self.background_tasks.push(tokio::spawn(async move {
+            let database = active_database(active, connection).await;
+            let result = match database {
+                Some(DatabaseConnection::MongoDb(adapter)) => {
+                    adapter
+                        .delete_document_by_id_detailed(&namespace, id.clone())
+                        .await
+                }
+                _ => Err(DatabaseError::configuration(
+                    "MongoDB connection is not active",
+                )),
+            };
+            let action = match result {
+                Ok(outcome) => {
+                    match crate::db::mongodb::mutation::delete_outcome_message(&outcome) {
+                        None => Action::MongoRelationDocumentDeleted {
+                            tab_id,
+                            tab_generation,
+                            id,
+                        },
+                        Some(message) => Action::MongoRelationDocumentDeleteFailed {
+                            tab_id,
+                            tab_generation,
+                            id,
+                            message: message.to_owned(),
+                        },
+                    }
+                }
+                Err(error) => Action::MongoRelationDocumentDeleteFailed {
                     tab_id,
                     tab_generation,
                     id,

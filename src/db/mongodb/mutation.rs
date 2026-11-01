@@ -13,6 +13,15 @@ pub fn replace_one_filter(id: &Bson) -> Document {
     mongodb::bson::doc! { "_id": id.clone() }
 }
 
+/// The filter that bounds a document delete to one `_id`.
+///
+/// It carries the `_id` exactly as it was loaded, never its rendering, so the
+/// delete cannot retarget another document. It is the only field in the filter
+/// on purpose.
+pub fn delete_one_filter(id: &Bson) -> Document {
+    mongodb::bson::doc! { "_id": id.clone() }
+}
+
 impl MongoAdapter {
     /// Replaces one document, bounded to the original `_id` value.
     ///
@@ -46,6 +55,48 @@ impl MongoAdapter {
             Ok(_) => Ok(MongoMutationOutcome::Confirmed { affected: 0 }),
             Err(error) if error_is_definitely_rejected(&error) => Err(map_error(error)),
             Err(_) => Ok(MongoMutationOutcome::Unknown { requested: 1 }),
+        }
+    }
+
+    /// Deletes one document, bounded to the `_id` its grid row was loaded with.
+    ///
+    /// This is the whole write surface of the relation tab's delete key: one
+    /// `deleteOne` against `{_id: <loaded>}`, never a bulk delete and never a
+    /// delete by any other field.
+    pub async fn delete_document_by_id_detailed(
+        &self,
+        namespace: &MongoNamespace,
+        id: Bson,
+    ) -> Result<MongoMutationOutcome, DatabaseError> {
+        let collection = namespace.collection.as_deref().ok_or_else(|| {
+            DatabaseError::configuration("MongoDB collection namespace is required")
+        })?;
+        let result = self
+            .client()
+            .database(&namespace.database)
+            .collection::<Document>(collection)
+            .delete_one(delete_one_filter(&id))
+            .await;
+        match result {
+            Ok(result) => Ok(MongoMutationOutcome::Confirmed {
+                affected: result.deleted_count,
+            }),
+            Err(error) if error_is_definitely_rejected(&error) => Err(map_error(error)),
+            Err(_) => Ok(MongoMutationOutcome::Unknown { requested: 1 }),
+        }
+    }
+}
+
+/// The message the tab shows when a deletion did not apply, or `None` when the
+/// document really was deleted.
+pub fn delete_outcome_message(outcome: &MongoMutationOutcome) -> Option<&'static str> {
+    match outcome {
+        MongoMutationOutcome::Confirmed { affected: 0 } => {
+            Some("the document no longer exists in the collection")
+        }
+        MongoMutationOutcome::Confirmed { .. } => None,
+        MongoMutationOutcome::Partial { .. } | MongoMutationOutcome::Unknown { .. } => {
+            Some("MongoDB delete outcome is unknown; reload the page before retrying")
         }
     }
 }
@@ -132,7 +183,62 @@ impl MongoMutationOutcome {
 
 #[cfg(test)]
 mod tests {
-    use super::{MongoCompareAndSetOutcome, MongoMutationOutcome, compare_and_set_outcome};
+    use super::{
+        MongoCompareAndSetOutcome, MongoMutationOutcome, compare_and_set_outcome,
+        delete_outcome_message,
+    };
+
+    /// An irreversible delete must never look applied when it was not. Every
+    /// outcome other than a confirmed delete reports something to the user, and
+    /// an unknown outcome never invites a blind retry.
+    #[test]
+    fn the_delete_outcome_maps_every_outcome_safely() {
+        assert_eq!(
+            delete_outcome_message(&MongoMutationOutcome::Confirmed { affected: 1 }),
+            None,
+            "a delete that removed one document is the only silent outcome"
+        );
+        assert_eq!(
+            delete_outcome_message(&MongoMutationOutcome::Confirmed { affected: 0 }),
+            Some("the document no longer exists in the collection"),
+            "deleting nothing is reported, not treated as success"
+        );
+        for undecided in [
+            MongoMutationOutcome::Unknown { requested: 1 },
+            MongoMutationOutcome::Partial {
+                affected: 0,
+                requested: 1,
+            },
+        ] {
+            let message = delete_outcome_message(&undecided)
+                .expect("an undecided delete must never look like success");
+            assert!(
+                message.contains("unknown") && message.contains("reload the page"),
+                "an undecided delete asks for a reload instead of a retry, got {message}"
+            );
+        }
+    }
+
+    #[test]
+    fn the_delete_filter_is_exactly_the_original_id() {
+        let id = mongodb::bson::Bson::ObjectId(mongodb::bson::oid::ObjectId::new());
+        let filter = super::delete_one_filter(&id);
+
+        assert_eq!(
+            filter,
+            mongodb::bson::doc! { "_id": id.clone() },
+            "the filter is the original _id value and nothing else"
+        );
+        assert_eq!(
+            filter.keys().collect::<Vec<_>>(),
+            vec!["_id"],
+            "no other field can widen or retarget the delete"
+        );
+        assert!(
+            matches!(filter.get("_id"), Some(mongodb::bson::Bson::ObjectId(_))),
+            "the _id keeps the BSON type it was loaded with, never a re-serialized string"
+        );
+    }
 
     #[test]
     fn the_replacement_filter_is_exactly_the_original_id() {
