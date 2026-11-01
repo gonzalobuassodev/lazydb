@@ -320,6 +320,42 @@ fn toggling_a_mongodb_collection_only_toggles_expansion() {
 }
 
 #[test]
+fn activating_an_expanded_collection_preserves_the_tree_and_reuses_the_tab() {
+    let (mut app, profile_id, generation) = mongo_app();
+    load_collections(&mut app, profile_id, generation);
+    let node = collection_node(profile_id);
+    assert!(app.explorer.select_id(node.clone()));
+    app.update(Action::ExplorerExpand);
+    let expanded = app.explorer.normalized.expanded.clone();
+    app.update(Action::ExplorerPrimary);
+    let Some(WorkspaceTab::Relation(tab)) = app.tabs.get(app.active_tab) else {
+        panic!("primary activation must open a relation");
+    };
+    let tab_id = tab.id;
+    let count = app.tabs.len();
+    assert_eq!(app.explorer.normalized.expanded, expanded);
+    app.focus = Focus::Explorer;
+    let commands = app.update(Action::ExplorerOpenSelected);
+    assert_eq!(app.tabs.len(), count);
+    assert!(
+        matches!(app.tabs.get(app.active_tab), Some(WorkspaceTab::Relation(tab)) if tab.id == tab_id)
+    );
+    assert_eq!(app.explorer.normalized.expanded, expanded);
+    assert!(
+        !commands
+            .iter()
+            .any(|command| matches!(command, Command::DiscoverMongoIndexes { .. }))
+    );
+
+    // The mouse chevron uses ToggleNode, and must only collapse the branch.
+    let commands = app.update(Action::ExplorerToggleNode(node.clone()));
+    assert!(commands.is_empty());
+    assert_eq!(app.tabs.len(), count);
+    assert_eq!(app.focus, Focus::Explorer);
+    assert!(!app.explorer.normalized.expanded.contains(&node));
+}
+
+#[test]
 fn monitor_and_users_open_from_the_database_row() {
     let (mut app, profile_id, _generation) = mongo_app();
     assert!(app.explorer.select_id(database_node(profile_id)));

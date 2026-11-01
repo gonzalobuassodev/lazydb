@@ -231,6 +231,9 @@ pub struct RelationTab {
     /// grid order. The grid only keeps the mapped `CellValue`s, so the modal
     /// edits these originals instead of reconstructing a document from cells.
     pub mongodb_documents: Option<Vec<MongoDocument>>,
+    /// MongoDB structure inference is derived from the current DATA-page
+    /// snapshot and must be recomputed after that page changes.
+    pub ddl_refresh_needed: bool,
     pub transaction_state: TransactionState,
     pub transaction_generation: u64,
     pub transaction_snapshot: Option<RelationEditSession>,
@@ -270,6 +273,7 @@ impl RelationTab {
         self.data = mutation_stale(std::mem::replace(&mut self.data, RelationLoad::Empty));
         self.ddl = mutation_stale(std::mem::replace(&mut self.ddl, RelationLoad::Empty));
         self.mongodb_documents = None;
+        self.ddl_refresh_needed = true;
         self.stale_native_identity |= native_identity_changed;
     }
 
@@ -280,6 +284,7 @@ impl RelationTab {
         self.data = mutation_stale(std::mem::replace(&mut self.data, RelationLoad::Empty));
         self.ddl = mutation_stale(std::mem::replace(&mut self.ddl, RelationLoad::Empty));
         self.mongodb_documents = None;
+        self.ddl_refresh_needed = true;
         self.stale_native_identity = true;
     }
 
@@ -290,6 +295,7 @@ impl RelationTab {
         self.data = mutation_stale(std::mem::replace(&mut self.data, RelationLoad::Empty));
         self.ddl = mutation_stale(std::mem::replace(&mut self.ddl, RelationLoad::Empty));
         self.mongodb_documents = None;
+        self.ddl_refresh_needed = true;
         self.stale_native_identity = stale_edits;
         if stale_edits {
             self.transaction_generation = self.transaction_generation.saturating_add(1);
@@ -405,6 +411,7 @@ impl RelationTab {
             },
             edit: None,
             mongodb_documents: None,
+            ddl_refresh_needed: true,
             transaction_state: TransactionState::Idle,
             transaction_generation: 0,
             transaction_snapshot: None,

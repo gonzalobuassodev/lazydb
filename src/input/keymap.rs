@@ -4946,8 +4946,8 @@ fn map_document_field_list(
             _ => map_relation_edit_text(event),
         };
     }
-    // A one-line field keeps `Enter` as apply and hands `Up`/`Down` back to the
-    // list, so browsing fields stays the same one key it was before the modal.
+    // A one-line field applies on Enter; Up/Down validates the draft before
+    // opening the adjacent editable field.
     match (event.modifiers, event.code) {
         (KeyModifiers::CONTROL, KeyCode::Char('s')) | (KeyModifiers::NONE, KeyCode::Enter) => {
             Some(Action::RelationEditDocumentFieldApply)
