@@ -13502,6 +13502,10 @@ impl App {
             | Action::MongoRelationDocumentReplaceFailed { .. } => {
                 self.mongo_relation_document_result(action)
             }
+            Action::MongoRelationDocumentDeleted { .. }
+            | Action::MongoRelationDocumentDeleteFailed { .. } => {
+                self.mongo_relation_document_delete_result(action)
+            }
             Action::RequestProfileConnect { profile_id } => self.request_connection(profile_id),
             Action::RequestConnect(profile_id) => self.request_connection(profile_id),
             Action::RetryActiveConsoleConnection => {
@@ -28528,6 +28532,72 @@ impl App {
         }]
     }
 
+    /// Validates the row under the cursor and plans exactly one bounded delete.
+    ///
+    /// Nothing is mutated here, so every refusal leaves the grid and the
+    /// command stream untouched. The write is addressed by the `_id` the grid
+    /// row was loaded with, so the delete can only ever remove that document.
+    fn plan_mongo_document_deletion(&self) -> Result<MongoDocumentDeletion, String> {
+        let Some(WorkspaceTab::Relation(tab)) = self.tabs.get(self.active_tab) else {
+            return Err("the relation tab is no longer open".to_owned());
+        };
+        // The tab's own profile decides whether this connection may write.
+        let profile = self
+            .profiles
+            .iter()
+            .find(|profile| profile.id == tab.descriptor.key.profile_id)
+            .ok_or_else(|| "the connection profile is no longer available".to_owned())?;
+        if profile.kind != DatabaseKind::MongoDb {
+            return Err("This relation is not a MongoDB collection".to_owned());
+        }
+        if profile.read_only {
+            return Err(MONGODB_READ_ONLY_MESSAGE.to_owned());
+        }
+        let document = tab
+            .mongodb_documents
+            .as_ref()
+            .and_then(|documents| documents.get(tab.grid.selected_row))
+            .ok_or_else(|| "There is no document at the cursor to delete".to_owned())?;
+        let Some(id) = document.bson.get("_id") else {
+            return Err("the document has no _id, so it cannot be deleted".to_owned());
+        };
+        let connection = match &tab.data {
+            RelationLoad::Ready(snapshot) => Some(snapshot.attribution.connection),
+            _ => None,
+        }
+        .filter(|connection| self.connection_identity_is_live(*connection))
+        .ok_or_else(|| "the document page is no longer live; reload the collection".to_owned())?;
+        let namespace = crate::db::mongodb::types::MongoNamespace::from_native_path(
+            &tab.descriptor.key.object_id.native_path,
+        )
+        .ok_or_else(|| "This relation is not a MongoDB collection".to_owned())?;
+        Ok(MongoDocumentDeletion {
+            tab_id: tab.id,
+            tab_generation: tab.generation,
+            connection,
+            namespace,
+            id: id.clone(),
+        })
+    }
+
+    /// Deletes the document under the cursor as one write bounded to its `_id`.
+    fn mongo_relation_document_delete(&mut self) -> Vec<Command> {
+        let deletion = match self.plan_mongo_document_deletion() {
+            Ok(deletion) => deletion,
+            Err(message) => {
+                self.notify_warning("Relation", message);
+                return Vec::new();
+            }
+        };
+        vec![Command::DeleteMongoRelationDocument {
+            tab_id: deletion.tab_id,
+            tab_generation: deletion.tab_generation,
+            connection: deletion.connection,
+            namespace: deletion.namespace,
+            id: deletion.id,
+        }]
+    }
+
     /// Applies the answer to a planned document replacement.
     ///
     /// A result whose tab generation no longer matches, or whose `_id` is not
@@ -28585,6 +28655,57 @@ impl App {
             tab.pagination.offset,
         );
         self.notify_success("Relation", format!("Document replaced in {collection}"));
+        if index != self.active_tab {
+            return Vec::new();
+        }
+        self.load_active_relation_with_page(true, Some(page))
+    }
+
+    /// Applies the answer to a planned document deletion.
+    ///
+    /// A result whose tab or tab generation no longer matches the page the
+    /// delete was planned on belongs to a relation that was already replaced,
+    /// so it is dropped instead of notifying or reloading anything.
+    fn mongo_relation_document_delete_result(&mut self, action: Action) -> Vec<Command> {
+        let (tab_id, tab_generation, failure) = match action {
+            Action::MongoRelationDocumentDeleted {
+                tab_id,
+                tab_generation,
+                ..
+            } => (tab_id, tab_generation, None),
+            Action::MongoRelationDocumentDeleteFailed {
+                tab_id,
+                tab_generation,
+                message,
+                ..
+            } => (tab_id, tab_generation, Some(message)),
+            _ => return Vec::new(),
+        };
+        let Some(index) = self.tabs.iter().position(|tab| tab.id() == tab_id) else {
+            return Vec::new();
+        };
+        let current = match self.tabs.get(index) {
+            Some(WorkspaceTab::Relation(tab)) => tab.generation == tab_generation,
+            _ => false,
+        };
+        if !current {
+            return Vec::new();
+        }
+        let Some(WorkspaceTab::Relation(tab)) = self.tabs.get(index) else {
+            return Vec::new();
+        };
+        if let Some(message) = failure {
+            // The page the failed delete addressed stays on screen: the rows
+            // were never removed, so reloading would only hide the error.
+            self.notify_error("Relation", message);
+            return Vec::new();
+        }
+        let collection = tab.descriptor.title.clone();
+        let page = crate::model::pagination::PageRequest::at(
+            tab.pagination.page_size,
+            tab.pagination.offset,
+        );
+        self.notify_success("Relation", format!("Document deleted from {collection}"));
         if index != self.active_tab {
             return Vec::new();
         }
@@ -29045,6 +29166,26 @@ impl App {
             DeleteRowMutation, InsertRowMutation, RelationMutation, RelationMutationRequest,
             RowLocator, UpdateCellMutation,
         };
+
+        // A MongoDB relation never saves through the SQL grid path: its writes
+        // are the document modal's replacement and the delete key's document
+        // delete, both addressed by `_id`. A collection reports no SQL columns
+        // and no primary key, so the keyless guard below must never see it.
+        if self.active_relation_is_mongodb() {
+            // Rows can still be marked dirty by an insert or a cell edit, and
+            // this path refuses them. Say so instead of dropping the save
+            // silently, which would look like a working button that does nothing.
+            let dirty = self
+                .relation_session_mut()
+                .is_some_and(|edit| edit.has_dirty_rows());
+            if dirty {
+                self.notify_warning(
+                    "Relation",
+                    "MongoDB rows are written one document at a time; edit a document in its modal or press the delete key",
+                );
+            }
+            return Vec::new();
+        }
 
         let Some(connection) = self.database_command_identity() else {
             return Vec::new();
@@ -29649,10 +29790,23 @@ impl App {
     }
 
     fn relation_delete_current(&mut self) -> Vec<Command> {
+        if self.active_relation_is_mongodb() {
+            return self.mongo_relation_document_delete();
+        }
         let row = self.active_grid_row();
         self.relation_delete_range(row..=row)
     }
     fn relation_delete_selected(&mut self) -> Vec<Command> {
+        // A MongoDB relation deletes one document at a time, addressed by its
+        // `_id`. Marking a visual range for a grid save would leave rows dirty
+        // for a save that never happens, so the range is refused here instead.
+        if self.active_relation_is_mongodb() {
+            self.notify_warning(
+                "Relation",
+                "MongoDB deletes one document at a time; press the delete key on a single row",
+            );
+            return Vec::new();
+        }
         let row = self.active_grid_row();
         let Some((start, end)) = self.tabs.get(self.active_tab).and_then(|tab| match tab {
             WorkspaceTab::Relation(tab) => tab.edit.as_ref()?.visual_range(row),
@@ -30882,6 +31036,16 @@ struct MongoDocumentReplacement {
     namespace: crate::db::mongodb::types::MongoNamespace,
     id: mongodb::bson::Bson,
     replacement: mongodb::bson::Document,
+}
+
+/// Everything one planned document deletion needs, validated without mutating
+/// the tab so a refusal emits no command.
+struct MongoDocumentDeletion {
+    tab_id: Uuid,
+    tab_generation: u64,
+    connection: ConnectionIdentity,
+    namespace: crate::db::mongodb::types::MongoNamespace,
+    id: mongodb::bson::Bson,
 }
 
 fn relation_is_in_scope(tab: &RelationTab, scope: &crate::profile::CatalogScope) -> bool {
