@@ -71,6 +71,9 @@ mod tests {
             default_schema: Some("public".into()),
             sqlite_path: None,
             mongodb_options: None,
+            pg_options: None,
+            snowflake_options: None,
+            elasticsearch_options: None,
             duckdb_path: None,
             ssl_mode: Default::default(),
             credential_policy: Default::default(),
@@ -202,11 +205,15 @@ impl ExecutionTarget {
                     .map(|path| path.display().to_string())
             })
             .or_else(|| (profile.kind == DatabaseKind::DuckDb).then(|| "memory".to_owned()))
+            .filter(|database| !database.is_empty())
+            .or_else(|| (profile.kind == DatabaseKind::Elasticsearch).then(|| "default".to_owned()))
             .unwrap_or_default();
         let schema = match profile.kind {
-            DatabaseKind::MySql | DatabaseKind::MariaDb | DatabaseKind::ClickHouse => {
-                Some(database.clone())
-            }
+            DatabaseKind::MySql
+            | DatabaseKind::MariaDb
+            | DatabaseKind::TiDb
+            | DatabaseKind::ClickHouse
+            | DatabaseKind::Elasticsearch => Some(database.clone()),
             DatabaseKind::Sqlite => Some("main".to_owned()),
             DatabaseKind::DuckDb => Some(
                 profile
@@ -214,9 +221,16 @@ impl ExecutionTarget {
                     .clone()
                     .unwrap_or_else(|| "main".into()),
             ),
-            DatabaseKind::Postgres | DatabaseKind::SqlServer | DatabaseKind::Oracle => {
-                profile.default_schema.clone()
-            }
+            DatabaseKind::Snowflake => Some(
+                profile
+                    .default_schema
+                    .clone()
+                    .unwrap_or_else(|| "PUBLIC".into()),
+            ),
+            DatabaseKind::Postgres
+            | DatabaseKind::CockroachDb
+            | DatabaseKind::SqlServer
+            | DatabaseKind::Oracle => profile.default_schema.clone(),
             DatabaseKind::Redis | DatabaseKind::Valkey | DatabaseKind::MongoDb => None,
         };
         Self {
@@ -234,7 +248,7 @@ impl ExecutionTarget {
             return false;
         }
         match profile.kind {
-            DatabaseKind::MySql | DatabaseKind::MariaDb => {
+            DatabaseKind::MySql | DatabaseKind::MariaDb | DatabaseKind::TiDb => {
                 self.schema.as_deref() == Some(self.database.as_str())
                     && profile
                         .catalog_scope
@@ -252,14 +266,20 @@ impl ExecutionTarget {
                         profile.catalog_scope.allows_schema(&self.database, schema)
                     })
             }
-            DatabaseKind::Postgres | DatabaseKind::SqlServer | DatabaseKind::Oracle => self
+            DatabaseKind::Snowflake => profile
+                .catalog_scope
+                .allows_schema(&self.database, self.schema.as_deref().unwrap_or("PUBLIC")),
+            DatabaseKind::Postgres
+            | DatabaseKind::CockroachDb
+            | DatabaseKind::SqlServer
+            | DatabaseKind::Oracle => self
                 .schema
                 .as_deref()
                 .is_none_or(|schema| profile.catalog_scope.allows_schema(&self.database, schema)),
             DatabaseKind::Redis | DatabaseKind::Valkey | DatabaseKind::MongoDb => {
                 self.schema.is_none()
             }
-            DatabaseKind::ClickHouse => {
+            DatabaseKind::ClickHouse | DatabaseKind::Elasticsearch => {
                 self.schema.as_deref() == Some(self.database.as_str())
                     && profile
                         .catalog_scope
@@ -274,11 +294,23 @@ impl ExecutionTarget {
         }
         let mut configured = profile.clone();
         match profile.kind {
-            DatabaseKind::Postgres | DatabaseKind::SqlServer | DatabaseKind::Oracle => {
+            DatabaseKind::Snowflake => {
+                configured.database = Some(self.database.clone());
+                configured.default_schema =
+                    Some(self.schema.clone().unwrap_or_else(|| "PUBLIC".into()));
+            }
+            DatabaseKind::Postgres
+            | DatabaseKind::CockroachDb
+            | DatabaseKind::SqlServer
+            | DatabaseKind::Oracle => {
                 configured.database = Some(self.database.clone());
                 configured.default_schema = self.schema.clone();
             }
-            DatabaseKind::MySql | DatabaseKind::MariaDb | DatabaseKind::ClickHouse => {
+            DatabaseKind::MySql
+            | DatabaseKind::MariaDb
+            | DatabaseKind::TiDb
+            | DatabaseKind::ClickHouse
+            | DatabaseKind::Elasticsearch => {
                 configured.database = Some(self.database.clone());
                 configured.default_schema = Some(self.database.clone());
             }

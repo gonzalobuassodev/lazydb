@@ -26,6 +26,8 @@ pub struct QueryStats {
     pub row_count: usize,
     pub fetched_row_count: usize,
     pub truncated: bool,
+    /// The server completed the request but reported failures within its response.
+    pub response_error: Option<String>,
 }
 
 impl QueryStats {
@@ -36,6 +38,7 @@ impl QueryStats {
             row_count,
             fetched_row_count: row_count,
             truncated: false,
+            response_error: None,
         }
     }
 
@@ -137,6 +140,10 @@ impl QueryOutcomeAccumulator {
 
     pub(crate) fn metadata(&mut self, columns: Vec<ColumnMeta>) {
         self.mark_event();
+        self.prepared_metadata(columns);
+    }
+
+    pub(crate) fn prepared_metadata(&mut self, columns: Vec<ColumnMeta>) {
         self.current.get_or_insert_with(|| ResultSet {
             columns,
             rows: Vec::new(),
@@ -206,6 +213,7 @@ impl QueryOutcomeAccumulator {
                 row_count,
                 fetched_row_count: self.fetched_rows,
                 truncated: self.truncated,
+                response_error: None,
             },
         }
     }
@@ -232,6 +240,22 @@ mod tests {
         assert_eq!(stats.row_count, 1);
         assert_eq!(stats.fetched_row_count, 1);
         assert!(!stats.truncated);
+    }
+
+    #[test]
+    fn prepared_metadata_does_not_record_an_execution_response() {
+        let mut accumulator = QueryOutcomeAccumulator::with_budget(QueryBudget::UNBOUNDED);
+        let columns = vec![super::ColumnMeta {
+            name: "value".into(),
+            type_name: "INT".into(),
+        }];
+        accumulator.prepared_metadata(columns.clone());
+        assert!(accumulator.first_event.is_none());
+        accumulator.done(0);
+        assert!(accumulator.first_event.is_some());
+        let outcome = accumulator.finish();
+        assert_eq!(outcome.result_sets[0].columns, columns);
+        assert!(outcome.result_sets[0].rows.is_empty());
     }
 
     #[test]
