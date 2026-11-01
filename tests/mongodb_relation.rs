@@ -9,11 +9,6 @@
 //! EJSON and saving replaces exactly that document, bounded to its original
 //! `_id`. This unit writes data, so every refusal below is a safety invariant:
 //! each one must leave stored documents and emitted commands untouched.
-//!
-//! T5 (S1-S11): the delete key on a collection's relation tab stages the mark
-//! the SQL grid stages and `Ctrl-S` commits it as one bounded bulk delete over
-//! the loaded `_id`s, so no collection row ever takes the SQL grid mutation
-//! path, whether it is one row or a visual range.
 
 mod support;
 
@@ -38,12 +33,11 @@ use lazydb::{
     model::{
         execution_target::ExecutionTarget,
         explorer::ExplorerNodeId,
-        mongodb_browser::{MongoBrowserTab, MongoPageState},
         mongodb_structure::{MongoSchemaInference, MongoStructureSnapshot, infer_schema},
         pagination::{PageRequest, PageSize},
         relation::{RelationLoad, RelationRequest, RelationRequestKind, RelationView},
         tab::WorkspaceTab,
-        workspace::{ConnectionStatus, Focus},
+        workspace::Focus,
     },
     profile::{DatabaseKind, import_connection_url},
 };
@@ -616,10 +610,14 @@ fn structure_request(commands: &[Command]) -> RelationRequest {
 fn opening_the_ddl_view_on_a_mongodb_relation_requests_the_structure() {
     let (mut app, profile_id, _generation) = mongo_app();
     loaded_mongo_relation(&mut app, profile_id);
-    let page_size = match app.tabs.last() {
-        Some(WorkspaceTab::Relation(tab)) => tab.pagination.page_size,
-        _ => panic!("expected a relation tab"),
-    };
+    let expected_documents = vec![document(mongodb::bson::doc! {
+        "_id": 1_i32,
+        "raceId": "race-1",
+        "position": 3_i64,
+    })];
+    if let Some(WorkspaceTab::Relation(tab)) = app.tabs.last_mut() {
+        tab.mongodb_documents = Some(expected_documents.clone());
+    }
 
     let commands = app.update(Action::SetRelationView(RelationView::Ddl));
 
@@ -637,11 +635,11 @@ fn opening_the_ddl_view_on_a_mongodb_relation_requests_the_structure() {
     assert!(
         commands.iter().any(|command| matches!(
             command,
-            Command::LoadMongoRelationStructure { request, from_page: Some(page) }
+            Command::LoadMongoRelationStructure { request, documents: Some(documents) }
                 if request.tab_id == tab_id
                     && request.kind == RelationRequestKind::Ddl
                     && request.relation == key
-                    && *page == PageRequest::first(page_size)
+                    && *documents == expected_documents
         )),
         "the structure must be requested for the page the grid shows, got {commands:?}"
     );
@@ -665,7 +663,7 @@ fn opening_the_ddl_view_without_a_loaded_page_asks_for_metadata_only() {
         commands.iter().any(|command| matches!(
             command,
             Command::LoadMongoRelationStructure {
-                from_page: None,
+                documents: None,
                 ..
             }
         )),
@@ -762,7 +760,7 @@ use lazydb::{
     },
     model::{
         cell_editor::JsonBuffer,
-        relation::{RelationDescriptor, RelationTab},
+        relation::RelationTab,
         relation_edit::{
             DOCUMENT_ID_IMMUTABLE_MESSAGE, DocumentEditorState, DocumentEditorView,
             MONGODB_READ_ONLY_MESSAGE, RelationGridMode,
@@ -897,6 +895,7 @@ struct ReplaceCommand {
     tab_generation: u64,
     namespace: MongoNamespace,
     id: mongodb::bson::Bson,
+    expected: mongodb::bson::Document,
     replacement: mongodb::bson::Document,
 }
 
@@ -912,6 +911,7 @@ fn one_replace_command(commands: &[Command]) -> ReplaceCommand {
         tab_generation,
         namespace,
         id,
+        expected,
         replacement,
         ..
     } = replaces[0]
@@ -923,12 +923,9 @@ fn one_replace_command(commands: &[Command]) -> ReplaceCommand {
         tab_generation: *tab_generation,
         namespace: namespace.clone(),
         id: id.clone(),
+        expected: expected.clone(),
         replacement: replacement.clone(),
     }
-}
-
-fn canonical_ejson(document: &MongoDocument) -> String {
-    document.canonical_ejson().expect("canonical ejson")
 }
 
 fn row_values(app: &App) -> Vec<Vec<CellValue>> {
@@ -1009,6 +1006,11 @@ fn saving_emits_one_replacement_bounded_to_the_original_id() {
         "the filter carries the original _id value exactly"
     );
     assert_eq!(
+        replace.expected,
+        bike_documents()[0].bson,
+        "the write carries the exact BSON document loaded when the editor opened"
+    );
+    assert_eq!(
         replace.replacement.get("_id"),
         Some(&object_id(RUEDAS_ID)),
         "the replacement keeps the original _id"
@@ -1036,6 +1038,23 @@ fn saving_emits_one_replacement_bounded_to_the_original_id() {
     assert!(
         app.update(Action::RelationEditConfirm).is_empty(),
         "one save emits one write"
+    );
+}
+
+#[test]
+fn saving_an_unchanged_document_closes_locally_without_a_write() {
+    let (mut app, _request) = mongo_app_with_page(bike_documents());
+    app.update(Action::RelationEditCell);
+    app.update(Action::RelationEditDocumentToggleView);
+
+    let commands = app.update(Action::RelationEditConfirm);
+
+    assert!(commands.is_empty(), "an unchanged document writes nothing");
+    assert_eq!(document_mode(&app), Some(RelationGridMode::Browse));
+    assert!(
+        app.notifications
+            .history()
+            .any(|notification| notification.body.contains("No document changes"))
     );
 }
 
@@ -1246,6 +1265,44 @@ fn a_failed_replacement_surfaces_the_error_and_keeps_the_page() {
         row_values(&app),
         before,
         "the grid keeps the values it had before the failed write"
+    );
+}
+
+#[test]
+fn a_compare_and_replace_conflict_keeps_the_document_draft_open() {
+    let (mut app, _request) = mongo_app_with_page(bike_documents());
+    let before = row_values(&app);
+    app.update(Action::RelationEditCell);
+    set_document_text(
+        &mut app,
+        &format!(r#"{{"_id": {{"$oid": "{RUEDAS_ID}"}}, "name": "Ruedas Pro X"}}"#),
+    );
+    let replace = one_replace_command(&app.update(Action::RelationEditConfirm));
+    assert_eq!(replace.expected.get_str("name"), Ok("Ruedas Pro"));
+
+    let commands = app.update(Action::MongoRelationDocumentReplaceFailed {
+        tab_id: replace.tab_id,
+        tab_generation: replace.tab_generation,
+        id: replace.id,
+        message: "the document changed or was deleted since it was loaded; reload before saving"
+            .into(),
+    });
+
+    assert!(
+        commands.is_empty(),
+        "a conflict must not reload over the draft"
+    );
+    let state = document_state(&app);
+    assert_eq!(
+        state.error.as_deref(),
+        Some("the document changed or was deleted since it was loaded; reload before saving")
+    );
+    assert!(!state.saving);
+    assert!(state.input.value().contains("Ruedas Pro X"));
+    assert_eq!(
+        row_values(&app),
+        before,
+        "the loaded grid remains untouched"
     );
 }
 
@@ -1536,7 +1593,7 @@ fn the_document_modal_renders_the_collection_id_and_save_hints() {
         "the modal names the _id it will write, got:\n{output}"
     );
     assert!(
-        output.contains("Ctrl-S apply") && output.contains("Esc cancel"),
+        output.contains("Ctrl-S apply document") && output.contains("Esc close"),
         "the modal shows how to save and cancel, got:\n{output}"
     );
 }
@@ -1967,7 +2024,6 @@ fn the_id_field_cannot_be_edited_from_the_field_list() {
     for character in "ffffffffffff".chars() {
         app.update(Action::RelationEditInsert(character));
     }
-    app.update(Action::RelationEditConfirm);
     let state = document_state(&app);
     assert_eq!(
         state.input.value(),
@@ -1982,9 +2038,9 @@ fn the_id_field_cannot_be_edited_from_the_field_list() {
         Some(&object_id(RUEDAS_ID)),
         "the document keeps its original _id"
     );
-
     // Any other field of the same list is editable, so the refusal is about
     // _id and not about the view.
+    app.update(Action::RelationEditCell);
     select_field(&mut app, "name");
     app.update(Action::RelationEditDocumentFieldEdit);
     assert!(
@@ -2137,21 +2193,89 @@ fn every_field_opens_in_its_own_modal() {
         "the one-line field modal shows its own keys uncut, got:\n{output}"
     );
 
-    // Up walks out of the modal and moves the list cursor by one field.
+    // A scalar navigation key applies locally and opens the adjacent field.
     let index = field_names(&app)
         .iter()
         .position(|field| field == "name")
         .expect("name is a field");
     app.update(Action::RelationEditDocumentFieldMove(1));
     let state = document_state(&app);
-    assert!(
-        state.field_edit.is_none(),
-        "moving leaves the one-line field modal"
+    assert_eq!(
+        state.field_edit.as_ref().map(|field| field.name.as_str()),
+        Some("stock"),
+        "moving opens the adjacent editable field"
     );
     assert_eq!(
         state.selected_field_index(field_names(&app).len()),
         index + 1,
         "the same key press moves the list cursor"
+    );
+}
+
+#[test]
+fn scalar_navigation_applies_locally_and_preserves_invalid_drafts() {
+    let (mut app, _request) = mongo_app_with_page(typed_documents());
+    open_fields_view(&mut app);
+    let expected = document_state(&app).expected;
+    type_field_value(&mut app, "name", "Updated name");
+    assert!(
+        app.update(Action::RelationEditDocumentFieldMove(1))
+            .is_empty()
+    );
+    let state = document_state(&app);
+    assert_eq!(
+        state.replacement_document().unwrap().get_str("name"),
+        Ok("Updated name")
+    );
+    assert_eq!(state.expected, expected);
+    assert_eq!(state.field_edit.as_ref().unwrap().name, "stock");
+
+    retype_field_editor(&mut app, "invalid integer");
+    let before = document_state(&app).input.value().to_owned();
+    assert!(
+        app.update(Action::RelationEditDocumentFieldMove(1))
+            .is_empty()
+    );
+    let state = document_state(&app);
+    assert_eq!(state.field_edit.as_ref().unwrap().name, "stock");
+    assert_eq!(
+        state.field_edit.as_ref().unwrap().input.value(),
+        "invalid integer"
+    );
+    assert!(
+        state
+            .field_error
+            .as_deref()
+            .unwrap()
+            .contains("32-bit integer")
+    );
+    assert_eq!(state.input.value(), before);
+}
+
+#[test]
+fn scalar_navigation_skips_id_and_stops_at_the_ends() {
+    let (mut app, _request) = mongo_app_with_page(bike_documents());
+    open_fields_view(&mut app);
+    type_field_value(&mut app, "name", "Kept at start");
+    app.update(Action::RelationEditDocumentFieldMove(-1));
+    let state = document_state(&app);
+    assert_eq!(state.field_edit.as_ref().unwrap().name, "name");
+    assert_eq!(
+        state.field_edit.as_ref().unwrap().input.value(),
+        "Kept at start"
+    );
+    assert_eq!(
+        state.replacement_document().unwrap().get_str("name"),
+        Ok("Kept at start")
+    );
+    app.update(Action::RelationEditDocumentFieldCancel);
+    type_field_value(&mut app, "active", "false");
+    app.update(Action::RelationEditDocumentFieldMove(1));
+    let state = document_state(&app);
+    assert_eq!(state.field_edit.as_ref().unwrap().name, "active");
+    assert_eq!(
+        state.replacement_document().unwrap().get_bool("active"),
+        Ok(false)
     );
 }
 
@@ -2241,6 +2365,47 @@ fn a_date_field_shows_an_iso_timestamp_in_the_list_and_the_modal() {
         !output.contains("$date"),
         "neither the list nor the modal shows the raw canonical EJSON, got:\n{output}"
     );
+}
+
+#[test]
+fn date_fields_preserve_precision_offsets_and_out_of_range_values() {
+    use lazydb::model::relation_edit::{DocumentEditorState, DocumentFieldKind};
+    use mongodb::bson::{Bson, DateTime, doc};
+    let kind = DocumentFieldKind::of(&Bson::DateTime(DateTime::from_millis(0)));
+    for text in [
+        "2026-11-08T02:30:00.123+02:30",
+        "2026-11-08 00:00:00.123",
+        r#"{"$date":"2026-11-08T00:00:00.123Z"}"#,
+    ] {
+        assert_eq!(
+            kind.parse(text).unwrap(),
+            Bson::DateTime(DateTime::from_millis(DATE_MILLIS + 123))
+        );
+    }
+    for millis in [i64::MIN, -1, 0, 123, i64::MAX, 253_402_300_800_000] {
+        let original = doc! { "_id": 1, "date": DateTime::from_millis(millis) };
+        let mut state =
+            DocumentEditorState::new(0, &mongo_namespace(), &document(original.clone())).unwrap();
+        state.selected_field = 1;
+        state.begin_field_edit();
+        let text = state.field_edit.as_ref().unwrap().input.value().to_owned();
+        state.apply_field("date", &text).unwrap();
+        assert_eq!(
+            state.replacement_document().unwrap(),
+            original,
+            "round trip at {millis}"
+        );
+    }
+    for text in [
+        "2026-11-08T00:00:00.123456Z",
+        "2026-11-08 00:00:00.000001",
+        "2016-12-31T23:59:60Z",
+        r#"{"$date":"2026-11-08T00:00:00.123456Z"}"#,
+        r#"{"$date":"2016-12-31T23:59:60Z"}"#,
+        r#"{"$numberLong":"1"}"#,
+    ] {
+        assert!(kind.parse(text).is_err(), "must refuse {text}");
+    }
 }
 
 #[test]
@@ -2531,245 +2696,193 @@ fn the_field_list_shows_a_shape_marker_for_container_fields() {
 }
 
 // ---------------------------------------------------------------------------
-// Integration: one real replacement against a local MongoDB
+// Integration: isolated compare-and-replace against a local MongoDB
 // ---------------------------------------------------------------------------
+
+fn mongo_url_with_database(url: &str, database: &str) -> String {
+    let (address, query) = url.split_once('?').unwrap_or((url, ""));
+    let address = address.trim_end_matches('/');
+    if query.is_empty() {
+        format!("{address}/{database}")
+    } else {
+        format!("{address}/{database}?{query}")
+    }
+}
 
 async fn load_documents(
     adapter: &lazydb::db::mongodb::MongoAdapter,
     namespace: &MongoNamespace,
-) -> Vec<MongoDocument> {
+) -> Result<Vec<MongoDocument>, String> {
     adapter
         .find_page(&FindSpec::new(namespace.clone()))
         .await
-        .expect("read the demo collection")
-        .documents
-}
-
-fn by_id(documents: &[MongoDocument]) -> Vec<(mongodb::bson::Bson, String)> {
-    let mut entries = documents
-        .iter()
-        .map(|document| {
-            (
-                document.bson.get("_id").cloned().expect("_id"),
-                canonical_ejson(document),
-            )
-        })
-        .collect::<Vec<_>>();
-    entries.sort_by_key(|(id, _)| format!("{id:?}"));
-    entries
+        .map(|page| page.documents)
+        .map_err(|error| error.to_string())
 }
 
 #[tokio::test]
-async fn replacing_one_document_changes_only_that_document() {
-    let Some(url) = support::mongodb_standalone_url() else {
+async fn relation_document_compare_and_replace_preserves_concurrent_updates() {
+    let Some(server_url) = support::mongodb_standalone_url() else {
         return;
     };
-    // The relation needs a database on the profile, exactly like a profile the
-    // app builds from a URL the user typed.
-    let url = format!("{}/lazydb_demo", url.trim_end_matches('/'));
-    let imported = import_connection_url(&url, Some("mongodb-relation-edit")).expect("test url");
+    let database = format!("lazydb_relation_{}", Uuid::new_v4().simple());
+    let collection = format!("documents_{}", Uuid::new_v4().simple());
+    let connection_url = mongo_url_with_database(&server_url, &database);
+    let imported = import_connection_url(&connection_url, Some("mongodb-relation-cas"))
+        .expect("test MongoDB URL");
     let profile = imported.profile.clone();
     let connection = DatabaseConnection::connect(&profile, imported.transient_password.as_ref())
         .await
-        .expect("connect to the local test server");
+        .expect("connect to the standalone fixture");
     let DatabaseConnection::MongoDb(adapter) = connection else {
         panic!("expected a MongoDB adapter");
     };
-    let namespace = MongoNamespace::collection("lazydb_demo", "bikes");
-
-    let before = load_documents(&adapter, &namespace).await;
-    // The write target is the first document in `_id` order, which is also the
-    // first grid row because the relation page sorts by `_id`.
-    let mut ordered = before.clone();
-    ordered.sort_by_key(|document| format!("{:?}", document.bson.get("_id")));
-    let original = ordered
-        .first()
-        .cloned()
-        .expect("the collection is not empty");
-    let original_id = original.bson.get("_id").cloned().expect("_id");
-    let original_name = original
-        .bson
-        .get_str("name")
-        .expect("the demo documents are named")
-        .to_owned();
-    let edited_name = format!("{original_name} (editada)");
-    let untouched = by_id(&before)
-        .into_iter()
-        .filter(|(id, _)| *id != original_id)
+    let fixture_client = mongodb::Client::with_uri_str(&server_url)
+        .await
+        .expect("fixture client");
+    let namespace = MongoNamespace::collection(&database, &collection);
+    let fixture_collection = fixture_client
+        .database(&database)
+        .collection::<mongodb::bson::Document>(&collection);
+    let ids = (0..3)
+        .map(|_| mongodb::bson::oid::ObjectId::new())
+        .collect::<Vec<_>>();
+    let seed = ids
+        .iter()
+        .enumerate()
+        .map(|(index, id)| {
+            mongodb::bson::doc! {
+                "_id": id,
+                "name": format!("fixture-{index}"),
+                "stock": index as i32,
+                "nested": { "stable": true },
+            }
+        })
         .collect::<Vec<_>>();
 
-    // The reducer plans the write from the loaded page.
-    let mut app = App::new(vec![profile.clone()]);
-    let profile_id = profile.id;
-    let generation = match app.update(Action::RequestConnect(profile_id)).as_slice() {
-        [Command::Connect { generation, .. }] => *generation,
-        commands => panic!("unexpected commands: {commands:?}"),
-    };
-    let identity = ConnectionIdentity {
-        profile_id,
-        generation,
-    };
-    app.sessions
-        .register_attempt(ExecutionTarget::from_profile(&profile), identity);
-    let mut tab = RelationTab::with_descriptor(
-        RelationDescriptor::mongodb_collection(profile_id, &namespace).expect("descriptor"),
-        RelationView::Data,
-    );
-    let request = RelationRequest {
-        tab_id: tab.id,
-        console_id: tab.id,
-        tab_generation: tab.generation,
-        request_id: tab.next_request_id,
-        connection: identity,
-        relation: tab.descriptor.key.clone(),
-        kind: RelationRequestKind::Preview,
-        scope: profile.catalog_scope.clone(),
-        options: Default::default(),
-        page: PageRequest::first(PageSize::Ten),
-    };
-    tab.next_request_id += 1;
-    tab.data = RelationLoad::Loading {
-        request: request.clone(),
-        previous: None,
-    };
-    app.tabs.push(WorkspaceTab::Relation(tab));
-    app.active_tab = app.tabs.len() - 1;
-    app.focus = Focus::Results;
-    app.connection.profile_id = Some(profile_id);
-    app.connection.generation = generation;
-    app.connection.status = lazydb::model::workspace::ConnectionStatus::Connected;
+    let result = async {
+        fixture_collection
+            .insert_many(seed)
+            .await
+            .map_err(|error| error.to_string())?;
+        let before = load_documents(&adapter, &namespace).await?;
+        let original = before
+            .first()
+            .cloned()
+            .ok_or_else(|| "fixture collection is empty".to_owned())?;
+        let id = original
+            .bson
+            .get("_id")
+            .cloned()
+            .ok_or_else(|| "fixture document is missing _id".to_owned())?;
+        let expected = original.bson.clone();
+        let mut stale_replacement = expected.clone();
+        stale_replacement.insert("name", "stale-editor-value");
 
-    let loaded = adapter
-        .relation_page(&namespace, request.page)
-        .await
-        .expect("load the page through the relation preview path");
-    let target_row = loaded
-        .documents
-        .iter()
-        .position(|document| document.bson.get("_id") == Some(&original_id))
-        .expect("the grid page holds the target document");
-    let page_documents = loaded.documents.len();
-    let commands = app.update(Action::MongoRelationPreviewLoaded {
-        request,
-        preview: Box::new(loaded.preview),
-        documents: loaded.documents,
-    });
-    assert!(commands.is_empty(), "loading a page writes nothing");
-    active_relation_tab_mut(&mut app).grid.selected_row = target_row;
+        fixture_collection
+            .update_one(
+                mongodb::bson::doc! { "_id": id.clone() },
+                mongodb::bson::doc! { "$set": { "stock": 99_i32, "remote": true } },
+            )
+            .await
+            .map_err(|error| error.to_string())?;
+        let stale_outcome = adapter
+            .compare_and_replace_document_detailed(
+                &namespace,
+                id.clone(),
+                &expected,
+                stale_replacement,
+            )
+            .await
+            .map_err(|error| error.to_string())?;
+        if stale_outcome != (MongoMutationOutcome::Confirmed { affected: 0 }) {
+            return Err(format!(
+                "stale replacement was not rejected: {stale_outcome:?}"
+            ));
+        }
 
-    app.update(Action::RelationEditCell);
-    let mut edited = original.bson.clone();
-    edited.insert("name", edited_name.clone());
-    let edited_ejson = mongodb::bson::to_bson(&edited)
-        .expect("encode")
-        .into_canonical_extjson()
-        .to_string();
-    set_document_text(&mut app, &edited_ejson);
-    let commands = app.update(Action::RelationEditConfirm);
-    let replace = one_replace_command(&commands);
+        let after_conflict = load_documents(&adapter, &namespace).await?;
+        let current = after_conflict
+            .iter()
+            .find(|document| document.bson.get("_id") == Some(&id))
+            .ok_or_else(|| "concurrently updated fixture disappeared".to_owned())?;
+        if current.bson.get_i32("stock").ok() != Some(99)
+            || current.bson.get_bool("remote").ok() != Some(true)
+            || current.bson.get_str("name").ok() != expected.get_str("name").ok()
+        {
+            return Err(format!(
+                "concurrent values were overwritten: {:?}",
+                current.bson
+            ));
+        }
+        let current_document = current.bson.clone();
+        let mut replacement = current_document.clone();
+        replacement.insert("name", "edited-by-relation");
+        let saved = adapter
+            .compare_and_replace_document_detailed(
+                &namespace,
+                id.clone(),
+                &current_document,
+                replacement,
+            )
+            .await
+            .map_err(|error| error.to_string())?;
+        if saved != (MongoMutationOutcome::Confirmed { affected: 1 }) {
+            return Err(format!("unchanged document replacement failed: {saved:?}"));
+        }
 
-    // The runtime executes exactly that command against the adapter.
-    let outcome = adapter
-        .replace_document_by_id_detailed(
-            &replace.namespace,
-            replace.id.clone(),
-            replace.replacement,
-        )
-        .await
-        .expect("replace one document");
+        let after = load_documents(&adapter, &namespace).await?;
+        if after.len() != before.len() {
+            return Err(format!(
+                "unexpected document count after replacement: {}",
+                after.len()
+            ));
+        }
+        let edited = after
+            .iter()
+            .find(|document| document.bson.get("_id") == Some(&id))
+            .ok_or_else(|| "edited fixture disappeared".to_owned())?;
+        if edited.bson.get_str("name").ok() != Some("edited-by-relation")
+            || edited.bson.get_i32("stock").ok() != Some(99)
+            || edited.bson.get_bool("remote").ok() != Some(true)
+        {
+            return Err(format!(
+                "replacement lost expected values: {:?}",
+                edited.bson
+            ));
+        }
+        let before_untouched = before
+            .iter()
+            .filter(|document| document.bson.get("_id") != Some(&id))
+            .map(|document| {
+                (
+                    document.bson.get("_id").cloned().expect("fixture _id"),
+                    document.raw.as_bytes().to_vec(),
+                )
+            })
+            .collect::<Vec<_>>();
+        let after_untouched = after
+            .iter()
+            .filter(|document| document.bson.get("_id") != Some(&id))
+            .map(|document| {
+                (
+                    document.bson.get("_id").cloned().expect("fixture _id"),
+                    document.raw.as_bytes().to_vec(),
+                )
+            })
+            .collect::<Vec<_>>();
+        if before_untouched != after_untouched {
+            return Err("unrelated documents changed during replacement".to_owned());
+        }
+        Ok::<(), String>(())
+    }
+    .await;
 
-    // Re-read: only the edited document differs from the load.
-    let after = load_documents(&adapter, &namespace).await;
-    let edited_after = after
-        .iter()
-        .find(|document| document.bson.get("_id") == Some(&original_id))
-        .cloned();
-    let untouched_after = by_id(&after)
-        .into_iter()
-        .filter(|(id, _)| *id != original_id)
-        .collect::<Vec<_>>();
-
-    // The reload the reducer asks for shows the new values in the grid.
-    let commands = app.update(Action::MongoRelationDocumentReplaced {
-        tab_id: replace.tab_id,
-        tab_generation: replace.tab_generation,
-        id: replace.id.clone(),
-    });
-    let reload = mongo_preview_request(&commands);
-    let reloaded = adapter
-        .relation_page(&namespace, reload.page)
-        .await
-        .expect("reload the edited page");
-    app.update(Action::MongoRelationPreviewLoaded {
-        request: reload,
-        preview: Box::new(reloaded.preview),
-        documents: reloaded.documents,
-    });
-    let rows = row_values(&app);
-
-    // Restore the demo document before asserting, so a failed assertion can
-    // never leave the shared local collection modified.
-    let restored = adapter
-        .replace_document_by_id_detailed(&namespace, original_id.clone(), original.bson.clone())
-        .await
-        .expect("restore the demo document");
-    let final_state = load_documents(&adapter, &namespace).await;
-
-    assert_eq!(
-        restored,
-        MongoMutationOutcome::Confirmed { affected: 1 },
-        "the restore matched one document"
-    );
-    assert_eq!(before.len(), 3, "the demo collection holds three documents");
-    assert_eq!(page_documents, 3);
-    assert!(
-        original_name.contains("Ruedas"),
-        "the first document in _id order is the demo's Ruedas Pro, got {original_name:?}"
-    );
-    assert_eq!(
-        replace.id, original_id,
-        "the write is bounded to the original _id value"
-    );
-    assert_eq!(
-        outcome,
-        MongoMutationOutcome::Confirmed { affected: 1 },
-        "exactly one document matched the _id filter"
-    );
-    assert_eq!(after.len(), 3, "no document was inserted or deleted");
-    let edited_after = edited_after.expect("the edited document still exists");
-    let expected = MongoDocument {
-        bson: edited.clone(),
-        raw: mongodb::bson::raw::RawDocumentBuf::from_bytes(
-            mongodb::bson::to_vec(&edited).expect("encode"),
-        )
-        .expect("raw"),
-        editable: true,
-    };
-    assert_eq!(
-        canonical_ejson(&edited_after),
-        canonical_ejson(&expected),
-        "the edited document holds the saved values"
-    );
-    assert_ne!(
-        canonical_ejson(&edited_after),
-        canonical_ejson(&original),
-        "the replacement really changed the stored document"
-    );
-    assert_eq!(
-        untouched_after, untouched,
-        "the other two documents are byte-identical after the replace"
-    );
-    assert_eq!(
-        rows[target_row][1],
-        CellValue::Text(edited_name.clone()),
-        "the reloaded grid shows the saved value"
-    );
-    assert_eq!(
-        by_id(&final_state),
-        by_id(&before),
-        "the demo collection is restored to its original documents"
-    );
+    let cleanup = fixture_client.database(&database).drop().await;
     adapter.close().await;
+    fixture_client.shutdown().await;
+    cleanup.expect("drop the isolated MongoDB relation fixture");
+    result.unwrap_or_else(|error| panic!("MongoDB relation CAS fixture failed: {error}"));
 }
 
 // ---------------------------------------------------------------------------
@@ -2812,1028 +2925,5 @@ fn the_document_modal_renders_indented_ejson() {
     assert!(
         text.starts_with("{\n"),
         "the object must open its own line, got {text:?}"
-    );
-}
-
-// ---------------------------------------------------------------------------
-// T5 (S1-S11): the delete key marks rows and Ctrl-S commits them
-// ---------------------------------------------------------------------------
-//
-// A MongoDB collection reports no SQL columns and no primary key, so the SQL
-// grid save can never write it. The delete key stages the very mark the SQL
-// grid stages, and Ctrl-S commits it as one bounded bulk delete over the `_id`s
-// the marked rows were loaded with. Every test below asserts the whole
-// observable effect of the rule it covers: the exact command stream, the exact
-// toasts, the grid rows, and the marks left behind.
-
-use lazydb::{
-    db::catalog::{
-        CatalogCount, CatalogMetadata, CatalogPage, CatalogRequest, CatalogRequestKey,
-        CatalogTarget, ColumnMetadata, DdlProvenance, RelationDdl,
-    },
-    model::relation_edit::{EditableRowState, RelationEditSession},
-};
-
-/// The exact toast the user reported after pressing delete on a MongoDB row.
-const SQL_KEYLESS_TOAST: &str =
-    "Cannot update or delete existing rows without a primary key; no changes were saved";
-
-/// The refusal a MongoDB relation gives for a row the SQL grid would have to
-/// write: a collection's field edits belong to the document modal.
-const MONGODB_GRID_WRITE_MESSAGE: &str =
-    "MongoDB rows are edited in the document modal; the grid only commits deletions";
-
-/// Connects the workspace itself, the way a real session does: the SQL save
-/// path only runs for a live connection, and the MongoDB row must not take it.
-fn activate_workspace_connection(app: &mut App, connection: ConnectionIdentity) {
-    let profile = app
-        .profiles
-        .iter()
-        .find(|profile| profile.id == connection.profile_id)
-        .cloned()
-        .expect("the connection profile exists");
-    app.connection.profile_id = Some(connection.profile_id);
-    app.connection.generation = connection.generation;
-    app.connection.pending_profile_id = None;
-    app.connection.pending_generation = None;
-    app.connection.pending_target = None;
-    app.connection.status = ConnectionStatus::Connected;
-    app.connection.target = Some(ExecutionTarget::from_profile(&profile));
-}
-
-/// True while the grid holds a row the save would have to write.
-fn has_dirty_rows(app: &App) -> bool {
-    active_relation_tab(app)
-        .edit
-        .as_ref()
-        .is_some_and(|edit| edit.has_dirty_rows())
-}
-
-/// The state of every grid row, so a test can assert exactly which rows a key
-/// marked and which it left alone.
-fn row_states(app: &App) -> Vec<EditableRowState> {
-    active_relation_tab(app)
-        .edit
-        .as_ref()
-        .expect("the grid session exists")
-        .rows
-        .iter()
-        .map(|row| row.state.clone())
-        .collect()
-}
-
-/// The indexes of the rows currently marked for deletion.
-fn marked_rows(app: &App) -> Vec<usize> {
-    row_states(app)
-        .iter()
-        .enumerate()
-        .filter(|(_, state)| matches!(state, EditableRowState::Deleted))
-        .map(|(index, _)| index)
-        .collect()
-}
-
-/// Presses the delete key on one row, the way the user does.
-fn press_delete(app: &mut App, row: usize) -> Vec<Command> {
-    active_relation_tab_mut(app).grid.selected_row = row;
-    app.update(Action::RelationDeleteCurrent)
-}
-
-fn notification_bodies(app: &App) -> Vec<String> {
-    app.notifications
-        .history()
-        .map(|notification| notification.body.clone())
-        .collect()
-}
-
-/// One page of documents as the relation preview the grid maps from.
-fn preview_for(page_request: PageRequest, documents: &[MongoDocument]) -> RelationPreview {
-    let loaded = page(documents.to_vec(), None);
-    RelationPreview {
-        sql: find_description(&relation_find_spec(&mongo_namespace(), page_request)),
-        result: QueryOutcome {
-            result_sets: vec![page_result_set(&loaded)],
-            stats: QueryStats::new(Default::default(), Default::default(), documents.len()),
-        },
-        pagination: lazydb::model::pagination::ResultPagination::from_page(
-            page_request,
-            documents.len(),
-        ),
-        row_versions: None,
-    }
-}
-
-#[derive(Debug)]
-struct DocumentsDeleteCommand {
-    tab_id: Uuid,
-    tab_generation: u64,
-    connection: ConnectionIdentity,
-    namespace: MongoNamespace,
-    ids: Vec<mongodb::bson::Bson>,
-}
-
-/// Asserts the commit emitted exactly one bounded document delete, that it is
-/// the only command, and that no SQL grid mutation was emitted beside it.
-fn one_documents_delete_command(commands: &[Command]) -> DocumentsDeleteCommand {
-    assert!(
-        !commands
-            .iter()
-            .any(|command| matches!(command, Command::RelationMutation { .. })),
-        "a MongoDB relation must never emit a SQL grid mutation, got {commands:?}"
-    );
-    let [
-        Command::DeleteMongoRelationDocuments {
-            tab_id,
-            tab_generation,
-            connection,
-            namespace,
-            ids,
-        },
-    ] = commands
-    else {
-        panic!("the commit emits exactly one document delete and nothing else, got {commands:?}")
-    };
-    DocumentsDeleteCommand {
-        tab_id: *tab_id,
-        tab_generation: *tab_generation,
-        connection: *connection,
-        namespace: namespace.clone(),
-        ids: ids.clone(),
-    }
-}
-
-/// S1: the SQL keyless toast the user reported can never come from a MongoDB
-/// relation row again.
-///
-/// The report was "cada vez que quiero borrar un registro en mongodb" with that
-/// toast. The path was: delete key -> the row is marked as a pending SQL grid
-/// deletion -> save -> the SQL keyless guard refuses it, because a collection
-/// reports no primary key.
-#[test]
-fn s1_the_sql_keyless_toast_is_never_raised_from_a_mongodb_relation_row() {
-    let (mut app, request) = mongo_app_with_page(bike_documents());
-    activate_workspace_connection(&mut app, request.connection);
-    let before = row_values(&app);
-
-    // Step 1: the delete key on the row under the cursor only marks it.
-    let delete_commands = press_delete(&mut app, 0);
-    assert!(
-        delete_commands.is_empty(),
-        "the delete key reaches no database, got {delete_commands:?}"
-    );
-
-    // Step 2: the collection's structure report, which is the empty SQL DDL a
-    // collection carries, so the SQL keyless guard finds no primary key.
-    let commands = app.update(Action::SetRelationView(RelationView::Ddl));
-    let request = structure_request(&commands);
-    app.update(Action::MongoRelationStructureLoaded {
-        request,
-        result: Ok(Box::new(MongoStructureSnapshot {
-            metadata: structure_metadata(),
-            schema: Some(inferred_schema()),
-        })),
-    });
-    assert!(
-        matches!(active_relation_tab(&app).ddl, RelationLoad::Ready(_)),
-        "the collection structure must be loaded for the SQL save to run, got {:?}",
-        active_relation_tab(&app).ddl
-    );
-
-    // Step 3: the save the user pressed after the delete commits the delete.
-    let save_commands = app.update(Action::RelationCommit);
-    let delete = one_documents_delete_command(&save_commands);
-    assert_eq!(delete.ids, vec![object_id(RUEDAS_ID)]);
-
-    let bodies = notification_bodies(&app);
-    assert!(
-        !bodies.iter().any(|body| body.contains(SQL_KEYLESS_TOAST)),
-        "the reported SQL keyless toast must never be raised from a MongoDB relation row, got {bodies:?}"
-    );
-    assert!(
-        !bodies
-            .iter()
-            .any(|body| body.contains("without a primary key")),
-        "no SQL primary-key refusal may mention a MongoDB row, got {bodies:?}"
-    );
-    assert_eq!(
-        row_values(&app),
-        before,
-        "the commit only stages the write; the loaded page is untouched"
-    );
-}
-
-/// S2: the delete key marks the current row and emits nothing.
-#[test]
-fn s2_the_delete_key_marks_the_row_and_emits_nothing() {
-    let (mut app, _request) = mongo_app_with_page(bike_documents());
-    let before = row_values(&app);
-
-    // The last row, so the mark cannot be the page's first row by luck.
-    let commands = press_delete(&mut app, 2);
-
-    assert!(
-        commands.is_empty(),
-        "the delete key emits no command until the save, got {commands:?}"
-    );
-    assert_eq!(
-        row_states(&app),
-        vec![
-            EditableRowState::Clean,
-            EditableRowState::Clean,
-            EditableRowState::Deleted,
-        ],
-        "only the row under the cursor is marked for deletion"
-    );
-    assert!(
-        has_dirty_rows(&app),
-        "a marked row is a pending change the save has to commit"
-    );
-    assert!(
-        notification_bodies(&app).is_empty(),
-        "marking a row says nothing, got {:?}",
-        notification_bodies(&app)
-    );
-    assert_eq!(
-        row_values(&app),
-        before,
-        "marking a row never rewrites the loaded values"
-    );
-}
-
-/// S3: with no document at the cursor nothing is marked and nothing is emitted.
-#[test]
-fn s3_no_document_at_the_cursor_marks_nothing() {
-    // A page with no documents has no row to mark.
-    let (mut app, _request) = mongo_app_with_page(Vec::new());
-
-    let commands = app.update(Action::RelationDeleteCurrent);
-
-    assert!(
-        commands.is_empty(),
-        "an empty page emits no command, got {commands:?}"
-    );
-    assert!(
-        row_states(&app).is_empty(),
-        "an empty page has no row to mark, got {:?}",
-        row_states(&app)
-    );
-    assert!(!has_dirty_rows(&app));
-    assert!(
-        notification_bodies(&app).is_empty(),
-        "a delete key on an empty page says nothing, got {:?}",
-        notification_bodies(&app)
-    );
-
-    // A cursor past the loaded page marks no document either.
-    let (mut app, _request) = mongo_app_with_page(bike_documents());
-    let before = row_values(&app);
-
-    let commands = press_delete(&mut app, 7);
-
-    assert!(
-        commands.is_empty(),
-        "a cursor with no document emits no command, got {commands:?}"
-    );
-    assert_eq!(
-        marked_rows(&app),
-        Vec::<usize>::new(),
-        "a cursor past the page marks nothing"
-    );
-    assert!(!has_dirty_rows(&app));
-    assert!(
-        notification_bodies(&app).is_empty(),
-        "a cursor past the page says nothing, got {:?}",
-        notification_bodies(&app)
-    );
-    assert_eq!(
-        row_values(&app),
-        before,
-        "nothing about the loaded page changes"
-    );
-}
-
-/// S4: `Ctrl-S` emits exactly one command carrying every marked row's `_id`,
-/// and never a SQL grid mutation.
-#[test]
-fn s4_the_commit_emits_one_command_with_every_marked_id() {
-    let (mut app, request) = mongo_app_with_page(bike_documents());
-    press_delete(&mut app, 0);
-    press_delete(&mut app, 2);
-
-    let commands = app.update(Action::RelationCommit);
-
-    let delete = one_documents_delete_command(&commands);
-    assert_eq!(delete.tab_id, active_relation_tab(&app).id);
-    assert_eq!(delete.tab_generation, active_relation_tab(&app).generation);
-    assert_eq!(
-        delete.connection, request.connection,
-        "the commit is addressed to the connection the page was loaded from"
-    );
-    assert_eq!(delete.namespace, mongo_namespace());
-    assert_eq!(
-        delete.ids,
-        vec![object_id(RUEDAS_ID), object_id(CADENA_ID)],
-        "every marked row's loaded _id, in row order"
-    );
-    assert_eq!(
-        marked_rows(&app),
-        vec![0, 2],
-        "emitting the command never clears a mark; only the result does"
-    );
-}
-
-/// S5: with no row marked for deletion the save emits nothing and says nothing.
-#[test]
-fn s5_an_empty_commit_emits_and_says_nothing() {
-    let (mut app, _request) = mongo_app_with_page(bike_documents());
-    assert!(
-        !has_dirty_rows(&app),
-        "the test starts from a page with nothing marked"
-    );
-
-    let commands = app.update(Action::RelationCommit);
-
-    assert!(
-        commands.is_empty(),
-        "with nothing marked the save writes nothing, got {commands:?}"
-    );
-    assert!(
-        notification_bodies(&app).is_empty(),
-        "with nothing marked the save says nothing, got {:?}",
-        notification_bodies(&app)
-    );
-    assert_eq!(marked_rows(&app), Vec::<usize>::new());
-}
-
-/// S6: a read-only MongoDB profile refuses the commit with the existing MongoDB
-/// read-only message and keeps the marks.
-#[test]
-fn s6_a_read_only_profile_refuses_the_commit_and_keeps_the_marks() {
-    let (mut app, _request) = mongo_app_with_page(bike_documents());
-    press_delete(&mut app, 1);
-    for profile in &mut app.profiles {
-        profile.read_only = true;
-    }
-
-    let commands = app.update(Action::RelationCommit);
-
-    assert!(
-        commands.is_empty(),
-        "a read-only profile must never emit a write, got {commands:?}"
-    );
-    assert!(
-        notification_bodies(&app)
-            .iter()
-            .any(|body| body == MONGODB_READ_ONLY_MESSAGE),
-        "the refusal reuses the MongoDB read-only message, got {:?}",
-        notification_bodies(&app)
-    );
-    assert_eq!(
-        marked_rows(&app),
-        vec![1],
-        "a refused commit keeps the marks so the save can be retried"
-    );
-    assert!(has_dirty_rows(&app));
-}
-
-/// S7: a successful commit notifies, clears the marks and reloads the page.
-#[test]
-fn s7_a_successful_commit_reloads_and_clears_the_marks() {
-    let (mut app, request) = mongo_app_with_page(bike_documents());
-    press_delete(&mut app, 0);
-    press_delete(&mut app, 1);
-    let commands = app.update(Action::RelationCommit);
-    let delete = one_documents_delete_command(&commands);
-
-    let commands = app.update(Action::MongoRelationDocumentDeleted {
-        tab_id: delete.tab_id,
-        tab_generation: delete.tab_generation,
-        ids: delete.ids.clone(),
-    });
-
-    assert!(
-        notification_bodies(&app)
-            .iter()
-            .any(|body| body.contains("deleted") && body.contains("bikes")),
-        "the delete is reported with the collection name, got {:?}",
-        notification_bodies(&app)
-    );
-    let reload = mongo_preview_request(&commands);
-    assert_eq!(
-        reload.page, request.page,
-        "the page the documents were deleted from is the page that reloads"
-    );
-    assert_eq!(reload.tab_id, delete.tab_id);
-    assert!(
-        matches!(active_relation_tab(&app).data, RelationLoad::Loading { .. }),
-        "the page reloads instead of being emptied, got {:?}",
-        active_relation_tab(&app).data
-    );
-    assert_eq!(
-        marked_rows(&app),
-        Vec::<usize>::new(),
-        "a committed delete leaves no row marked"
-    );
-    assert!(
-        !has_dirty_rows(&app),
-        "a committed delete leaves nothing dirty, so one document is never deleted twice"
-    );
-
-    // The reload that follows shows what the collection now holds.
-    let remaining = vec![bike_documents()[2].clone()];
-    let commands = app.update(Action::MongoRelationPreviewLoaded {
-        request: reload.clone(),
-        preview: Box::new(preview_for(reload.page, &remaining)),
-        documents: remaining,
-    });
-    assert!(commands.is_empty(), "loading a page writes nothing");
-    assert_eq!(
-        row_states(&app),
-        vec![EditableRowState::Clean],
-        "the reloaded grid is the collection, with nothing left marked"
-    );
-    assert!(!has_dirty_rows(&app));
-}
-
-/// S8: a failed commit surfaces the error and keeps the page with its marks; a
-/// result whose tab id or generation is stale is ignored.
-#[test]
-fn s8_a_failed_commit_keeps_the_page_and_the_marks() {
-    let (mut app, _request) = mongo_app_with_page(bike_documents());
-    let before = row_values(&app);
-    press_delete(&mut app, 1);
-    let commands = app.update(Action::RelationCommit);
-    let delete = one_documents_delete_command(&commands);
-    let message = "MongoDB operation failed; inspect the error code and connection settings";
-
-    let commands = app.update(Action::MongoRelationDocumentDeleteFailed {
-        tab_id: delete.tab_id,
-        tab_generation: delete.tab_generation,
-        ids: delete.ids.clone(),
-        message: message.into(),
-    });
-
-    assert!(
-        commands.is_empty(),
-        "a failed delete reloads nothing, got {commands:?}"
-    );
-    assert!(
-        notification_bodies(&app).iter().any(|body| body == message),
-        "the tab surfaces the adapter error, got {:?}",
-        notification_bodies(&app)
-    );
-    assert!(
-        matches!(active_relation_tab(&app).data, RelationLoad::Ready(_)),
-        "the page stays visible after a failed commit, got {:?}",
-        active_relation_tab(&app).data
-    );
-    assert_eq!(
-        marked_rows(&app),
-        vec![1],
-        "a failed commit keeps the marks so the user can retry"
-    );
-    assert_eq!(
-        row_values(&app),
-        before,
-        "a failed commit leaves the loaded page untouched"
-    );
-
-    // A result for another tab or another generation belongs to a page that was
-    // already replaced: it is dropped instead of notifying or reloading.
-    let notifications = notification_bodies(&app).len();
-    for (tab_id, tab_generation) in [
-        (delete.tab_id, delete.tab_generation.saturating_add(1)),
-        (Uuid::new_v4(), delete.tab_generation),
-    ] {
-        let commands = app.update(Action::MongoRelationDocumentDeleted {
-            tab_id,
-            tab_generation,
-            ids: delete.ids.clone(),
-        });
-        assert!(
-            commands.is_empty(),
-            "a stale success reloads nothing, got {commands:?}"
-        );
-        let commands = app.update(Action::MongoRelationDocumentDeleteFailed {
-            tab_id,
-            tab_generation,
-            ids: delete.ids.clone(),
-            message: "stale delete".into(),
-        });
-        assert!(
-            commands.is_empty(),
-            "a stale failure reloads nothing, got {commands:?}"
-        );
-    }
-    assert_eq!(
-        notification_bodies(&app).len(),
-        notifications,
-        "a stale result reports nothing, got {:?}",
-        notification_bodies(&app)
-    );
-    assert_eq!(
-        marked_rows(&app),
-        vec![1],
-        "a stale result never touches the marks of the page that is still loaded"
-    );
-    assert!(
-        matches!(active_relation_tab(&app).data, RelationLoad::Ready(_)),
-        "a stale result never replaces the page that is still loaded"
-    );
-}
-
-/// S9: a visual-mode range delete marks every row in the range, and the range
-/// commits through the same `Ctrl-S` path.
-#[test]
-fn s9_a_visual_range_marks_every_row_in_the_range() {
-    let (mut app, _request) = mongo_app_with_page(bike_documents());
-    let before = row_values(&app);
-
-    app.update(Action::RelationVisualLine);
-    active_relation_tab_mut(&mut app).grid.selected_row = 2;
-
-    let commands = app.update(Action::RelationDeleteSelected);
-
-    assert!(
-        commands.is_empty(),
-        "a range delete marks rows and writes nothing, got {commands:?}"
-    );
-    assert_eq!(
-        marked_rows(&app),
-        vec![0, 1, 2],
-        "every row in the range is marked for deletion"
-    );
-    assert!(has_dirty_rows(&app));
-    assert!(
-        notification_bodies(&app).is_empty(),
-        "marking a range says nothing, got {:?}",
-        notification_bodies(&app)
-    );
-    assert_eq!(
-        row_values(&app),
-        before,
-        "marking a range never rewrites the loaded values"
-    );
-
-    let commands = app.update(Action::RelationCommit);
-    let delete = one_documents_delete_command(&commands);
-    assert_eq!(
-        delete.ids,
-        vec![
-            object_id(RUEDAS_ID),
-            object_id(FRENO_ID),
-            object_id(CADENA_ID)
-        ],
-        "the range commits through the same Ctrl-S path, one _id per marked row"
-    );
-}
-
-/// S10: a row marked `Updated` blocks the commit, because a MongoDB relation
-/// never writes column updates through the grid.
-#[test]
-fn s10_an_updated_row_blocks_the_commit() {
-    let (mut app, _request) = mongo_app_with_page(bike_documents());
-    press_delete(&mut app, 0);
-    {
-        let edit = active_relation_tab_mut(&mut app)
-            .edit
-            .as_mut()
-            .expect("an edit session");
-        edit.rows[1].state = EditableRowState::Updated {
-            changed_columns: [1usize].into_iter().collect(),
-        };
-    }
-
-    let commands = app.update(Action::RelationCommit);
-
-    assert!(
-        commands.is_empty(),
-        "a field edit is never written by the grid commit, got {commands:?}"
-    );
-    assert!(
-        notification_bodies(&app)
-            .iter()
-            .any(|body| body == MONGODB_GRID_WRITE_MESSAGE),
-        "the blocked commit says why, got {:?}",
-        notification_bodies(&app)
-    );
-    assert_eq!(
-        marked_rows(&app),
-        vec![0],
-        "the blocked commit keeps the deletion mark"
-    );
-    assert!(
-        matches!(row_states(&app)[1], EditableRowState::Updated { .. }),
-        "the blocked commit keeps the update that blocked it, got {:?}",
-        row_states(&app)
-    );
-    assert!(has_dirty_rows(&app));
-}
-
-/// S10 (widened): a grid insert with nothing marked for deletion is refused
-/// visibly instead of being a silent no-op.
-#[test]
-fn s10b_a_grid_insert_alone_is_refused_visibly() {
-    let (mut app, _request) = mongo_app_with_page(bike_documents());
-
-    app.update(Action::RelationInsertRow);
-    assert!(
-        has_dirty_rows(&app),
-        "the insert drafted a row, so the tab is dirty"
-    );
-
-    let commands = app.update(Action::RelationCommit);
-
-    assert!(
-        commands.is_empty(),
-        "a collection never inserts through the grid commit, got {commands:?}"
-    );
-    assert!(
-        notification_bodies(&app)
-            .iter()
-            .any(|body| body == MONGODB_GRID_WRITE_MESSAGE),
-        "the refused insert is visible, got {:?}",
-        notification_bodies(&app)
-    );
-    assert!(
-        !notification_bodies(&app)
-            .iter()
-            .any(|body| body.contains("No pending relation changes")),
-        "the refusal is not disguised as an empty save, got {:?}",
-        notification_bodies(&app)
-    );
-}
-
-/// S4: the filter carries only the loaded `_id`s, in their loaded BSON types,
-/// and an empty set can never widen into a match-everything delete.
-#[test]
-fn s4b_the_delete_filter_is_only_the_loaded_ids() {
-    let oid = object_id(RUEDAS_ID);
-    let string_id = mongodb::bson::Bson::String("natural-key".into());
-    let int_id = mongodb::bson::Bson::Int32(7);
-    let document_id = mongodb::bson::Bson::Document(mongodb::bson::doc! { "a": 1 });
-    let (mut app, _request) = mongo_app_with_page(vec![
-        document(mongodb::bson::doc! { "_id": oid.clone(), "name": "a" }),
-        document(mongodb::bson::doc! { "_id": string_id.clone(), "name": "b" }),
-        document(mongodb::bson::doc! { "_id": int_id.clone(), "name": "c" }),
-        document(mongodb::bson::doc! { "_id": document_id.clone(), "name": "d" }),
-    ]);
-    for row in 0..4 {
-        press_delete(&mut app, row);
-    }
-
-    let delete = one_documents_delete_command(&app.update(Action::RelationCommit));
-
-    let expected = vec![oid, string_id, int_id, document_id];
-    assert_eq!(
-        delete.ids, expected,
-        "the ids are the loaded BSON values, never their rendering"
-    );
-    let filter = lazydb::db::mongodb::mutation::delete_many_filter(&delete.ids);
-    assert_eq!(filter, mongodb::bson::doc! { "_id": { "$in": expected } });
-    assert_eq!(
-        filter.keys().collect::<Vec<_>>(),
-        vec!["_id"],
-        "no other field takes part in the delete"
-    );
-    assert!(
-        !delete
-            .ids
-            .contains(&mongodb::bson::Bson::String(RUEDAS_ID.to_owned())),
-        "the rendered hex of an ObjectId never reaches the filter"
-    );
-    assert_eq!(
-        lazydb::db::mongodb::mutation::delete_many_filter(&[]),
-        mongodb::bson::doc! { "_id": { "$in": [] } },
-        "an empty $in matches no document, never everything"
-    );
-}
-
-/// S7: once a commit is confirmed and the page reloaded, a second `Ctrl-S`
-/// writes nothing and says nothing, so nothing is deleted twice.
-#[test]
-fn s7b_a_committed_delete_is_never_emitted_twice() {
-    let (mut app, _request) = mongo_app_with_page(bike_documents());
-    press_delete(&mut app, 0);
-    let delete = one_documents_delete_command(&app.update(Action::RelationCommit));
-    let commands = app.update(Action::MongoRelationDocumentDeleted {
-        tab_id: delete.tab_id,
-        tab_generation: delete.tab_generation,
-        ids: delete.ids.clone(),
-    });
-    let reload = mongo_preview_request(&commands);
-    let remaining = vec![bike_documents()[1].clone(), bike_documents()[2].clone()];
-    app.update(Action::MongoRelationPreviewLoaded {
-        request: reload.clone(),
-        preview: Box::new(preview_for(reload.page, &remaining)),
-        documents: remaining,
-    });
-    let notifications = notification_bodies(&app).len();
-
-    let commands = app.update(Action::RelationCommit);
-
-    assert!(
-        commands.is_empty(),
-        "a second save writes nothing, got {commands:?}"
-    );
-    assert_eq!(
-        notification_bodies(&app).len(),
-        notifications,
-        "a second save says nothing"
-    );
-    assert_eq!(marked_rows(&app), Vec::<usize>::new(), "no mark survives");
-}
-
-/// S8: a partial bulk delete never claims success, keeps the marks and keeps
-/// the page, so the user reloads instead of trusting a half-applied delete.
-#[test]
-fn s8b_a_partial_delete_is_reported_and_keeps_the_marks() {
-    let (mut app, _request) = mongo_app_with_page(bike_documents());
-    press_delete(&mut app, 0);
-    let delete = one_documents_delete_command(&app.update(Action::RelationCommit));
-    let message =
-        lazydb::db::mongodb::mutation::delete_outcome_message(&MongoMutationOutcome::Partial {
-            affected: 1,
-            requested: 3,
-        })
-        .expect("a partial delete is never silent");
-
-    let commands = app.update(Action::MongoRelationDocumentDeleteFailed {
-        tab_id: delete.tab_id,
-        tab_generation: delete.tab_generation,
-        ids: delete.ids.clone(),
-        message: message.to_owned(),
-    });
-
-    assert!(
-        commands.is_empty(),
-        "a partial delete reloads nothing, got {commands:?}"
-    );
-    assert!(
-        notification_bodies(&app).iter().any(|body| body == message),
-        "the partial delete is surfaced, got {:?}",
-        notification_bodies(&app)
-    );
-    assert_eq!(
-        marked_rows(&app),
-        vec![0],
-        "the marks survive a partial delete"
-    );
-    assert!(
-        matches!(active_relation_tab(&app).data, RelationLoad::Ready(_)),
-        "the page survives a partial delete"
-    );
-}
-
-/// S11: the browser tab's `d` delete keeps emitting its own bounded delete.
-#[test]
-fn s11_the_browser_delete_still_emits_one_bounded_document_delete() {
-    let (mut app, profile_id, generation) = mongo_app();
-    let documents = bike_documents();
-    let mut tab = MongoBrowserTab::new(profile_id, mongo_namespace());
-    tab.page = MongoPageState::Ready(page(documents.clone(), None));
-    tab.selected_document = 1;
-    let tab_id = tab.id;
-    app.tabs.push(WorkspaceTab::MongoBrowser(tab));
-    app.active_tab = app.tabs.len() - 1;
-
-    let commands = app.update(Action::MongoDeleteSelected);
-
-    let [
-        Command::DeleteMongoDocument {
-            tab_id: deleted_tab,
-            profile_id: deleted_profile,
-            generation: deleted_generation,
-            mutation_generation,
-            namespace,
-            id,
-            expected,
-        },
-    ] = commands.as_slice()
-    else {
-        panic!("the browser delete emits exactly one bounded document delete, got {commands:?}")
-    };
-    assert_eq!(*deleted_tab, tab_id);
-    assert_eq!(*deleted_profile, profile_id);
-    assert_eq!(*deleted_generation, generation);
-    assert_eq!(*mutation_generation, 1);
-    assert_eq!(*namespace, mongo_namespace());
-    assert_eq!(*id, object_id(FRENO_ID));
-    assert_eq!(
-        *expected, documents[1].bson,
-        "the browser delete is still guarded by the whole document the row was loaded from"
-    );
-}
-
-/// A relation DDL for a table whose columns carry no primary key, which is what
-/// makes the SQL grid delete capability unavailable.
-fn keyless_sql_ddl(
-    connection: ConnectionIdentity,
-    relation_id: &CatalogId,
-    scope: lazydb::profile::CatalogScope,
-) -> RelationDdl {
-    let profile_id = connection.profile_id;
-    let [database, schema, object] = relation_id.native_path.as_slice() else {
-        panic!("the test relation ID has database, schema, and object segments");
-    };
-    let qualified = QualifiedName {
-        database: Some(database.clone()),
-        schema: Some(schema.clone()),
-        object: object.clone(),
-    };
-    let relation = CatalogEntry::relation(
-        relation_id.clone(),
-        CatalogId::new(
-            profile_id,
-            CatalogKind::Schema,
-            [database.as_str(), schema.as_str()],
-        ),
-        qualified.clone(),
-        "table",
-        OptionalMetadata::Unsupported,
-        true,
-    )
-    .expect("the table entry");
-    let entries = vec![
-        CatalogEntry::relation_child(
-            CatalogId::new(
-                profile_id,
-                CatalogKind::Column,
-                [database.as_str(), schema.as_str(), object.as_str(), "id"],
-            ),
-            relation_id.clone(),
-            QualifiedName {
-                object: "id".into(),
-                ..qualified.clone()
-            },
-            "integer",
-            OptionalMetadata::Unsupported,
-            CatalogMetadata::Column(ColumnMetadata::new(1, "integer", false)),
-        )
-        .expect("the id column"),
-        CatalogEntry::relation_child(
-            CatalogId::new(
-                profile_id,
-                CatalogKind::Column,
-                [database.as_str(), schema.as_str(), object.as_str(), "name"],
-            ),
-            relation_id.clone(),
-            QualifiedName {
-                object: "name".into(),
-                ..qualified
-            },
-            "text",
-            OptionalMetadata::Unsupported,
-            CatalogMetadata::Column(ColumnMetadata::new(2, "text", true)),
-        )
-        .expect("the name column"),
-    ];
-    let catalog_request = CatalogRequest {
-        key: CatalogRequestKey {
-            connection,
-            catalog_epoch: 0,
-            request_id: 0,
-            target: CatalogTarget::RelationChildren {
-                relation: relation_id.clone(),
-            },
-            cursor: None,
-        },
-        scope,
-        page_size: 100,
-    };
-    RelationDdl {
-        relation,
-        children: CatalogPage::new(&catalog_request, entries, CatalogCount::Exact(2), None)
-            .expect("the keyless children page"),
-        sql: format!("CREATE TABLE {object} (id integer, name text)"),
-        provenance: DdlProvenance::NativeCatalog,
-    }
-}
-
-/// PRESERVE: a SQL table with no primary key still refuses the grid delete and
-/// marks nothing.
-///
-/// The keyless guard gained a MongoDB bypass; a SQL table keeps the refusal it
-/// always had, because its delete really is a write by primary key.
-#[test]
-fn the_sql_keyless_delete_is_still_refused_without_marking_the_row() {
-    let (mut app, profile_id, table_id) = sql_app_with_table();
-    app.update(Action::ExplorerOpenSelected);
-    let generation = app.connection.generation;
-    let connection = ConnectionIdentity {
-        profile_id,
-        generation,
-    };
-    let scope = lazydb::profile::CatalogScope::for_profile(
-        DatabaseKind::Postgres,
-        SQL_DATABASE,
-        Some(SQL_SCHEMA),
-    );
-    let Some(WorkspaceTab::Relation(table)) = app.tabs.last_mut() else {
-        panic!("activating a sql table must open a relation tab");
-    };
-    table.edit = Some(RelationEditSession::from_rows(vec![vec![
-        CellValue::Integer(1),
-        CellValue::Text("old".into()),
-    ]]));
-    table.ddl = RelationLoad::Ready(lazydb::model::relation::OwnedSnapshot {
-        value: keyless_sql_ddl(connection, &table_id, scope.clone()),
-        attribution: lazydb::model::relation::SnapshotAttribution {
-            connection,
-            profile_id,
-            scope,
-        },
-    });
-
-    let commands = app.update(Action::RelationDeleteCurrent);
-
-    assert!(
-        commands.is_empty(),
-        "a keyless SQL table stages no grid delete, got {commands:?}"
-    );
-    assert_eq!(
-        marked_rows(&app),
-        Vec::<usize>::new(),
-        "the SQL refusal marks nothing"
-    );
-    assert!(!has_dirty_rows(&app));
-    assert!(
-        notification_bodies(&app)
-            .iter()
-            .any(|body| body.contains("Existing rows require a primary key for grid deletes")),
-        "the SQL keyless refusal is unchanged, got {:?}",
-        notification_bodies(&app)
-    );
-}
-
-/// PRESERVE: the SQL delete key still marks the row for a save.
-///
-/// The delete key gained a MongoDB branch; a SQL table keeps the grid behaviour
-/// it had before, and never emits a document delete.
-#[test]
-fn the_sql_delete_key_still_marks_the_row_for_a_save() {
-    let (mut app, profile_id, _table_id) = sql_app_with_table();
-    app.update(Action::ExplorerOpenSelected);
-    let generation = app.connection.generation;
-    let Some(WorkspaceTab::Relation(table)) = app.tabs.last_mut() else {
-        panic!("activating a sql table must open a relation tab");
-    };
-    table.data = RelationLoad::Ready(lazydb::model::relation::OwnedSnapshot {
-        value: RelationPreview {
-            sql: "select id, name from app.public.users".into(),
-            result: QueryOutcome {
-                result_sets: vec![ResultSet {
-                    columns: vec![
-                        ColumnMeta {
-                            name: "id".into(),
-                            type_name: "INTEGER".into(),
-                        },
-                        ColumnMeta {
-                            name: "name".into(),
-                            type_name: "TEXT".into(),
-                        },
-                    ],
-                    rows: vec![vec![CellValue::Integer(1), CellValue::Text("old".into())]],
-                    affected_rows: 0,
-                }],
-                stats: QueryStats::new(Default::default(), Default::default(), 1),
-            },
-            pagination: lazydb::model::pagination::ResultPagination::from_page(
-                PageRequest::first(PageSize::Ten),
-                1,
-            ),
-            row_versions: None,
-        },
-        attribution: lazydb::model::relation::SnapshotAttribution {
-            connection: ConnectionIdentity {
-                profile_id,
-                generation,
-            },
-            profile_id,
-            scope: lazydb::profile::CatalogScope::for_profile(
-                DatabaseKind::Postgres,
-                SQL_DATABASE,
-                Some(SQL_SCHEMA),
-            ),
-        },
-    });
-    table.edit = Some(RelationEditSession::from_rows(vec![vec![
-        CellValue::Integer(1),
-        CellValue::Text("old".into()),
-    ]]));
-
-    let commands = app.update(Action::RelationDeleteCurrent);
-
-    assert!(
-        commands.is_empty(),
-        "a SQL row is deleted through the grid, never through a document delete, got {commands:?}"
-    );
-    assert!(
-        has_dirty_rows(&app),
-        "the SQL delete key still marks the row for a save"
-    );
-    assert_eq!(
-        marked_rows(&app),
-        vec![0],
-        "the SQL row is marked exactly like a MongoDB row"
     );
 }

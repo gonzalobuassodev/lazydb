@@ -660,26 +660,37 @@ Extended JSON and back.
 | --- | --- |
 | `j/k`, arrows | Move between top-level fields |
 | `Enter` | Edit the selected field in its own modal |
-| `Ctrl-s` | Apply the document (one replacement bounded to `_id`) |
+| `Ctrl-s` | Save the document (one replacement bounded to `_id`) |
 | `Tab` | Switch to the whole document as EJSON |
 | `Esc` | Close the modal |
 
 `_id` is listed but never editable. The field list shows `[n items]` and
 `{n fields}` for the containers, the same shape the data grid uses for them.
-Every other field is edited in its own modal, which is sized to the value it
-holds, keeps a blank row above and below that value, and never covers the
-document modal.
+Every other field is edited in its own modal, sized to its value and bounded
+inside the document modal. It keeps a blank row above and below the value when
+space allows; short terminals prioritize the editable text and error message.
+If a surrounding margin would leave no editable row or column, the field modal
+uses the document modal's full available dimension.
 
 | Field modal, scalar | Behavior |
 | --- | --- |
-| `Enter`, `Ctrl-s` | Apply the field into the document |
-| `Up/Down` | Leave it for the previous or next field |
-| `Esc` | Back to the field list |
+| `Enter`, `Ctrl-s` | Validate and apply the field to the document draft, then return to the field list |
+| `Up/Down` | Validate and apply the field to the document draft, then open the previous or next editable field |
+| `Esc` | Discard the current field edit and return to the field list |
+
+Single-line `Up/Down` skips `_id` and stops at the first or last editable field.
+Invalid input keeps the current field editor and its text open with an error,
+and leaves the document draft unchanged. Applying or moving between fields only
+updates the document draft; it never sends a database write. Save from the
+FIELDS list or the whole-document EJSON view with `Ctrl-s`.
 
 A `date` field shows and edits as ISO-8601 UTC (`2026-11-08T00:00:00Z`), in the
-list and in the modal. Applying accepts that form, `2026-11-08 15:30`,
-`2026-11-08` and canonical EJSON, the ones without an offset as UTC; the document
-text keeps the canonical form the write path stores.
+list and in the modal, with milliseconds when present. Applying accepts RFC 3339
+with an offset, `2026-11-08 15:30[:15[.250]]`, `2026-11-08`, and canonical or
+relaxed EJSON. Forms without an offset use UTC. Submillisecond precision and leap
+seconds are rejected rather than silently changed. Dates outside the supported
+ISO display range retain canonical EJSON; the document draft always uses the
+canonical form.
 
 An array or an embedded document opens the same modal as indented Canonical
 Extended JSON, one entry per line:
@@ -687,13 +698,15 @@ Extended JSON, one entry per line:
 | Field modal, array or document | Behavior |
 | --- | --- |
 | `Enter` | Insert a newline |
-| `Ctrl-s` | Apply the field into the document |
+| `Ctrl-s` | Validate and apply the field to the document draft, then return to the field list |
 | `Ctrl-f` | Re-indent the field text |
 | `Up/Down` | Move the cursor between lines |
-| `Esc` | Back to the field list |
+| `Esc` | Discard the current field edit and return to the field list |
 
 The EJSON view edits the whole document as text: `Enter` inserts a newline,
-`Ctrl-s` saves, `Ctrl-f` formats, `Up/Down` move the cursor and `Esc` cancels.
+`Ctrl-s` saves, `Ctrl-f` formats, `Up/Down` move the cursor, `Tab` returns to
+FIELDS and `Esc` cancels document editing. Contextual Help and footer rows follow
+the active document view or field editor; SQL NULL/DEFAULT controls are omitted.
 
 ### Visual Line
 

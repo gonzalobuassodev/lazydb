@@ -55,3 +55,11 @@ L13. Requirement change: the user reported that the modal opened on one clipped 
 L14. Requirement change: the user asked to hide the `Monitor · <database>` and `Users & Roles · <database>` rows so the tree shows only databases and their collections. Both rows were removed from the projection and their two features are now reached from a selected database row with `m` (monitor) and `u` (users and roles), through the existing `Action::OpenMongoNode`, so no capability was lost. The projection test now pins that no action row is listed, and a keymap test pins both keys.
 
 L15. Delivery shape: the whole feature landed in one commit (6783 authored lines) instead of the four reviewable slices T1-T5 proposed, and this is the recorded reason. The slices are interleaved inside `src/app.rs`, `src/input/keymap.rs` and `src/ui/relation.rs`, so a per-slice split would have required inventing intermediate states that never compiled together; an artificial but green-looking history was judged worse than one honest commit whose message enumerates the slices and their tests. Future work on this area should split by file ownership before writing, not after.
+
+L16. Delivery chain, built on top of yelog/lazydb main (25e23cf) as five reviewable commits, each one compiled and tested on its own branch before the next started:
+- `34575f7` fix(mongodb): expand databases and collections in the explorer — 513 lines, 7 files.
+- `5989a05` feat(mongodb): show collection documents as a field grid — 527 lines, 7 files.
+- `6359816` feat(mongodb): open collections as relation tabs — 1036 lines, 8 files.
+- `75fe966` feat(mongodb): show the collection structure — 1160 lines, 8 files.
+- feat(mongodb): edit a document in a modal — the last commit of the chain; its tree equals the earlier single-commit state plus the clippy fix required by upstream's `-D warnings` gate.
+Verified at the tip: build green, mongodb_relation 33, keymap 166, ui_render 243, explorer_state 48, mongodb_explorer 7, relation_tabs 50, fmt clean, and no clippy warning in any touched file. The 13 DuckDB lib tests fail on this machine for a missing `libduckdb.dylib`, reproduced on a clean checkout of upstream.

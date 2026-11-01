@@ -223,14 +223,15 @@ impl DocumentFieldInput {
         self.value().split('\n').count()
     }
 
-    /// The columns of the widest line, the other half of the modal size.
-    ///
-    /// Wide characters count once: this is a bound for the popup, and the
-    /// editor still scrolls a line that does not fit.
+    /// The terminal cells of the widest projected line.
     pub fn longest_line_columns(&self) -> usize {
         self.value()
             .split('\n')
-            .map(|line| line.chars().count())
+            .map(|line| {
+                unicode_width::UnicodeWidthStr::width(
+                    crate::security::project_editor_line(line).text.as_str(),
+                )
+            })
             .max()
             .unwrap_or_default()
     }
@@ -351,6 +352,9 @@ fn iso_utc_date(value: &mongodb::bson::DateTime) -> String {
         // a date the value does not hold.
         return Bson::DateTime(*value).into_canonical_extjson().to_string();
     };
+    if !(0..=9999).contains(&chrono::Datelike::year(&timestamp)) {
+        return Bson::DateTime(*value).into_canonical_extjson().to_string();
+    }
     if timestamp.timestamp_subsec_millis() == 0 {
         timestamp.format("%Y-%m-%dT%H:%M:%SZ").to_string()
     } else {
@@ -368,9 +372,7 @@ fn parse_bson_date(text: &str) -> Result<Bson, String> {
     let invalid =
         || format!("expected an ISO-8601 timestamp like 2026-11-08T00:00:00Z, got {text:?}");
     if let Ok(timestamp) = chrono::DateTime::parse_from_rfc3339(text) {
-        return Ok(Bson::DateTime(mongodb::bson::DateTime::from_millis(
-            timestamp.timestamp_millis(),
-        )));
+        return bson_date_from_timestamp(timestamp.with_timezone(&chrono::Utc));
     }
     for format in [
         "%Y-%m-%d %H:%M:%S%.f",
@@ -378,9 +380,7 @@ fn parse_bson_date(text: &str) -> Result<Bson, String> {
         "%Y-%m-%d %H:%M:%S",
     ] {
         if let Ok(naive) = chrono::NaiveDateTime::parse_from_str(text, format) {
-            return Ok(Bson::DateTime(mongodb::bson::DateTime::from_millis(
-                naive.and_utc().timestamp_millis(),
-            )));
+            return bson_date_from_timestamp(naive.and_utc());
         }
     }
     if let Ok(date) = chrono::NaiveDate::parse_from_str(text, "%Y-%m-%d")
@@ -393,6 +393,14 @@ fn parse_bson_date(text: &str) -> Result<Bson, String> {
     if text.starts_with('{') {
         let value: serde_json::Value = serde_json::from_str(text)
             .map_err(|error| format!("invalid Canonical EJSON: {error}"))?;
+        if let Some(object) = value.as_object()
+            && object.len() == 1
+            && let Some(date) = object.get("$date").and_then(serde_json::Value::as_str)
+        {
+            let timestamp = chrono::DateTime::parse_from_rfc3339(date)
+                .map_err(|error| format!("invalid date: {error}"))?;
+            return bson_date_from_timestamp(timestamp.with_timezone(&chrono::Utc));
+        }
         return match Bson::try_from(value) {
             Ok(Bson::DateTime(date)) => Ok(Bson::DateTime(date)),
             Ok(other) => Err(format!("expected a date, got {}", bson_type_name(&other))),
@@ -400,6 +408,20 @@ fn parse_bson_date(text: &str) -> Result<Bson, String> {
         };
     }
     Err(invalid())
+}
+
+fn bson_date_from_timestamp(timestamp: chrono::DateTime<chrono::Utc>) -> Result<Bson, String> {
+    // BSON stores whole milliseconds. Refuse submillisecond precision and leap
+    // seconds instead of silently changing the supplied instant.
+    let nanos = timestamp.timestamp_subsec_nanos();
+    if nanos >= 1_000_000_000 || !nanos.is_multiple_of(1_000_000) {
+        return Err(
+            "BSON dates require millisecond precision and do not support leap seconds".to_owned(),
+        );
+    }
+    Ok(Bson::DateTime(mongodb::bson::DateTime::from_millis(
+        timestamp.timestamp_millis(),
+    )))
 }
 
 /// The state of the modal that edits one MongoDB document as a whole.
@@ -416,6 +438,9 @@ pub struct DocumentEditorState {
     pub collection: String,
     /// The original BSON `_id` value, kept typed and never re-serialized.
     pub id: Bson,
+    /// The exact BSON document loaded when the modal opened, used for
+    /// compare-and-replace so edits from another client cannot be overwritten.
+    pub expected: Document,
     /// The whole document as Canonical Extended JSON.
     ///
     /// This text is the single source of truth of the modal: the field list is
@@ -448,6 +473,7 @@ impl DocumentEditorState {
             row,
             collection: namespace.full_name(),
             id,
+            expected: document.bson.clone(),
             input: JsonBuffer::new(ejson),
             error: None,
             saving: false,
@@ -490,12 +516,33 @@ impl DocumentEditorState {
         self.selected_field.min(field_count.saturating_sub(1))
     }
 
-    /// Leaves the open field editor without touching the document text.
-    ///
-    /// A one-line field uses this when the list cursor walks on to the next
-    /// field: the modal closes and the cursor moves with the same key press.
-    pub fn leave_field_edit(&mut self) {
-        self.field_edit = None;
+    /// Applies a scalar draft locally before opening an adjacent editable field.
+    pub fn navigate_field_edit(&mut self, delta: isize) -> Result<(), String> {
+        let Some(field) = self.field_edit.as_ref() else {
+            self.move_field(delta);
+            return Ok(());
+        };
+        if field.input.is_multiline() || delta == 0 {
+            return Ok(());
+        }
+        let name = field.name.clone();
+        let text = field.input.value().to_owned();
+        self.apply_field(&name, &text)?;
+        self.field_error = None;
+        let fields = self.fields()?;
+        let current = self.selected_field_index(fields.len());
+        let next = if delta < 0 {
+            (0..current)
+                .rev()
+                .find(|&index| fields[index].name != DOCUMENT_ID_FIELD)
+        } else {
+            (current + 1..fields.len()).find(|&index| fields[index].name != DOCUMENT_ID_FIELD)
+        };
+        if let Some(next) = next {
+            self.selected_field = next;
+            self.begin_field_edit();
+        }
+        Ok(())
     }
 
     /// Moves the field selection by `delta` rows, stopping at both ends.
