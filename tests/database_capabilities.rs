@@ -33,6 +33,21 @@ fn capability_fields_are_conservative_for_features_not_implemented_by_adapters()
 }
 
 #[test]
+fn cockroach_enables_browsing_and_transactions_without_structured_writes() {
+    assert_eq!(
+        DatabaseCapabilities::for_kind(DatabaseKind::CockroachDb),
+        DatabaseCapabilities {
+            catalog: true,
+            relation_ddl: true,
+            relation_edit: false,
+            monitoring: false,
+            manual_transactions: true,
+            cancellation: true,
+        }
+    );
+}
+
+#[test]
 fn clickhouse_catalog_capability_is_enabled_with_the_native_adapter() {
     assert_eq!(
         DatabaseCapabilities::for_kind(DatabaseKind::ClickHouse),
@@ -41,6 +56,21 @@ fn clickhouse_catalog_capability_is_enabled_with_the_native_adapter() {
             relation_ddl: false,
             relation_edit: false,
             monitoring: true,
+            manual_transactions: false,
+            cancellation: false,
+        }
+    );
+}
+
+#[test]
+fn snowflake_advertises_only_implemented_sql_api_workflows() {
+    assert_eq!(
+        DatabaseCapabilities::for_kind(DatabaseKind::Snowflake),
+        DatabaseCapabilities {
+            catalog: true,
+            relation_ddl: true,
+            relation_edit: false,
+            monitoring: false,
             manual_transactions: false,
             cancellation: false,
         }

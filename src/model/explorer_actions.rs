@@ -132,8 +132,10 @@ impl DatabaseKindLabel for DatabaseKind {
     fn label(self) -> &'static str {
         match self {
             DatabaseKind::Postgres => "PostgreSQL",
+            DatabaseKind::CockroachDb => "CockroachDB",
             DatabaseKind::MySql => "MySQL",
             DatabaseKind::MariaDb => "MariaDB",
+            DatabaseKind::TiDb => "TiDB",
             DatabaseKind::Oracle => "Oracle",
             DatabaseKind::Sqlite => "SQLite",
             DatabaseKind::DuckDb => "DuckDB",
@@ -142,6 +144,8 @@ impl DatabaseKindLabel for DatabaseKind {
             DatabaseKind::Valkey => "Valkey",
             DatabaseKind::MongoDb => "MongoDB",
             DatabaseKind::ClickHouse => "ClickHouse",
+            DatabaseKind::Snowflake => "Snowflake",
+            DatabaseKind::Elasticsearch => "Elasticsearch",
         }
     }
 }

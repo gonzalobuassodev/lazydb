@@ -142,6 +142,9 @@ pub enum ConnectionsCommand {
     Add {
         #[arg(long)]
         name: String,
+        /// Select a driver explicitly when importing a compatible connection URL.
+        #[arg(long)]
+        driver: Option<String>,
         #[arg(long, value_enum)]
         scope: Option<ConnectionScope>,
         #[arg(long)]
@@ -210,6 +213,7 @@ pub enum LspDialect {
     SqlServer,
     Sqlite,
     ClickHouse,
+    Snowflake,
     #[value(name = "duckdb")]
     DuckDb,
     #[default]
@@ -228,6 +232,7 @@ impl From<crate::profile::DatabaseKind> for LspDialect {
             | crate::sql::SqlDialect::Generic
             | crate::sql::SqlDialect::Oracle => Self::Sqlite,
             crate::sql::SqlDialect::ClickHouse => Self::ClickHouse,
+            crate::sql::SqlDialect::Snowflake => Self::Snowflake,
         }
     }
 }
@@ -762,7 +767,11 @@ mod tests {
                 "redis",
                 "valkey",
                 "mongodb",
-                "clickhouse"
+                "clickhouse",
+                "tidb",
+                "cockroachdb",
+                "snowflake",
+                "elasticsearch"
             ])
         );
         assert_eq!(
