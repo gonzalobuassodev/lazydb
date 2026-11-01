@@ -1143,18 +1143,18 @@ impl Runtime {
                 id,
                 replacement,
             ),
-            Command::DeleteMongoRelationDocument {
+            Command::DeleteMongoRelationDocuments {
                 tab_id,
                 tab_generation,
                 connection,
                 namespace,
-                id,
-            } => self.delete_mongo_relation_document(
+                ids,
+            } => self.delete_mongo_relation_documents(
                 tab_id,
                 tab_generation,
                 connection,
                 namespace,
-                id,
+                ids,
             ),
             Command::InsertMongoDocuments {
                 tab_id,
@@ -2140,19 +2140,20 @@ impl Runtime {
         }));
     }
 
-    /// Deletes the one document a MongoDB relation tab's cursor is on, bounded
-    /// to the `_id` its grid row was loaded with.
+    /// Deletes every document a MongoDB relation tab marked for deletion, in
+    /// one bounded bulk write.
     ///
-    /// The result carries the tab generation the delete was planned under, so
+    /// The ids are the `_id` values the marked grid rows were loaded with, and
+    /// the result carries the tab generation the commit was planned under, so
     /// the reducer can drop a result that belongs to a page or connection that
     /// has already been replaced.
-    fn delete_mongo_relation_document(
+    fn delete_mongo_relation_documents(
         &mut self,
         tab_id: Uuid,
         tab_generation: u64,
         connection: ConnectionIdentity,
         namespace: crate::db::mongodb::types::MongoNamespace,
-        id: mongodb::bson::Bson,
+        ids: Vec<mongodb::bson::Bson>,
     ) {
         let active = Arc::clone(&self.connection);
         let sender = self.event_sender.clone();
@@ -2161,7 +2162,7 @@ impl Runtime {
             let result = match database {
                 Some(DatabaseConnection::MongoDb(adapter)) => {
                     adapter
-                        .delete_document_by_id_detailed(&namespace, id.clone())
+                        .delete_documents_by_ids_detailed(&namespace, ids.clone())
                         .await
                 }
                 _ => Err(DatabaseError::configuration(
@@ -2174,12 +2175,12 @@ impl Runtime {
                         None => Action::MongoRelationDocumentDeleted {
                             tab_id,
                             tab_generation,
-                            id,
+                            ids,
                         },
                         Some(message) => Action::MongoRelationDocumentDeleteFailed {
                             tab_id,
                             tab_generation,
-                            id,
+                            ids,
                             message: message.to_owned(),
                         },
                     }
@@ -2187,7 +2188,7 @@ impl Runtime {
                 Err(error) => Action::MongoRelationDocumentDeleteFailed {
                     tab_id,
                     tab_generation,
-                    id,
+                    ids,
                     message: error.message,
                 },
             };

@@ -13,13 +13,16 @@ pub fn replace_one_filter(id: &Bson) -> Document {
     mongodb::bson::doc! { "_id": id.clone() }
 }
 
-/// The filter that bounds a document delete to one `_id`.
+/// The filter that bounds a bulk document delete to the `_id`s the marked grid
+/// rows were loaded with.
 ///
-/// It carries the `_id` exactly as it was loaded, never its rendering, so the
-/// delete cannot retarget another document. It is the only field in the filter
-/// on purpose.
-pub fn delete_one_filter(id: &Bson) -> Document {
-    mongodb::bson::doc! { "_id": id.clone() }
+/// Every value is an `_id` exactly as it was loaded, never its rendering, so a
+/// delete can never retarget another document. `_id` is the only field in the
+/// filter on purpose.
+pub fn delete_many_filter(ids: &[Bson]) -> Document {
+    mongodb::bson::doc! {
+        "_id": { "$in": Bson::Array(ids.to_vec()) }
+    }
 }
 
 impl MongoAdapter {
@@ -58,31 +61,53 @@ impl MongoAdapter {
         }
     }
 
-    /// Deletes one document, bounded to the `_id` its grid row was loaded with.
+    /// Deletes every document the marked grid rows were loaded from, bounded to
+    /// their `_id`s.
     ///
-    /// This is the whole write surface of the relation tab's delete key: one
-    /// `deleteOne` against `{_id: <loaded>}`, never a bulk delete and never a
-    /// delete by any other field.
-    pub async fn delete_document_by_id_detailed(
+    /// This is the whole write surface of a MongoDB relation tab's commit: one
+    /// `deleteMany` against `{_id: {$in: <loaded ids>}}`, never a delete by any
+    /// other field. An empty list is refused, because a filter that addresses no
+    /// document must never become a delete of everything.
+    pub async fn delete_documents_by_ids_detailed(
         &self,
         namespace: &MongoNamespace,
-        id: Bson,
+        ids: Vec<Bson>,
     ) -> Result<MongoMutationOutcome, DatabaseError> {
         let collection = namespace.collection.as_deref().ok_or_else(|| {
             DatabaseError::configuration("MongoDB collection namespace is required")
         })?;
+        if ids.is_empty() {
+            return Err(DatabaseError::configuration(
+                "a document delete requires at least one _id",
+            ));
+        }
+        let requested = ids.len() as u64;
         let result = self
             .client()
             .database(&namespace.database)
             .collection::<Document>(collection)
-            .delete_one(delete_one_filter(&id))
+            .delete_many(delete_many_filter(&ids))
             .await;
         match result {
-            Ok(result) => Ok(MongoMutationOutcome::Confirmed {
-                affected: result.deleted_count,
-            }),
+            Ok(result) => Ok(bounded_delete_outcome(result.deleted_count, requested)),
             Err(error) if error_is_definitely_rejected(&error) => Err(map_error(error)),
-            Err(_) => Ok(MongoMutationOutcome::Unknown { requested: 1 }),
+            Err(_) => Ok(MongoMutationOutcome::Unknown { requested }),
+        }
+    }
+}
+
+/// The outcome of a bounded bulk delete, from how many documents the server
+/// removed out of how many the filter addressed.
+///
+/// A delete that removed fewer documents than it addressed is `Partial`, never
+/// `Confirmed`: at least one marked document was already gone.
+fn bounded_delete_outcome(affected: u64, requested: u64) -> MongoMutationOutcome {
+    if affected >= requested {
+        MongoMutationOutcome::Confirmed { affected }
+    } else {
+        MongoMutationOutcome::Partial {
+            affected,
+            requested,
         }
     }
 }
@@ -220,23 +245,59 @@ mod tests {
     }
 
     #[test]
-    fn the_delete_filter_is_exactly_the_original_id() {
-        let id = mongodb::bson::Bson::ObjectId(mongodb::bson::oid::ObjectId::new());
-        let filter = super::delete_one_filter(&id);
+    fn the_delete_filter_is_exactly_the_loaded_ids() {
+        let first = mongodb::bson::Bson::ObjectId(mongodb::bson::oid::ObjectId::new());
+        let second = mongodb::bson::Bson::String("natural-key".into());
+        let ids = vec![first.clone(), second.clone()];
+        let filter = super::delete_many_filter(&ids);
 
         assert_eq!(
             filter,
-            mongodb::bson::doc! { "_id": id.clone() },
-            "the filter is the original _id value and nothing else"
+            mongodb::bson::doc! { "_id": { "$in": ids.clone() } },
+            "the filter is the loaded _id values and nothing else"
         );
         assert_eq!(
             filter.keys().collect::<Vec<_>>(),
             vec!["_id"],
             "no other field can widen or retarget the delete"
         );
-        assert!(
-            matches!(filter.get("_id"), Some(mongodb::bson::Bson::ObjectId(_))),
-            "the _id keeps the BSON type it was loaded with, never a re-serialized string"
+        let Some(mongodb::bson::Bson::Document(bound)) = filter.get("_id") else {
+            panic!("the _id filter is an operator document, got {filter:?}")
+        };
+        assert_eq!(
+            bound.keys().collect::<Vec<_>>(),
+            vec!["$in"],
+            "$in is the only operator, so nothing can be negated or widened"
+        );
+        assert_eq!(
+            bound.get("$in"),
+            Some(&mongodb::bson::Bson::Array(ids)),
+            "the values keep the BSON types they were loaded with, never a re-serialized string"
+        );
+    }
+
+    #[test]
+    fn a_bulk_delete_that_removed_fewer_documents_is_partial() {
+        assert_eq!(
+            super::bounded_delete_outcome(3, 3),
+            MongoMutationOutcome::Confirmed { affected: 3 },
+            "removing every addressed document is the only confirmed outcome"
+        );
+        assert_eq!(
+            super::bounded_delete_outcome(1, 3),
+            MongoMutationOutcome::Partial {
+                affected: 1,
+                requested: 3
+            },
+            "a document that was already gone makes the outcome partial"
+        );
+        assert_eq!(
+            super::bounded_delete_outcome(0, 2),
+            MongoMutationOutcome::Partial {
+                affected: 0,
+                requested: 2
+            },
+            "an addressed set that vanished is partial, never confirmed"
         );
     }
 

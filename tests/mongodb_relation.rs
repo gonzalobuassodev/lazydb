@@ -9,6 +9,11 @@
 //! EJSON and saving replaces exactly that document, bounded to its original
 //! `_id`. This unit writes data, so every refusal below is a safety invariant:
 //! each one must leave stored documents and emitted commands untouched.
+//!
+//! T5 (S1-S11): the delete key on a collection's relation tab stages the mark
+//! the SQL grid stages and `Ctrl-S` commits it as one bounded bulk delete over
+//! the loaded `_id`s, so no collection row ever takes the SQL grid mutation
+//! path, whether it is one row or a visual range.
 
 mod support;
 
@@ -2811,12 +2816,32 @@ fn the_document_modal_renders_indented_ejson() {
 }
 
 // ---------------------------------------------------------------------------
-// T5 (S1-S7): the delete key deletes the document under the cursor
+// T5 (S1-S11): the delete key marks rows and Ctrl-S commits them
 // ---------------------------------------------------------------------------
+//
+// A MongoDB collection reports no SQL columns and no primary key, so the SQL
+// grid save can never write it. The delete key stages the very mark the SQL
+// grid stages, and Ctrl-S commits it as one bounded bulk delete over the `_id`s
+// the marked rows were loaded with. Every test below asserts the whole
+// observable effect of the rule it covers: the exact command stream, the exact
+// toasts, the grid rows, and the marks left behind.
+
+use lazydb::{
+    db::catalog::{
+        CatalogCount, CatalogMetadata, CatalogPage, CatalogRequest, CatalogRequestKey,
+        CatalogTarget, ColumnMetadata, DdlProvenance, RelationDdl,
+    },
+    model::relation_edit::{EditableRowState, RelationEditSession},
+};
 
 /// The exact toast the user reported after pressing delete on a MongoDB row.
 const SQL_KEYLESS_TOAST: &str =
     "Cannot update or delete existing rows without a primary key; no changes were saved";
+
+/// The refusal a MongoDB relation gives for a row the SQL grid would have to
+/// write: a collection's field edits belong to the document modal.
+const MONGODB_GRID_WRITE_MESSAGE: &str =
+    "MongoDB rows are edited in the document modal; the grid only commits deletions";
 
 /// Connects the workspace itself, the way a real session does: the SQL save
 /// path only runs for a live connection, and the MongoDB row must not take it.
@@ -2836,11 +2861,104 @@ fn activate_workspace_connection(app: &mut App, connection: ConnectionIdentity) 
     app.connection.target = Some(ExecutionTarget::from_profile(&profile));
 }
 
-fn has_pending_sql_save(app: &App) -> bool {
+/// True while the grid holds a row the save would have to write.
+fn has_dirty_rows(app: &App) -> bool {
     active_relation_tab(app)
         .edit
         .as_ref()
         .is_some_and(|edit| edit.has_dirty_rows())
+}
+
+/// The state of every grid row, so a test can assert exactly which rows a key
+/// marked and which it left alone.
+fn row_states(app: &App) -> Vec<EditableRowState> {
+    active_relation_tab(app)
+        .edit
+        .as_ref()
+        .expect("the grid session exists")
+        .rows
+        .iter()
+        .map(|row| row.state.clone())
+        .collect()
+}
+
+/// The indexes of the rows currently marked for deletion.
+fn marked_rows(app: &App) -> Vec<usize> {
+    row_states(app)
+        .iter()
+        .enumerate()
+        .filter(|(_, state)| matches!(state, EditableRowState::Deleted))
+        .map(|(index, _)| index)
+        .collect()
+}
+
+/// Presses the delete key on one row, the way the user does.
+fn press_delete(app: &mut App, row: usize) -> Vec<Command> {
+    active_relation_tab_mut(app).grid.selected_row = row;
+    app.update(Action::RelationDeleteCurrent)
+}
+
+fn notification_bodies(app: &App) -> Vec<String> {
+    app.notifications
+        .history()
+        .map(|notification| notification.body.clone())
+        .collect()
+}
+
+/// One page of documents as the relation preview the grid maps from.
+fn preview_for(page_request: PageRequest, documents: &[MongoDocument]) -> RelationPreview {
+    let loaded = page(documents.to_vec(), None);
+    RelationPreview {
+        sql: find_description(&relation_find_spec(&mongo_namespace(), page_request)),
+        result: QueryOutcome {
+            result_sets: vec![page_result_set(&loaded)],
+            stats: QueryStats::new(Default::default(), Default::default(), documents.len()),
+        },
+        pagination: lazydb::model::pagination::ResultPagination::from_page(
+            page_request,
+            documents.len(),
+        ),
+        row_versions: None,
+    }
+}
+
+#[derive(Debug)]
+struct DocumentsDeleteCommand {
+    tab_id: Uuid,
+    tab_generation: u64,
+    connection: ConnectionIdentity,
+    namespace: MongoNamespace,
+    ids: Vec<mongodb::bson::Bson>,
+}
+
+/// Asserts the commit emitted exactly one bounded document delete, that it is
+/// the only command, and that no SQL grid mutation was emitted beside it.
+fn one_documents_delete_command(commands: &[Command]) -> DocumentsDeleteCommand {
+    assert!(
+        !commands
+            .iter()
+            .any(|command| matches!(command, Command::RelationMutation { .. })),
+        "a MongoDB relation must never emit a SQL grid mutation, got {commands:?}"
+    );
+    let [
+        Command::DeleteMongoRelationDocuments {
+            tab_id,
+            tab_generation,
+            connection,
+            namespace,
+            ids,
+        },
+    ] = commands
+    else {
+        panic!("the commit emits exactly one document delete and nothing else, got {commands:?}")
+    };
+    DocumentsDeleteCommand {
+        tab_id: *tab_id,
+        tab_generation: *tab_generation,
+        connection: *connection,
+        namespace: namespace.clone(),
+        ids: ids.clone(),
+    }
 }
 
 /// S1: the SQL keyless toast the user reported can never come from a MongoDB
@@ -2856,17 +2974,11 @@ fn s1_the_sql_keyless_toast_is_never_raised_from_a_mongodb_relation_row() {
     activate_workspace_connection(&mut app, request.connection);
     let before = row_values(&app);
 
-    // Step 1: the delete key on the row under the cursor.
-    let delete_commands = app.update(Action::RelationDeleteCurrent);
+    // Step 1: the delete key on the row under the cursor only marks it.
+    let delete_commands = press_delete(&mut app, 0);
     assert!(
-        !delete_commands
-            .iter()
-            .any(|command| matches!(command, Command::RelationMutation { .. })),
-        "a MongoDB relation row must never become a SQL grid mutation, got {delete_commands:?}"
-    );
-    assert!(
-        !has_pending_sql_save(&app),
-        "the delete key must never leave the MongoDB row marked as a pending SQL deletion"
+        delete_commands.is_empty(),
+        "the delete key reaches no database, got {delete_commands:?}"
     );
 
     // Step 2: the collection's structure report, which is the empty SQL DDL a
@@ -2882,24 +2994,16 @@ fn s1_the_sql_keyless_toast_is_never_raised_from_a_mongodb_relation_row() {
     });
     assert!(
         matches!(active_relation_tab(&app).ddl, RelationLoad::Ready(_)),
-        "the collection structure must be loaded for the save to run, got {:?}",
+        "the collection structure must be loaded for the SQL save to run, got {:?}",
         active_relation_tab(&app).ddl
     );
 
-    // Step 3: the save the user pressed after the delete.
+    // Step 3: the save the user pressed after the delete commits the delete.
     let save_commands = app.update(Action::RelationCommit);
-    assert!(
-        !save_commands
-            .iter()
-            .any(|command| matches!(command, Command::RelationMutation { .. })),
-        "saving a MongoDB relation must never emit a SQL grid mutation, got {save_commands:?}"
-    );
+    let delete = one_documents_delete_command(&save_commands);
+    assert_eq!(delete.ids, vec![object_id(RUEDAS_ID)]);
 
-    let bodies = app
-        .notifications
-        .history()
-        .map(|notification| notification.body.clone())
-        .collect::<Vec<_>>();
+    let bodies = notification_bodies(&app);
     assert!(
         !bodies.iter().any(|body| body.contains(SQL_KEYLESS_TOAST)),
         "the reported SQL keyless toast must never be raised from a MongoDB relation row, got {bodies:?}"
@@ -2913,112 +3017,53 @@ fn s1_the_sql_keyless_toast_is_never_raised_from_a_mongodb_relation_row() {
     assert_eq!(
         row_values(&app),
         before,
-        "a refused save leaves the loaded page untouched"
+        "the commit only stages the write; the loaded page is untouched"
     );
-    assert!(!has_pending_sql_save(&app));
 }
 
-#[derive(Debug)]
-struct RelationDeleteCommand {
-    tab_id: Uuid,
-    tab_generation: u64,
-    connection: ConnectionIdentity,
-    namespace: MongoNamespace,
-    id: mongodb::bson::Bson,
-}
-
-fn relation_delete_commands(commands: &[Command]) -> Vec<&Command> {
-    commands
-        .iter()
-        .filter(|command| matches!(command, Command::DeleteMongoRelationDocument { .. }))
-        .collect()
-}
-
-/// Asserts the delete key emitted exactly one document delete, that it is the
-/// only command, and that no SQL grid mutation was emitted beside it.
-fn one_relation_delete_command(commands: &[Command]) -> RelationDeleteCommand {
-    assert!(
-        !commands
-            .iter()
-            .any(|command| matches!(command, Command::RelationMutation { .. })),
-        "a MongoDB relation row must never emit a SQL grid mutation, got {commands:?}"
-    );
-    let deletes = relation_delete_commands(commands);
-    assert_eq!(
-        deletes.len(),
-        1,
-        "exactly one document delete must be emitted, got {commands:?}"
-    );
-    assert_eq!(
-        commands.len(),
-        1,
-        "the delete key emits the document delete and nothing else, got {commands:?}"
-    );
-    let Command::DeleteMongoRelationDocument {
-        tab_id,
-        tab_generation,
-        connection,
-        namespace,
-        id,
-    } = deletes[0]
-    else {
-        unreachable!("filtered above")
-    };
-    RelationDeleteCommand {
-        tab_id: *tab_id,
-        tab_generation: *tab_generation,
-        connection: *connection,
-        namespace: namespace.clone(),
-        id: id.clone(),
-    }
-}
-
-fn notification_bodies(app: &App) -> Vec<String> {
-    app.notifications
-        .history()
-        .map(|notification| notification.body.clone())
-        .collect()
-}
-
-/// S2: the delete key on the current row emits exactly one document delete
-/// carrying the tab, connection, namespace and the row's `_id`, and no SQL grid
-/// mutation.
+/// S2: the delete key marks the current row and emits nothing.
 #[test]
-fn s2_the_delete_key_emits_one_document_delete_bounded_to_the_id() {
-    let (mut app, request) = mongo_app_with_page(bike_documents());
+fn s2_the_delete_key_marks_the_row_and_emits_nothing() {
+    let (mut app, _request) = mongo_app_with_page(bike_documents());
     let before = row_values(&app);
-    // The last row, so the `_id` cannot be the page's first document by luck.
-    active_relation_tab_mut(&mut app).grid.selected_row = 2;
 
-    let commands = app.update(Action::RelationDeleteCurrent);
+    // The last row, so the mark cannot be the page's first row by luck.
+    let commands = press_delete(&mut app, 2);
 
-    let delete = one_relation_delete_command(&commands);
-    assert_eq!(delete.tab_id, active_relation_tab(&app).id);
-    assert_eq!(delete.tab_generation, active_relation_tab(&app).generation);
-    assert_eq!(
-        delete.connection, request.connection,
-        "the delete is addressed to the connection the page was loaded from"
+    assert!(
+        commands.is_empty(),
+        "the delete key emits no command until the save, got {commands:?}"
     );
-    assert_eq!(delete.namespace, mongo_namespace());
     assert_eq!(
-        delete.id,
-        object_id(CADENA_ID),
-        "the delete carries the original BSON _id of the row under the cursor"
+        row_states(&app),
+        vec![
+            EditableRowState::Clean,
+            EditableRowState::Clean,
+            EditableRowState::Deleted,
+        ],
+        "only the row under the cursor is marked for deletion"
+    );
+    assert!(
+        has_dirty_rows(&app),
+        "a marked row is a pending change the save has to commit"
+    );
+    assert!(
+        notification_bodies(&app).is_empty(),
+        "marking a row says nothing, got {:?}",
+        notification_bodies(&app)
     );
     assert_eq!(
         row_values(&app),
         before,
-        "the delete key never marks the row for a SQL save"
+        "marking a row never rewrites the loaded values"
     );
-    assert!(!has_pending_sql_save(&app));
 }
 
-/// S3: with no document at the cursor nothing is emitted.
+/// S3: with no document at the cursor nothing is marked and nothing is emitted.
 #[test]
-fn s3_no_document_at_the_cursor_emits_nothing() {
-    // A page with no documents has no row to delete.
+fn s3_no_document_at_the_cursor_marks_nothing() {
+    // A page with no documents has no row to mark.
     let (mut app, _request) = mongo_app_with_page(Vec::new());
-    let before = row_values(&app);
 
     let commands = app.update(Action::RelationDeleteCurrent);
 
@@ -3026,55 +3071,110 @@ fn s3_no_document_at_the_cursor_emits_nothing() {
         commands.is_empty(),
         "an empty page emits no command, got {commands:?}"
     );
-    assert_eq!(
-        row_values(&app),
-        before,
-        "a refused delete leaves the loaded page untouched"
-    );
     assert!(
-        notification_bodies(&app)
-            .iter()
-            .any(|body| body.contains("no document at the cursor to delete")),
-        "the refusal is visible, got {:?}",
+        row_states(&app).is_empty(),
+        "an empty page has no row to mark, got {:?}",
+        row_states(&app)
+    );
+    assert!(!has_dirty_rows(&app));
+    assert!(
+        notification_bodies(&app).is_empty(),
+        "a delete key on an empty page says nothing, got {:?}",
         notification_bodies(&app)
     );
 
-    // A cursor past the loaded page selects no document either.
+    // A cursor past the loaded page marks no document either.
     let (mut app, _request) = mongo_app_with_page(bike_documents());
     let before = row_values(&app);
-    active_relation_tab_mut(&mut app).grid.selected_row = 7;
 
-    let commands = app.update(Action::RelationDeleteCurrent);
+    let commands = press_delete(&mut app, 7);
 
     assert!(
         commands.is_empty(),
         "a cursor with no document emits no command, got {commands:?}"
     );
     assert_eq!(
+        marked_rows(&app),
+        Vec::<usize>::new(),
+        "a cursor past the page marks nothing"
+    );
+    assert!(!has_dirty_rows(&app));
+    assert!(
+        notification_bodies(&app).is_empty(),
+        "a cursor past the page says nothing, got {:?}",
+        notification_bodies(&app)
+    );
+    assert_eq!(
         row_values(&app),
         before,
-        "a refused delete leaves the loaded page untouched"
-    );
-    assert!(
-        notification_bodies(&app)
-            .iter()
-            .any(|body| body.contains("no document at the cursor to delete")),
-        "the refusal is visible, got {:?}",
-        notification_bodies(&app)
+        "nothing about the loaded page changes"
     );
 }
 
-/// S4: a read-only MongoDB profile refuses with the existing MongoDB read-only
-/// message and emits nothing.
+/// S4: `Ctrl-S` emits exactly one command carrying every marked row's `_id`,
+/// and never a SQL grid mutation.
 #[test]
-fn s4_a_read_only_profile_refuses_the_delete() {
+fn s4_the_commit_emits_one_command_with_every_marked_id() {
+    let (mut app, request) = mongo_app_with_page(bike_documents());
+    press_delete(&mut app, 0);
+    press_delete(&mut app, 2);
+
+    let commands = app.update(Action::RelationCommit);
+
+    let delete = one_documents_delete_command(&commands);
+    assert_eq!(delete.tab_id, active_relation_tab(&app).id);
+    assert_eq!(delete.tab_generation, active_relation_tab(&app).generation);
+    assert_eq!(
+        delete.connection, request.connection,
+        "the commit is addressed to the connection the page was loaded from"
+    );
+    assert_eq!(delete.namespace, mongo_namespace());
+    assert_eq!(
+        delete.ids,
+        vec![object_id(RUEDAS_ID), object_id(CADENA_ID)],
+        "every marked row's loaded _id, in row order"
+    );
+    assert_eq!(
+        marked_rows(&app),
+        vec![0, 2],
+        "emitting the command never clears a mark; only the result does"
+    );
+}
+
+/// S5: with no row marked for deletion the save emits nothing and says nothing.
+#[test]
+fn s5_an_empty_commit_emits_and_says_nothing() {
     let (mut app, _request) = mongo_app_with_page(bike_documents());
-    let before = row_values(&app);
+    assert!(
+        !has_dirty_rows(&app),
+        "the test starts from a page with nothing marked"
+    );
+
+    let commands = app.update(Action::RelationCommit);
+
+    assert!(
+        commands.is_empty(),
+        "with nothing marked the save writes nothing, got {commands:?}"
+    );
+    assert!(
+        notification_bodies(&app).is_empty(),
+        "with nothing marked the save says nothing, got {:?}",
+        notification_bodies(&app)
+    );
+    assert_eq!(marked_rows(&app), Vec::<usize>::new());
+}
+
+/// S6: a read-only MongoDB profile refuses the commit with the existing MongoDB
+/// read-only message and keeps the marks.
+#[test]
+fn s6_a_read_only_profile_refuses_the_commit_and_keeps_the_marks() {
+    let (mut app, _request) = mongo_app_with_page(bike_documents());
+    press_delete(&mut app, 1);
     for profile in &mut app.profiles {
         profile.read_only = true;
     }
 
-    let commands = app.update(Action::RelationDeleteCurrent);
+    let commands = app.update(Action::RelationCommit);
 
     assert!(
         commands.is_empty(),
@@ -3088,25 +3188,26 @@ fn s4_a_read_only_profile_refuses_the_delete() {
         notification_bodies(&app)
     );
     assert_eq!(
-        row_values(&app),
-        before,
-        "a refused delete leaves the loaded page untouched"
+        marked_rows(&app),
+        vec![1],
+        "a refused commit keeps the marks so the save can be retried"
     );
-    assert!(!has_pending_sql_save(&app));
+    assert!(has_dirty_rows(&app));
 }
 
-/// S5 (success): the user is notified and the active page reloads at the same
-/// page number.
+/// S7: a successful commit notifies, clears the marks and reloads the page.
 #[test]
-fn s5_a_deleted_document_is_reported_and_the_page_reloads() {
+fn s7_a_successful_commit_reloads_and_clears_the_marks() {
     let (mut app, request) = mongo_app_with_page(bike_documents());
-    let commands = app.update(Action::RelationDeleteCurrent);
-    let delete = one_relation_delete_command(&commands);
+    press_delete(&mut app, 0);
+    press_delete(&mut app, 1);
+    let commands = app.update(Action::RelationCommit);
+    let delete = one_documents_delete_command(&commands);
 
     let commands = app.update(Action::MongoRelationDocumentDeleted {
         tab_id: delete.tab_id,
         tab_generation: delete.tab_generation,
-        id: delete.id.clone(),
+        ids: delete.ids.clone(),
     });
 
     assert!(
@@ -3119,7 +3220,7 @@ fn s5_a_deleted_document_is_reported_and_the_page_reloads() {
     let reload = mongo_preview_request(&commands);
     assert_eq!(
         reload.page, request.page,
-        "the page the document was deleted from is the page that reloads"
+        "the page the documents were deleted from is the page that reloads"
     );
     assert_eq!(reload.tab_id, delete.tab_id);
     assert!(
@@ -3127,21 +3228,47 @@ fn s5_a_deleted_document_is_reported_and_the_page_reloads() {
         "the page reloads instead of being emptied, got {:?}",
         active_relation_tab(&app).data
     );
+    assert_eq!(
+        marked_rows(&app),
+        Vec::<usize>::new(),
+        "a committed delete leaves no row marked"
+    );
+    assert!(
+        !has_dirty_rows(&app),
+        "a committed delete leaves nothing dirty, so one document is never deleted twice"
+    );
+
+    // The reload that follows shows what the collection now holds.
+    let remaining = vec![bike_documents()[2].clone()];
+    let commands = app.update(Action::MongoRelationPreviewLoaded {
+        request: reload.clone(),
+        preview: Box::new(preview_for(reload.page, &remaining)),
+        documents: remaining,
+    });
+    assert!(commands.is_empty(), "loading a page writes nothing");
+    assert_eq!(
+        row_states(&app),
+        vec![EditableRowState::Clean],
+        "the reloaded grid is the collection, with nothing left marked"
+    );
+    assert!(!has_dirty_rows(&app));
 }
 
-/// S5 (failure): the error is surfaced and the page stays visible.
+/// S8: a failed commit surfaces the error and keeps the page with its marks; a
+/// result whose tab id or generation is stale is ignored.
 #[test]
-fn s5_a_failed_delete_surfaces_the_error_and_keeps_the_page() {
+fn s8_a_failed_commit_keeps_the_page_and_the_marks() {
     let (mut app, _request) = mongo_app_with_page(bike_documents());
     let before = row_values(&app);
-    let commands = app.update(Action::RelationDeleteCurrent);
-    let delete = one_relation_delete_command(&commands);
+    press_delete(&mut app, 1);
+    let commands = app.update(Action::RelationCommit);
+    let delete = one_documents_delete_command(&commands);
     let message = "MongoDB operation failed; inspect the error code and connection settings";
 
     let commands = app.update(Action::MongoRelationDocumentDeleteFailed {
         tab_id: delete.tab_id,
         tab_generation: delete.tab_generation,
-        id: delete.id.clone(),
+        ids: delete.ids.clone(),
         message: message.into(),
     });
 
@@ -3156,25 +3283,23 @@ fn s5_a_failed_delete_surfaces_the_error_and_keeps_the_page() {
     );
     assert!(
         matches!(active_relation_tab(&app).data, RelationLoad::Ready(_)),
-        "the page stays visible after a failed delete, got {:?}",
+        "the page stays visible after a failed commit, got {:?}",
         active_relation_tab(&app).data
+    );
+    assert_eq!(
+        marked_rows(&app),
+        vec![1],
+        "a failed commit keeps the marks so the user can retry"
     );
     assert_eq!(
         row_values(&app),
         before,
-        "a failed delete leaves the loaded page untouched"
+        "a failed commit leaves the loaded page untouched"
     );
-}
 
-/// S6: a result whose tab id or generation is stale is ignored.
-#[test]
-fn s6_a_stale_delete_result_is_ignored() {
-    let (mut app, _request) = mongo_app_with_page(bike_documents());
-    let commands = app.update(Action::RelationDeleteCurrent);
-    let delete = one_relation_delete_command(&commands);
-    let before = row_values(&app);
-    let before_notifications = notification_bodies(&app).len();
-
+    // A result for another tab or another generation belongs to a page that was
+    // already replaced: it is dropped instead of notifying or reloading.
+    let notifications = notification_bodies(&app).len();
     for (tab_id, tab_generation) in [
         (delete.tab_id, delete.tab_generation.saturating_add(1)),
         (Uuid::new_v4(), delete.tab_generation),
@@ -3182,7 +3307,7 @@ fn s6_a_stale_delete_result_is_ignored() {
         let commands = app.update(Action::MongoRelationDocumentDeleted {
             tab_id,
             tab_generation,
-            id: delete.id.clone(),
+            ids: delete.ids.clone(),
         });
         assert!(
             commands.is_empty(),
@@ -3191,7 +3316,7 @@ fn s6_a_stale_delete_result_is_ignored() {
         let commands = app.update(Action::MongoRelationDocumentDeleteFailed {
             tab_id,
             tab_generation,
-            id: delete.id.clone(),
+            ids: delete.ids.clone(),
             message: "stale delete".into(),
         });
         assert!(
@@ -3199,17 +3324,16 @@ fn s6_a_stale_delete_result_is_ignored() {
             "a stale failure reloads nothing, got {commands:?}"
         );
     }
-
-    assert_eq!(
-        row_values(&app),
-        before,
-        "a stale result never touches the loaded page"
-    );
     assert_eq!(
         notification_bodies(&app).len(),
-        before_notifications,
+        notifications,
         "a stale result reports nothing, got {:?}",
         notification_bodies(&app)
+    );
+    assert_eq!(
+        marked_rows(&app),
+        vec![1],
+        "a stale result never touches the marks of the page that is still loaded"
     );
     assert!(
         matches!(active_relation_tab(&app).data, RelationLoad::Ready(_)),
@@ -3217,9 +3341,252 @@ fn s6_a_stale_delete_result_is_ignored() {
     );
 }
 
-/// S7: the browser tab's `d` delete keeps emitting its own bounded delete.
+/// S9: a visual-mode range delete marks every row in the range, and the range
+/// commits through the same `Ctrl-S` path.
 #[test]
-fn s7_the_browser_delete_still_emits_one_bounded_document_delete() {
+fn s9_a_visual_range_marks_every_row_in_the_range() {
+    let (mut app, _request) = mongo_app_with_page(bike_documents());
+    let before = row_values(&app);
+
+    app.update(Action::RelationVisualLine);
+    active_relation_tab_mut(&mut app).grid.selected_row = 2;
+
+    let commands = app.update(Action::RelationDeleteSelected);
+
+    assert!(
+        commands.is_empty(),
+        "a range delete marks rows and writes nothing, got {commands:?}"
+    );
+    assert_eq!(
+        marked_rows(&app),
+        vec![0, 1, 2],
+        "every row in the range is marked for deletion"
+    );
+    assert!(has_dirty_rows(&app));
+    assert!(
+        notification_bodies(&app).is_empty(),
+        "marking a range says nothing, got {:?}",
+        notification_bodies(&app)
+    );
+    assert_eq!(
+        row_values(&app),
+        before,
+        "marking a range never rewrites the loaded values"
+    );
+
+    let commands = app.update(Action::RelationCommit);
+    let delete = one_documents_delete_command(&commands);
+    assert_eq!(
+        delete.ids,
+        vec![
+            object_id(RUEDAS_ID),
+            object_id(FRENO_ID),
+            object_id(CADENA_ID)
+        ],
+        "the range commits through the same Ctrl-S path, one _id per marked row"
+    );
+}
+
+/// S10: a row marked `Updated` blocks the commit, because a MongoDB relation
+/// never writes column updates through the grid.
+#[test]
+fn s10_an_updated_row_blocks_the_commit() {
+    let (mut app, _request) = mongo_app_with_page(bike_documents());
+    press_delete(&mut app, 0);
+    {
+        let edit = active_relation_tab_mut(&mut app)
+            .edit
+            .as_mut()
+            .expect("an edit session");
+        edit.rows[1].state = EditableRowState::Updated {
+            changed_columns: [1usize].into_iter().collect(),
+        };
+    }
+
+    let commands = app.update(Action::RelationCommit);
+
+    assert!(
+        commands.is_empty(),
+        "a field edit is never written by the grid commit, got {commands:?}"
+    );
+    assert!(
+        notification_bodies(&app)
+            .iter()
+            .any(|body| body == MONGODB_GRID_WRITE_MESSAGE),
+        "the blocked commit says why, got {:?}",
+        notification_bodies(&app)
+    );
+    assert_eq!(
+        marked_rows(&app),
+        vec![0],
+        "the blocked commit keeps the deletion mark"
+    );
+    assert!(
+        matches!(row_states(&app)[1], EditableRowState::Updated { .. }),
+        "the blocked commit keeps the update that blocked it, got {:?}",
+        row_states(&app)
+    );
+    assert!(has_dirty_rows(&app));
+}
+
+/// S10 (widened): a grid insert with nothing marked for deletion is refused
+/// visibly instead of being a silent no-op.
+#[test]
+fn s10b_a_grid_insert_alone_is_refused_visibly() {
+    let (mut app, _request) = mongo_app_with_page(bike_documents());
+
+    app.update(Action::RelationInsertRow);
+    assert!(
+        has_dirty_rows(&app),
+        "the insert drafted a row, so the tab is dirty"
+    );
+
+    let commands = app.update(Action::RelationCommit);
+
+    assert!(
+        commands.is_empty(),
+        "a collection never inserts through the grid commit, got {commands:?}"
+    );
+    assert!(
+        notification_bodies(&app)
+            .iter()
+            .any(|body| body == MONGODB_GRID_WRITE_MESSAGE),
+        "the refused insert is visible, got {:?}",
+        notification_bodies(&app)
+    );
+    assert!(
+        !notification_bodies(&app)
+            .iter()
+            .any(|body| body.contains("No pending relation changes")),
+        "the refusal is not disguised as an empty save, got {:?}",
+        notification_bodies(&app)
+    );
+}
+
+/// S4: the filter carries only the loaded `_id`s, in their loaded BSON types,
+/// and an empty set can never widen into a match-everything delete.
+#[test]
+fn s4b_the_delete_filter_is_only_the_loaded_ids() {
+    let oid = object_id(RUEDAS_ID);
+    let string_id = mongodb::bson::Bson::String("natural-key".into());
+    let int_id = mongodb::bson::Bson::Int32(7);
+    let document_id = mongodb::bson::Bson::Document(mongodb::bson::doc! { "a": 1 });
+    let (mut app, _request) = mongo_app_with_page(vec![
+        document(mongodb::bson::doc! { "_id": oid.clone(), "name": "a" }),
+        document(mongodb::bson::doc! { "_id": string_id.clone(), "name": "b" }),
+        document(mongodb::bson::doc! { "_id": int_id.clone(), "name": "c" }),
+        document(mongodb::bson::doc! { "_id": document_id.clone(), "name": "d" }),
+    ]);
+    for row in 0..4 {
+        press_delete(&mut app, row);
+    }
+
+    let delete = one_documents_delete_command(&app.update(Action::RelationCommit));
+
+    let expected = vec![oid, string_id, int_id, document_id];
+    assert_eq!(
+        delete.ids, expected,
+        "the ids are the loaded BSON values, never their rendering"
+    );
+    let filter = lazydb::db::mongodb::mutation::delete_many_filter(&delete.ids);
+    assert_eq!(filter, mongodb::bson::doc! { "_id": { "$in": expected } });
+    assert_eq!(
+        filter.keys().collect::<Vec<_>>(),
+        vec!["_id"],
+        "no other field takes part in the delete"
+    );
+    assert!(
+        !delete
+            .ids
+            .contains(&mongodb::bson::Bson::String(RUEDAS_ID.to_owned())),
+        "the rendered hex of an ObjectId never reaches the filter"
+    );
+    assert_eq!(
+        lazydb::db::mongodb::mutation::delete_many_filter(&[]),
+        mongodb::bson::doc! { "_id": { "$in": [] } },
+        "an empty $in matches no document, never everything"
+    );
+}
+
+/// S7: once a commit is confirmed and the page reloaded, a second `Ctrl-S`
+/// writes nothing and says nothing, so nothing is deleted twice.
+#[test]
+fn s7b_a_committed_delete_is_never_emitted_twice() {
+    let (mut app, _request) = mongo_app_with_page(bike_documents());
+    press_delete(&mut app, 0);
+    let delete = one_documents_delete_command(&app.update(Action::RelationCommit));
+    let commands = app.update(Action::MongoRelationDocumentDeleted {
+        tab_id: delete.tab_id,
+        tab_generation: delete.tab_generation,
+        ids: delete.ids.clone(),
+    });
+    let reload = mongo_preview_request(&commands);
+    let remaining = vec![bike_documents()[1].clone(), bike_documents()[2].clone()];
+    app.update(Action::MongoRelationPreviewLoaded {
+        request: reload.clone(),
+        preview: Box::new(preview_for(reload.page, &remaining)),
+        documents: remaining,
+    });
+    let notifications = notification_bodies(&app).len();
+
+    let commands = app.update(Action::RelationCommit);
+
+    assert!(
+        commands.is_empty(),
+        "a second save writes nothing, got {commands:?}"
+    );
+    assert_eq!(
+        notification_bodies(&app).len(),
+        notifications,
+        "a second save says nothing"
+    );
+    assert_eq!(marked_rows(&app), Vec::<usize>::new(), "no mark survives");
+}
+
+/// S8: a partial bulk delete never claims success, keeps the marks and keeps
+/// the page, so the user reloads instead of trusting a half-applied delete.
+#[test]
+fn s8b_a_partial_delete_is_reported_and_keeps_the_marks() {
+    let (mut app, _request) = mongo_app_with_page(bike_documents());
+    press_delete(&mut app, 0);
+    let delete = one_documents_delete_command(&app.update(Action::RelationCommit));
+    let message =
+        lazydb::db::mongodb::mutation::delete_outcome_message(&MongoMutationOutcome::Partial {
+            affected: 1,
+            requested: 3,
+        })
+        .expect("a partial delete is never silent");
+
+    let commands = app.update(Action::MongoRelationDocumentDeleteFailed {
+        tab_id: delete.tab_id,
+        tab_generation: delete.tab_generation,
+        ids: delete.ids.clone(),
+        message: message.to_owned(),
+    });
+
+    assert!(
+        commands.is_empty(),
+        "a partial delete reloads nothing, got {commands:?}"
+    );
+    assert!(
+        notification_bodies(&app).iter().any(|body| body == message),
+        "the partial delete is surfaced, got {:?}",
+        notification_bodies(&app)
+    );
+    assert_eq!(
+        marked_rows(&app),
+        vec![0],
+        "the marks survive a partial delete"
+    );
+    assert!(
+        matches!(active_relation_tab(&app).data, RelationLoad::Ready(_)),
+        "the page survives a partial delete"
+    );
+}
+
+/// S11: the browser tab's `d` delete keeps emitting its own bounded delete.
+#[test]
+fn s11_the_browser_delete_still_emits_one_bounded_document_delete() {
     let (mut app, profile_id, generation) = mongo_app();
     let documents = bike_documents();
     let mut tab = MongoBrowserTab::new(profile_id, mongo_namespace());
@@ -3257,99 +3624,143 @@ fn s7_the_browser_delete_still_emits_one_bounded_document_delete() {
     );
 }
 
-/// S8: a visual-mode range delete on a MongoDB relation refuses visibly and
-/// never leaves rows marked for a grid save that cannot happen.
-#[test]
-fn s8_a_visual_range_delete_is_refused_without_marking_rows() {
-    let (mut app, _request) = mongo_app_with_page(bike_documents());
-    let before = row_values(&app);
-
-    app.update(Action::RelationVisualLine);
-    active_relation_tab_mut(&mut app).grid.selected_row = 1;
-
-    let commands = app.update(Action::RelationDeleteSelected);
-
-    assert!(
-        commands.is_empty(),
-        "a visual range delete emits no command, got {commands:?}"
-    );
-    assert_eq!(
-        row_values(&app),
-        before,
-        "a refused range delete leaves the loaded page untouched"
-    );
-    assert!(
-        !has_pending_sql_save(&app),
-        "a refused range delete leaves no row marked for a SQL grid save"
-    );
-    assert!(
-        notification_bodies(&app)
-            .iter()
-            .any(|body| body.contains("deletes one document at a time")),
-        "the refusal names the supported delete, got {:?}",
-        notification_bodies(&app)
-    );
-
-    // The save that would follow a range delete stays a no-op instead of
-    // flushing a SQL mutation for a collection that has no primary key.
-    let commands = app.update(Action::RelationCommit);
-
-    assert!(
-        commands.is_empty(),
-        "a MongoDB relation never saves through the SQL grid path, got {commands:?}"
-    );
+/// A relation DDL for a table whose columns carry no primary key, which is what
+/// makes the SQL grid delete capability unavailable.
+fn keyless_sql_ddl(
+    connection: ConnectionIdentity,
+    relation_id: &CatalogId,
+    scope: lazydb::profile::CatalogScope,
+) -> RelationDdl {
+    let profile_id = connection.profile_id;
+    let [database, schema, object] = relation_id.native_path.as_slice() else {
+        panic!("the test relation ID has database, schema, and object segments");
+    };
+    let qualified = QualifiedName {
+        database: Some(database.clone()),
+        schema: Some(schema.clone()),
+        object: object.clone(),
+    };
+    let relation = CatalogEntry::relation(
+        relation_id.clone(),
+        CatalogId::new(
+            profile_id,
+            CatalogKind::Schema,
+            [database.as_str(), schema.as_str()],
+        ),
+        qualified.clone(),
+        "table",
+        OptionalMetadata::Unsupported,
+        true,
+    )
+    .expect("the table entry");
+    let entries = vec![
+        CatalogEntry::relation_child(
+            CatalogId::new(
+                profile_id,
+                CatalogKind::Column,
+                [database.as_str(), schema.as_str(), object.as_str(), "id"],
+            ),
+            relation_id.clone(),
+            QualifiedName {
+                object: "id".into(),
+                ..qualified.clone()
+            },
+            "integer",
+            OptionalMetadata::Unsupported,
+            CatalogMetadata::Column(ColumnMetadata::new(1, "integer", false)),
+        )
+        .expect("the id column"),
+        CatalogEntry::relation_child(
+            CatalogId::new(
+                profile_id,
+                CatalogKind::Column,
+                [database.as_str(), schema.as_str(), object.as_str(), "name"],
+            ),
+            relation_id.clone(),
+            QualifiedName {
+                object: "name".into(),
+                ..qualified
+            },
+            "text",
+            OptionalMetadata::Unsupported,
+            CatalogMetadata::Column(ColumnMetadata::new(2, "text", true)),
+        )
+        .expect("the name column"),
+    ];
+    let catalog_request = CatalogRequest {
+        key: CatalogRequestKey {
+            connection,
+            catalog_epoch: 0,
+            request_id: 0,
+            target: CatalogTarget::RelationChildren {
+                relation: relation_id.clone(),
+            },
+            cursor: None,
+        },
+        scope,
+        page_size: 100,
+    };
+    RelationDdl {
+        relation,
+        children: CatalogPage::new(&catalog_request, entries, CatalogCount::Exact(2), None)
+            .expect("the keyless children page"),
+        sql: format!("CREATE TABLE {object} (id integer, name text)"),
+        provenance: DdlProvenance::NativeCatalog,
+    }
 }
 
-/// S9: a MongoDB relation with dirty rows never reaches the SQL grid save.
+/// PRESERVE: a SQL table with no primary key still refuses the grid delete and
+/// marks nothing.
 ///
-/// `relation_save` returns before every guard for a collection, so the SQL
-/// keyless toast is unreachable even when rows were marked by an insert or a
-/// cell edit. The refusal is visible instead of being a silent no-op.
+/// The keyless guard gained a MongoDB bypass; a SQL table keeps the refusal it
+/// always had, because its delete really is a write by primary key.
 #[test]
-fn s9_a_mongodb_relation_with_dirty_rows_never_saves_through_the_grid() {
-    use lazydb::model::relation_edit::EditableRowState;
-
-    let (mut app, _request) = mongo_app_with_page(bike_documents());
-    let connection = match &active_relation_tab(&app).data {
-        RelationLoad::Ready(snapshot) => snapshot.attribution.connection,
-        other => panic!("the page must be ready, got {other:?}"),
+fn the_sql_keyless_delete_is_still_refused_without_marking_the_row() {
+    let (mut app, profile_id, table_id) = sql_app_with_table();
+    app.update(Action::ExplorerOpenSelected);
+    let generation = app.connection.generation;
+    let connection = ConnectionIdentity {
+        profile_id,
+        generation,
     };
-    activate_workspace_connection(&mut app, connection);
-    {
-        let edit = active_relation_tab_mut(&mut app)
-            .edit
-            .as_mut()
-            .expect("an edit session");
-        edit.rows[0].state = EditableRowState::Deleted;
-        edit.rows[1].state = EditableRowState::Updated {
-            changed_columns: [1usize].into_iter().collect(),
-        };
-    }
-    assert!(
-        has_pending_sql_save(&app),
-        "the test really marked rows for a SQL save"
+    let scope = lazydb::profile::CatalogScope::for_profile(
+        DatabaseKind::Postgres,
+        SQL_DATABASE,
+        Some(SQL_SCHEMA),
     );
+    let Some(WorkspaceTab::Relation(table)) = app.tabs.last_mut() else {
+        panic!("activating a sql table must open a relation tab");
+    };
+    table.edit = Some(RelationEditSession::from_rows(vec![vec![
+        CellValue::Integer(1),
+        CellValue::Text("old".into()),
+    ]]));
+    table.ddl = RelationLoad::Ready(lazydb::model::relation::OwnedSnapshot {
+        value: keyless_sql_ddl(connection, &table_id, scope.clone()),
+        attribution: lazydb::model::relation::SnapshotAttribution {
+            connection,
+            profile_id,
+            scope,
+        },
+    });
 
-    let commands = app.update(Action::RelationCommit);
+    let commands = app.update(Action::RelationDeleteCurrent);
 
     assert!(
-        !commands
-            .iter()
-            .any(|command| matches!(command, Command::RelationMutation { .. })),
-        "a MongoDB relation emits no SQL mutation, got {commands:?}"
+        commands.is_empty(),
+        "a keyless SQL table stages no grid delete, got {commands:?}"
     );
-    assert!(
-        !notification_bodies(&app)
-            .iter()
-            .any(|body| body.contains("without a primary key")),
-        "the SQL keyless toast is unreachable, got {:?}",
-        notification_bodies(&app)
+    assert_eq!(
+        marked_rows(&app),
+        Vec::<usize>::new(),
+        "the SQL refusal marks nothing"
     );
+    assert!(!has_dirty_rows(&app));
     assert!(
         notification_bodies(&app)
             .iter()
-            .any(|body| body.contains("one document at a time")),
-        "the refused save is visible, got {:?}",
+            .any(|body| body.contains("Existing rows require a primary key for grid deletes")),
+        "the SQL keyless refusal is unchanged, got {:?}",
         notification_bodies(&app)
     );
 }
@@ -3405,12 +3816,10 @@ fn the_sql_delete_key_still_marks_the_row_for_a_save() {
             ),
         },
     });
-    table.edit = Some(
-        lazydb::model::relation_edit::RelationEditSession::from_rows(vec![vec![
-            CellValue::Integer(1),
-            CellValue::Text("old".into()),
-        ]]),
-    );
+    table.edit = Some(RelationEditSession::from_rows(vec![vec![
+        CellValue::Integer(1),
+        CellValue::Text("old".into()),
+    ]]));
 
     let commands = app.update(Action::RelationDeleteCurrent);
 
@@ -3419,7 +3828,12 @@ fn the_sql_delete_key_still_marks_the_row_for_a_save() {
         "a SQL row is deleted through the grid, never through a document delete, got {commands:?}"
     );
     assert!(
-        has_pending_sql_save(&app),
+        has_dirty_rows(&app),
         "the SQL delete key still marks the row for a save"
+    );
+    assert_eq!(
+        marked_rows(&app),
+        vec![0],
+        "the SQL row is marked exactly like a MongoDB row"
     );
 }
