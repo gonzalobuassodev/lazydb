@@ -993,19 +993,19 @@ pub enum Action {
         id: mongodb::bson::Bson,
         message: String,
     },
-    /// Reports that the document under a MongoDB relation tab's cursor was
-    /// deleted.
+    /// Reports that the documents a MongoDB relation tab marked for deletion
+    /// were deleted.
     MongoRelationDocumentDeleted {
         tab_id: Uuid,
         tab_generation: u64,
-        id: mongodb::bson::Bson,
+        ids: Vec<mongodb::bson::Bson>,
     },
-    /// Reports why the document under a MongoDB relation tab's cursor was not
-    /// deleted. The grid keeps the rows it already had.
+    /// Reports why the documents a MongoDB relation tab marked for deletion
+    /// were not deleted. The grid keeps the marks and the rows it already had.
     MongoRelationDocumentDeleteFailed {
         tab_id: Uuid,
         tab_generation: u64,
-        id: mongodb::bson::Bson,
+        ids: Vec<mongodb::bson::Bson>,
         message: String,
     },
     RelationTransactionStarted {
@@ -1908,14 +1908,14 @@ pub enum Command {
         id: mongodb::bson::Bson,
         replacement: mongodb::bson::Document,
     },
-    /// Deletes the one document the cursor of a MongoDB relation tab is on,
-    /// bounded to the `_id` its grid row was loaded with.
-    DeleteMongoRelationDocument {
+    /// Deletes every document a MongoDB relation tab marked for deletion,
+    /// bounded to the `_id` each marked grid row was loaded with.
+    DeleteMongoRelationDocuments {
         tab_id: Uuid,
         tab_generation: u64,
         connection: ConnectionIdentity,
         namespace: crate::db::mongodb::types::MongoNamespace,
-        id: mongodb::bson::Bson,
+        ids: Vec<mongodb::bson::Bson>,
     },
     RunMongoConsole {
         tab_id: Uuid,
